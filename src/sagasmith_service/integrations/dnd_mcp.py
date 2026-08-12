@@ -10,6 +10,10 @@ from mcp.client.streamable_http import streamable_http_client
 
 
 class DndRuntime(Protocol):
+    async def get_campaign(
+        self, *, campaign_id: str, principal_id: str
+    ) -> dict[str, Any]: ...
+
     async def create_campaign(
         self,
         *,
@@ -97,6 +101,16 @@ class StreamableHttpDndRuntime:
 
     async def create_campaign(self, **arguments: Any) -> dict[str, Any]:
         return await self._call("campaign_create", arguments)
+
+    async def get_campaign(self, **arguments: Any) -> dict[str, Any]:
+        return await self._call(
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": arguments["campaign_id"]},
+                "principal_id": arguments["principal_id"],
+            },
+        )
 
     async def grant_campaign_access(self, **arguments: Any) -> dict[str, Any]:
         return await self._call(

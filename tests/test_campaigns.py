@@ -33,6 +33,11 @@ def test_campaign_join_and_actor_binding_use_authoritative_runtime(
     assert created.status_code == 201, created.text
     assert created.json()["id"] == "campaign-1"
     assert dnd_runtime.calls[0][1]["principal_id"] == f"user:{owner['id']}"
+    runtime = client.get("/api/campaigns/campaign-1/runtime")
+    assert runtime.status_code == 200
+    assert runtime.json()["result"]["effective_game_phase"] == "play"
+    runtime_call = next(call for call in dnd_runtime.calls if call[0] == "campaign_get")
+    assert runtime_call[1]["principal_id"] == f"user:{owner['id']}"
 
     player = register(client, "player@example.com", "Player")
     requested = client.post(

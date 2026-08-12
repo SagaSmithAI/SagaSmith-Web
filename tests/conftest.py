@@ -16,6 +16,17 @@ class FakeDndRuntime:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.fail_grant = False
 
+    async def get_campaign(self, **arguments: Any) -> dict[str, Any]:
+        self.calls.append(("campaign_get", arguments))
+        return {
+            "action": "get",
+            "result": {
+                "id": arguments["campaign_id"],
+                "revision": 7,
+                "effective_game_phase": "play",
+            },
+        }
+
     async def create_campaign(self, **arguments: Any) -> dict[str, Any]:
         self.calls.append(("campaign_create", arguments))
         return {"id": "campaign-1", "revision": 1}

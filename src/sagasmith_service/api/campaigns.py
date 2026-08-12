@@ -133,6 +133,22 @@ def list_campaigns(user: CurrentUser, session: DbSession) -> list[CampaignView]:
     return [CampaignView.model_validate(item) for item in items]
 
 
+@router.get("/{campaign_id}/runtime")
+async def campaign_runtime(
+    campaign_id: str,
+    request: Request,
+    user: CurrentUser,
+    session: DbSession,
+) -> dict[str, Any]:
+    _membership(session, campaign_id, user.id)
+    try:
+        return await _runtime(request).get_campaign(
+            campaign_id=campaign_id, principal_id=user.principal_id
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+
 @router.get("/{campaign_id}/members", response_model=list[MembershipView])
 def list_members(
     campaign_id: str, user: CurrentUser, session: DbSession
