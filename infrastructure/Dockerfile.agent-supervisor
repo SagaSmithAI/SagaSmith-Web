@@ -1,12 +1,18 @@
 FROM python:3.12-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 \
+    NANOBOT_SKIP_WEBUI_BUILD=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates git bubblewrap openssh-client libmagic1 && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY --from=agent_source . ./SagaSmith-agent
-COPY . ./SagaSmith-service
+RUN mkdir ./SagaSmith-service
+COPY pyproject.toml README.md LICENSE ./SagaSmith-service/
+RUN mkdir -p ./SagaSmith-service/src/sagasmith_service
+COPY src/sagasmith_service/__init__.py ./SagaSmith-service/src/sagasmith_service/
 RUN pip install "/build/SagaSmith-agent[api]" /build/SagaSmith-service
+COPY src ./SagaSmith-service/src
+RUN pip install --no-deps /build/SagaSmith-service
 RUN useradd -m -u 10002 supervisor && mkdir -p /workspaces /config && \
     chown -R supervisor:supervisor /workspaces /config
 USER supervisor

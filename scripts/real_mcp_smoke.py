@@ -32,12 +32,38 @@ async def smoke(url: str) -> None:
     result = queried.get("result", queried)
     if str(result.get("id") or "") != campaign_id:
         raise RuntimeError(f"campaign_query did not return {campaign_id}: {queried}")
+    removed_principal = f"user:service-smoke-removed:{run_id}"
+    await runtime.grant_campaign_access(
+        campaign_id=campaign_id,
+        principal_id=removed_principal,
+        role="player",
+        by_principal_id="user:service-smoke",
+    )
+    revoked = await runtime.revoke_campaign_access(
+        campaign_id=campaign_id,
+        principal_id=removed_principal,
+        by_principal_id="user:service-smoke",
+    )
+    revoked_result = revoked.get("result", revoked)
+    if revoked_result.get("revoked") is not True:
+        raise RuntimeError(f"access_revoke did not revoke the player: {revoked}")
+    try:
+        await runtime.get_campaign(
+            campaign_id=campaign_id,
+            principal_id=removed_principal,
+        )
+    except RuntimeError as exc:
+        if "cannot access campaign" not in str(exc):
+            raise
+    else:
+        raise RuntimeError("revoked player retained authoritative campaign access")
     print(
         {
             "status": "ok",
             "campaign_id": campaign_id,
             "phase": result.get("effective_game_phase"),
             "revision": result.get("revision"),
+            "revocation": "enforced",
         }
     )
 

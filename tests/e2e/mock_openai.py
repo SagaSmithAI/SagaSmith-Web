@@ -1,0 +1,203 @@
+from __future__ import annotations
+
+import json
+import re
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def _json(self, status: int, payload: dict) -> None:
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path.rstrip("/") == "/v1/models":
+            self._json(
+                200,
+                {
+                    "object": "list",
+                    "data": [{"id": "sagasmith-e2e", "object": "model"}],
+                },
+            )
+            return
+        self._json(404, {"error": {"message": "not found"}})
+
+    def do_POST(self) -> None:  # noqa: N802
+        if self.path.rstrip("/") != "/v1/chat/completions":
+            self._json(404, {"error": {"message": "not found"}})
+            return
+        length = int(self.headers.get("Content-Length", "0"))
+        request = json.loads(self.rfile.read(length) or b"{}")
+        messages = request.get("messages") or []
+        context = next(
+            (
+                str(message.get("content", ""))
+                for message in messages
+                if isinstance(message, dict)
+                and "[SagaSmith Service authenticated context]"
+                in str(message.get("content", ""))
+            ),
+            "",
+        )
+        authenticated = bool(context)
+        campaign_match = re.search(r"^campaign_id=(.+)$", context, re.MULTILINE)
+        principal_match = re.search(r"^principal_id=(.+)$", context, re.MULTILINE)
+        tool_names = {
+            str((tool.get("function") or tool).get("name") or "")
+            for tool in request.get("tools") or []
+            if isinstance(tool, dict)
+        }
+        tool_messages = [
+            message
+            for message in messages
+            if isinstance(message, dict) and message.get("role") == "tool"
+        ]
+        exposure_name = next(
+            (name for name in tool_names if name.endswith("_exposure")), ""
+        )
+        character_query_name = next(
+            (name for name in tool_names if name.endswith("_character_query")), ""
+        )
+        if (
+            authenticated
+            and campaign_match
+            and principal_match
+            and not tool_messages
+        ):
+            self._tool_call(
+                exposure_name,
+                {
+                    "action": "open",
+                    "campaign_id": campaign_match.group(1),
+                    "principal_id": principal_match.group(1),
+                },
+                "exposure-open",
+            )
+            return
+        if authenticated and campaign_match and principal_match and character_query_name:
+            if not any(
+                str(message.get("name", "")).endswith("_character_query")
+                for message in tool_messages
+            ):
+                self._tool_call(
+                    character_query_name,
+                    {
+                        "view": "list",
+                        "payload": {"campaign_id": campaign_match.group(1)},
+                        "principal_id": principal_match.group(1),
+                    },
+                    "character-query",
+                )
+                return
+        if authenticated and campaign_match and principal_match and exposure_name:
+            exposure_calls = sum(
+                str(message.get("name", "")).endswith("_exposure")
+                for message in tool_messages
+            )
+            if exposure_calls == 1:
+                self._tool_call(
+                    exposure_name,
+                    {
+                        "action": "search",
+                        "campaign_id": campaign_match.group(1),
+                        "principal_id": principal_match.group(1),
+                        "query": "character_query",
+                    },
+                    "exposure-search",
+                )
+                return
+            if exposure_calls == 2:
+                self._tool_call(
+                    exposure_name,
+                    {
+                        "action": "set",
+                        "campaign_id": campaign_match.group(1),
+                        "principal_id": principal_match.group(1),
+                        "add_tool_ids": ["character_query"],
+                    },
+                    "exposure-set",
+                )
+                return
+        native_call_completed = any(
+            str(message.get("name", "")).endswith("_character_query")
+            for message in tool_messages
+        )
+        content = (
+            "SagaSmith container E2E dynamic MCP call completed."
+            if authenticated and native_call_completed
+            else "SagaSmith mock provider reached."
+        )
+        self._json(
+            200,
+            {
+                "id": "chatcmpl-sagasmith-e2e",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": "sagasmith-e2e",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": content},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 17,
+                    "completion_tokens": 7,
+                    "total_tokens": 24,
+                },
+            },
+        )
+
+    def _tool_call(self, name: str, arguments: dict, call_id: str) -> None:
+        if not name:
+            self._json(400, {"error": {"message": "required MCP tool was not exposed"}})
+            return
+        self._json(
+            200,
+            {
+                "id": f"chatcmpl-{call_id}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": "sagasmith-e2e",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": f"call-{call_id}",
+                                    "type": "function",
+                                    "function": {
+                                        "name": name,
+                                        "arguments": json.dumps(arguments),
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 5,
+                    "completion_tokens": 1,
+                    "total_tokens": 6,
+                },
+            },
+        )
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
+if __name__ == "__main__":
+    ThreadingHTTPServer(("0.0.0.0", 18080), Handler).serve_forever()

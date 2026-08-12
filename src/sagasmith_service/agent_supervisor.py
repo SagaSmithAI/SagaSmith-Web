@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
+import json
 import os
+import socket
+import tempfile
 import time
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
@@ -17,7 +21,7 @@ from pydantic import BaseModel
 
 class CompletionRequest(BaseModel):
     messages: list[dict[str, Any]]
-    model: str = "nanobot"
+    principal_id: str
     stream: bool = False
 
 
@@ -27,6 +31,30 @@ class Worker:
     port: int
     process: asyncio.subprocess.Process
     last_used: float
+    runtime_config_path: Path
+
+
+def trusted_host_cidrs(hosts: str) -> list[str]:
+    """Resolve explicitly trusted internal MCP hostnames to exact host CIDRs."""
+    networks: set[str] = set()
+    for host in (item.strip() for item in hosts.split(",")):
+        if not host:
+            continue
+        for info in socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM):
+            address = ipaddress.ip_address(info[4][0])
+            prefix = 32 if address.version == 4 else 128
+            networks.add(f"{address}/{prefix}")
+    return sorted(networks)
+
+
+def conversation_matches_principal(conversation_key: str, principal_id: str) -> bool:
+    """Bind the trusted service principal to its isolated conversation worker."""
+    parts = conversation_key.split(":")
+    return (
+        len(parts) == 3
+        and all(parts)
+        and principal_id == f"user:{parts[1]}"
+    )
 
 
 class WorkerManager:
@@ -68,14 +96,16 @@ class WorkerManager:
         self.workers.clear()
 
     async def _stop(self, worker: Worker) -> None:
-        if worker.process.returncode is not None:
-            return
-        worker.process.terminate()
         try:
-            await asyncio.wait_for(worker.process.wait(), timeout=10)
-        except TimeoutError:
-            worker.process.kill()
-            await worker.process.wait()
+            if worker.process.returncode is None:
+                worker.process.terminate()
+                try:
+                    await asyncio.wait_for(worker.process.wait(), timeout=10)
+                except TimeoutError:
+                    worker.process.kill()
+                    await worker.process.wait()
+        finally:
+            worker.runtime_config_path.unlink(missing_ok=True)
 
     async def _cleanup_loop(self) -> None:
         try:
@@ -100,9 +130,20 @@ class WorkerManager:
         )
         workspace = self._workspace(key)
         workspace.mkdir(parents=True, exist_ok=True)
+        with Path(self.config_path).open(encoding="utf-8") as source:
+            runtime_config = json.load(source)
+        tools = runtime_config.setdefault("tools", {})
+        configured = [str(item) for item in tools.get("ssrfWhitelist") or []]
+        trusted = trusted_host_cidrs(os.environ.get("SAGASMITH_AGENT_TRUSTED_MCP_HOSTS", ""))
+        tools["ssrfWhitelist"] = list(dict.fromkeys([*configured, *trusted]))
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", prefix="sagasmith-agent-", suffix=".json", delete=False
+        ) as temporary:
+            json.dump(runtime_config, temporary)
+            runtime_config_path = Path(temporary.name)
+        runtime_config_path.chmod(0o600)
         process = await asyncio.create_subprocess_exec(
-            "nanobot",
-            "serve",
+            "sagasmith-hosted-agent-worker",
             "--host",
             "127.0.0.1",
             "--port",
@@ -110,9 +151,15 @@ class WorkerManager:
             "--workspace",
             str(workspace),
             "--config",
-            self.config_path,
+            str(runtime_config_path),
         )
-        worker = Worker(key=key, port=port, process=process, last_used=time.monotonic())
+        worker = Worker(
+            key=key,
+            port=port,
+            process=process,
+            last_used=time.monotonic(),
+            runtime_config_path=runtime_config_path,
+        )
         headers = {"Authorization": f"Bearer {self.worker_api_key}"}
         async with httpx.AsyncClient(headers=headers, timeout=1) as client:
             for _ in range(120):
@@ -139,6 +186,10 @@ class WorkerManager:
 
     async def complete(self, key: str, payload: dict[str, Any]) -> dict[str, Any]:
         worker = await self.get(key)
+        # Each isolated Nanobot worker has exactly one configured model.  Omitting
+        # the OpenAI-compatible selector delegates to that authoritative config
+        # instead of coupling Service to a duplicated model name.
+        payload.pop("model", None)
         headers = {"Authorization": f"Bearer {self.worker_api_key}"}
         timeout = httpx.Timeout(240, connect=5)
         async with httpx.AsyncClient(headers=headers, timeout=timeout) as client:
@@ -180,6 +231,11 @@ def create_supervisor_app(manager: WorkerManager, internal_key: str) -> FastAPI:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid internal credential")
         if len(conversation_key) > 300 or not conversation_key:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid conversation key")
+        if not conversation_matches_principal(conversation_key, payload.principal_id):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "conversation principal does not match the authenticated service context",
+            )
         try:
             return await manager.complete(conversation_key, payload.model_dump())
         except RuntimeError as exc:

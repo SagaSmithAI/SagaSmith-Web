@@ -12,9 +12,11 @@ COPY alembic.ini ./
 COPY migrations ./migrations
 COPY docker-entrypoint.sh /usr/local/bin/sagasmith-entrypoint
 RUN uv pip install --system .
-RUN chmod 755 /usr/local/bin/sagasmith-entrypoint
+RUN mkdir -p /srv/sagasmith/exchange && \
+    chown -R 10001:10001 /srv/sagasmith && \
+    chmod 755 /usr/local/bin/sagasmith-entrypoint
 
-USER 65532:65532
+USER 10001:10001
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/sagasmith-entrypoint"]
 CMD ["sagasmith-service"]

@@ -7,6 +7,8 @@ services:
       - path: .env
         required: false
     command: ["sagasmith-service"]
+    environment:
+      SAGASMITH_EXCHANGE_DIR: /srv/sagasmith/exchange
     expose: ["8080"]
     volumes:
       - exchange-data:/srv/sagasmith/exchange
@@ -18,9 +20,9 @@ services:
       minio:
         condition: service_healthy
       dnd-mcp:
-        condition: service_started
+        condition: service_healthy
       agent:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
 
   dnd-mcp:
@@ -37,6 +39,7 @@ services:
       SAGASMITH_DND_MCP_HTTP_HOST: 0.0.0.0
       SAGASMITH_DND_MCP_HTTP_PORT: 8767
       SAGASMITH_DND_MCP_HOME: /state
+      SAGASMITH_DND_MCP_DENSE_ENABLED: "0"
       SAGASMITH_DND_SKILLS_DIR: /build/SagaSmith-dnd-skills
       SAGASMITH_DND_MCP_RULE_IMPORT_ROOTS: /srv/sagasmith/exchange
       SAGASMITH_DND_MCP_MODULE_IMPORT_ROOTS: /srv/sagasmith/exchange
@@ -44,6 +47,11 @@ services:
       - dnd-state:/state
       - exchange-data:/srv/sagasmith/exchange
     expose: ["8767"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8767), 2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
     restart: unless-stopped
 
   agent:
@@ -57,11 +65,19 @@ services:
       SAGASMITH_AGENT_INTERNAL_KEY: ${SAGASMITH_AGENT_INTERNAL_KEY:?set SAGASMITH_AGENT_INTERNAL_KEY}
       SAGASMITH_AGENT_CONFIG: /config/agent-config.json
       SAGASMITH_AGENT_WORKSPACES: /workspaces
+      SAGASMITH_AGENT_TRUSTED_MCP_HOSTS: dnd-mcp
     volumes:
       - ./secrets/agent-config.json:/config/agent-config.json:ro
       - agent-workspace:/workspaces
     expose: ["8910"]
-    depends_on: ["dnd-mcp"]
+    depends_on:
+      dnd-mcp:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8910/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
     restart: unless-stopped
 
   proxy:

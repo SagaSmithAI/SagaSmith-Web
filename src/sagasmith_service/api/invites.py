@@ -107,6 +107,15 @@ def revoke_invite(
     if item is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "invite not found")
     item.revoked_at = now_utc()
+    session.add(
+        AuditEvent(
+            actor_user_id=user.id,
+            action="campaign.invite.revoke",
+            subject_type="campaign_invite",
+            subject_id=item.id,
+            details={"campaign_id": campaign_id},
+        )
+    )
     session.commit()
 
 

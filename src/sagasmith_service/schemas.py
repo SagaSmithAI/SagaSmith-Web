@@ -61,6 +61,10 @@ class MembershipView(ApiModel):
     status: str
 
 
+class MembershipRoleUpdate(ApiModel):
+    role: Literal["dm", "player"]
+
+
 class JoinRequestCreate(ApiModel):
     message: str = Field(default="", max_length=500)
 
@@ -130,6 +134,18 @@ class AgentRunView(ApiModel):
     status: str
 
 
+class UsageLedgerView(ApiModel):
+    id: str
+    campaign_id: str | None
+    metric: str
+    quantity: Decimal
+    unit: str
+    provider: str | None
+    model: str | None
+    request_id: str | None
+    occurred_at: datetime
+
+
 class PrivatePackView(ApiModel):
     id: str
     pack_id: str
@@ -189,3 +205,14 @@ class QuotaGrantView(ApiModel):
     metric: str
     quantity: Decimal
     source: str
+
+
+class AuditEventView(ApiModel):
+    id: str
+    actor_user_id: str | None
+    action: str
+    subject_type: str
+    subject_id: str
+    request_id: str | None
+    details: dict
+    created_at: datetime

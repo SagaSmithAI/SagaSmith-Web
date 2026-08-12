@@ -9,14 +9,19 @@
 | dynamic tools | real host lookup; Lobby/Play/Combat list changes; `tools/list_changed`; next legal native call |
 | phases | Lobby -> Play -> Combat -> Play; grid and Agent spatial modes; chase/combat exclusivity |
 | continuity | restart/resume; snapshot/branch restore; undo/redo; exposure immediately recoverable |
-| Pack | private upload, byte limit, checksum, ownership isolation, MCP validation/import, immutable version |
+| Pack | current `.sagasmith-pack` only; ZIP safety, byte/uncompressed limits, checksum, ownership isolation, MCP validation/import/activation, immutable version |
 | quota | no grant, concurrent reservations, settle/release, provider retry, exact usage ledger, admin grant audit |
-| recovery | fresh migration; encrypted backup; checksum validation; isolated full restore; reconciliation |
+| recovery | fresh migration; encrypted destination; checksum validation; isolated full restore; restored object re-import through MCP; reconciliation |
 | security | principal spoof attempt, IDOR, CSRF, rate limits, malicious archive, path traversal, secret scan |
 
 Unit/API coverage in this repository is the fast gate. The dynamic-tool, phase, restore and native
 call rows require the real hosted Agent plus D&D MCP and cannot be replaced with fabricated tool
 results.
+
+The container acceptance provider is deterministic but the host is real: it opens exposure as a
+player, searches and selects `character_query`, observes `tools/list_changed`, and calls the newly
+registered native tool. The same run imports and activates a structurally valid, synthetic,
+Agent-finalized D&D module Pack through MinIO and the public MCP facade.
 
 With an isolated D&D MCP running, execute
 `uv run python scripts/real_mcp_smoke.py --url http://127.0.0.1:8767/mcp` to prove campaign creation

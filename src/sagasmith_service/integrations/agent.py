@@ -59,8 +59,8 @@ class HttpAgentRuntime:
                 f"{self.base_url}/v1/conversations/{quote(session_id, safe='')}/completions",
                 headers=headers,
                 json={
-                    "model": "nanobot",
                     "messages": [{"role": "user", "content": authenticated_context}],
+                    "principal_id": context["principal_id"],
                     "stream": False,
                 },
             )

@@ -116,6 +116,14 @@ def router(settings: Settings) -> APIRouter:
             )
             if active is not None:
                 active.revoked_at = now_utc()
+                session.add(
+                    AuditEvent(
+                        actor_user_id=active.user_id,
+                        action="account.logout",
+                        subject_type="user_session",
+                        subject_id=active.id,
+                    )
+                )
                 session.commit()
         response.delete_cookie(SESSION_COOKIE, path="/")
 

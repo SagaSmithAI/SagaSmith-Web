@@ -29,6 +29,13 @@ Only ports 80/443 are public. Service starts with `alembic upgrade head`. For a 
 `backup.bat` creates a timestamped folder containing a PostgreSQL custom dump and compressed copies
 of private object storage, D&D state and Agent workspaces, plus SHA-256 checksums. Copy the completed
 folder to encrypted off-host storage. Redis is a queue/cache and is not a recovery authority.
+The script stops all application writers for a consistent cut, records the Service commit and dirty
+state, verifies the finished manifest, checks every native Docker/Git exit code, and only then
+restarts healthy services. The destination filesystem itself must provide encryption at rest; the
+backup folder is deliberately portable and is not encrypted by the script. The manifest records
+the Compose inputs and exact container image IDs. Secrets and deployment configuration are not
+copied into the data backup; escrow them separately in a secrets manager with its own recovery
+procedure.
 
 Recommended policy: daily backups retained 30 days, weekly retained 12 weeks, monthly retained one
 year. Object versioning is additional protection, not a substitute for a separate backup.
@@ -45,5 +52,9 @@ year. Object versioning is additional protection, not a substitute for a separat
 7. Verify Lobby -> Play -> Combat -> Play, snapshot/branch restore, undo/redo, quota idempotency and
    private Pack access before reopening traffic.
 
-Never test destructive restore commands against the live volumes. Quarterly drills should record
-RPO, RTO, release hashes, backup ids and discrepancies.
+`restore.bat` refuses the live project name, requires `RESTORE-<project>` confirmation, requires a
+fresh project with no existing volumes, verifies hashes before extraction, and never starts the
+proxy. The automated smoke waits for external readiness, logs in, checks control-plane/audit state,
+reads authoritative campaign state, then downloads a restored private Pack from object storage and
+imports it through the restored D&D MCP. Never test destructive restore commands against the live
+volumes. Quarterly drills should record RPO, RTO, release hashes, backup ids and discrepancies.

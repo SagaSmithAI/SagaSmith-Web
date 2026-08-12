@@ -8,6 +8,12 @@ from typing import BinaryIO
 
 import boto3
 
+from sagasmith_service.pack_archive import ARCHIVE_EXTENSION
+
+
+class PrivateStorageError(RuntimeError):
+    """A private object cannot be materialized at the runtime boundary."""
+
 
 class LocalPrivateStorage:
     """Private filesystem backend for development and single-server deployments."""
@@ -39,11 +45,15 @@ class LocalPrivateStorage:
     def materialize_for_runtime(self, key: str, artifact_id: str) -> Path:
         source = (self.root / key).resolve()
         if self.root not in source.parents or not source.is_file():
-            raise FileNotFoundError(key)
-        destination = (self.exchange_root / f"{artifact_id}.sagapack").resolve()
+            raise PrivateStorageError("private Pack object is unavailable")
+        destination = (self.exchange_root / f"{artifact_id}{ARCHIVE_EXTENSION}").resolve()
         if self.exchange_root not in destination.parents:
             raise ValueError("invalid exchange path")
-        shutil.copyfile(source, destination)
+        try:
+            shutil.copyfile(source, destination)
+        except OSError as exc:
+            destination.unlink(missing_ok=True)
+            raise PrivateStorageError("private Pack object could not be materialized") from exc
         return destination
 
 
@@ -101,8 +111,12 @@ class S3PrivateStorage:
                 Path(temporary_name).unlink(missing_ok=True)
 
     def materialize_for_runtime(self, key: str, artifact_id: str) -> Path:
-        destination = (self.exchange_root / f"{artifact_id}.sagapack").resolve()
+        destination = (self.exchange_root / f"{artifact_id}{ARCHIVE_EXTENSION}").resolve()
         if self.exchange_root not in destination.parents:
             raise ValueError("invalid exchange path")
-        self.client.download_file(self.bucket, key, str(destination))
+        try:
+            self.client.download_file(self.bucket, key, str(destination))
+        except Exception as exc:
+            destination.unlink(missing_ok=True)
+            raise PrivateStorageError("private Pack object could not be materialized") from exc
         return destination

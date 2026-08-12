@@ -1,10 +1,17 @@
 import asyncio
+import json
+import socket
 from pathlib import Path
 from typing import Any
 
 from fastapi.testclient import TestClient
 
-from sagasmith_service.agent_supervisor import WorkerManager, create_supervisor_app
+from sagasmith_service.agent_supervisor import (
+    WorkerManager,
+    conversation_matches_principal,
+    create_supervisor_app,
+    trusted_host_cidrs,
+)
 
 
 class FakeManager:
@@ -34,16 +41,19 @@ def test_supervisor_authenticates_and_routes_by_conversation() -> None:
         assert manager.started is True
         assert client.get("/health").status_code == 200
         assert client.post(
-            "/v1/conversations/campaign:user:conversation/completions",
-            json={"messages": []},
+            "/v1/conversations/campaign:test-user:conversation/completions",
+            json={"messages": [], "principal_id": "user:test-user"},
         ).status_code == 401
         response = client.post(
-            "/v1/conversations/campaign:user:conversation/completions",
+            "/v1/conversations/campaign:test-user:conversation/completions",
             headers={"Authorization": "Bearer internal-secret"},
-            json={"messages": [{"role": "user", "content": "hello"}]},
+            json={
+                "messages": [{"role": "user", "content": "hello"}],
+                "principal_id": "user:test-user",
+            },
         )
         assert response.status_code == 200
-        assert manager.calls[0][0] == "campaign:user:conversation"
+        assert manager.calls[0][0] == "campaign:test-user:conversation"
         assert manager.calls[0][1]["stream"] is False
     assert manager.closed is True
 
@@ -55,11 +65,35 @@ def test_supervisor_maps_worker_failure() -> None:
         create_supervisor_app(manager, "internal-secret")  # type: ignore[arg-type]
     ) as client:
         response = client.post(
-            "/v1/conversations/conversation/completions",
+            "/v1/conversations/campaign:test-user:conversation/completions",
             headers={"Authorization": "Bearer internal-secret"},
-            json={"messages": []},
+            json={"messages": [], "principal_id": "user:test-user"},
         )
     assert response.status_code == 502
+
+
+def test_supervisor_rejects_principal_conversation_mismatch() -> None:
+    manager = FakeManager()
+    with TestClient(
+        create_supervisor_app(manager, "internal-secret")  # type: ignore[arg-type]
+    ) as client:
+        response = client.post(
+            "/v1/conversations/campaign:other-user:conversation/completions",
+            headers={"Authorization": "Bearer internal-secret"},
+            json={"messages": [], "principal_id": "user:test-user"},
+        )
+    assert response.status_code == 403
+    assert manager.calls == []
+
+
+def test_conversation_principal_binding_requires_canonical_key() -> None:
+    assert conversation_matches_principal(
+        "campaign-id:user-id:conversation-id", "user:user-id"
+    )
+    assert not conversation_matches_principal("campaign-id:conversation-id", "user:user-id")
+    assert not conversation_matches_principal(
+        "campaign-id:user-id:conversation-id", "user:other-id"
+    )
 
 
 def test_worker_manager_isolates_and_reuses_conversation_processes(
@@ -102,6 +136,7 @@ def test_worker_manager_isolates_and_reuses_conversation_processes(
 
         async def post(self, _url: str, json: dict[str, Any]) -> FakeResponse:
             assert json["stream"] is False
+            assert "model" not in json
             return FakeResponse()
 
     processes: list[FakeProcess] = []
@@ -119,10 +154,14 @@ def test_worker_manager_isolates_and_reuses_conversation_processes(
         worker_api_key="secret",
         idle_seconds=3600,
     )
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
 
     async def scenario() -> None:
         await manager.start()
-        first = await manager.complete("campaign-a:user-a:conversation-a", {"messages": []})
+        first = await manager.complete(
+            "campaign-a:user-a:conversation-a",
+            {"messages": [], "model": "untrusted-placeholder"},
+        )
         repeated = await manager.complete("campaign-a:user-a:conversation-a", {"messages": []})
         second = await manager.complete("campaign-b:user-b:conversation-b", {"messages": []})
         assert first == repeated == second
@@ -135,3 +174,16 @@ def test_worker_manager_isolates_and_reuses_conversation_processes(
 
     asyncio.run(scenario())
     assert all(process.terminated for process in processes)
+
+
+def test_worker_runtime_config_uses_exact_trusted_host_cidrs(monkeypatch, tmp_path: Path) -> None:
+    def fake_getaddrinfo(host: str, *_args):
+        assert host == "dnd-mcp"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("172.30.0.8", 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    assert trusted_host_cidrs("dnd-mcp,dnd-mcp") == ["172.30.0.8/32"]
+
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"tools": {"ssrfWhitelist": ["127.0.0.1/32"]}}))
+    assert json.loads(config.read_text())["tools"]["ssrfWhitelist"] == ["127.0.0.1/32"]

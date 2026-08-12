@@ -41,9 +41,26 @@ class FakeDndRuntime:
         self.calls.append(("actor_access", arguments))
         return {"scope": "actor", "result": {"actor_id": arguments["actor_id"]}}
 
+    async def revoke_campaign_access(self, **arguments: Any) -> dict[str, Any]:
+        self.calls.append(("campaign_access_revoke", arguments))
+        return {
+            "scope": "campaign",
+            "result": {
+                "campaign_id": arguments["campaign_id"],
+                "principal_id": arguments["principal_id"],
+                "previous_role": "player",
+                "revoked_actor_grants": 1,
+                "revoked": True,
+            },
+        }
+
     async def import_content_pack(self, **arguments: Any) -> dict[str, Any]:
         self.calls.append(("content_pack_import", arguments))
         return {"action": "import", "result": {"module_id": "module-1"}}
+
+    async def activate_content_pack(self, **arguments: Any) -> dict[str, Any]:
+        self.calls.append(("content_pack_activate", arguments))
+        return {"action": "activate", "result": {"active": True}}
 
 
 class FakeAgentRuntime:
@@ -84,7 +101,9 @@ def client(
         session_secret="test-session-secret-at-least-thirty-two-characters",
         private_storage_dir=str(tmp_path / "private"),
         exchange_dir=str(tmp_path / "exchange"),
+        public_origin="http://testserver",
     )
     app = create_app(settings, make_engine("sqlite://"), dnd_runtime, agent_runtime)
     with TestClient(app) as value:
+        value.headers["Origin"] = "http://testserver"
         yield value

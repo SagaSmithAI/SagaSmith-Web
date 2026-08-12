@@ -9,6 +9,7 @@ from sagasmith_service.api.dependencies import CurrentUser, DbSession
 from sagasmith_service.integrations.dnd_mcp import DndRuntime
 from sagasmith_service.models import (
     ActorBindingProjection,
+    AgentConversation,
     AuditEvent,
     CampaignMembershipProjection,
     CampaignProjection,
@@ -24,6 +25,7 @@ from sagasmith_service.schemas import (
     JoinDecisionRequest,
     JoinRequestCreate,
     JoinRequestView,
+    MembershipRoleUpdate,
     MembershipView,
 )
 
@@ -171,6 +173,152 @@ def list_members(
         )
         for member, member_user in rows
     ]
+
+
+@router.patch("/{campaign_id}/members/{member_user_id}/role", response_model=MembershipView)
+async def change_member_role(
+    campaign_id: str,
+    member_user_id: str,
+    payload: MembershipRoleUpdate,
+    request: Request,
+    user: CurrentUser,
+    session: DbSession,
+) -> MembershipView:
+    reviewer = _membership(session, campaign_id, user.id)
+    if reviewer.role != "owner":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "campaign owner required")
+    target = session.scalar(
+        select(CampaignMembershipProjection)
+        .where(
+            CampaignMembershipProjection.campaign_id == campaign_id,
+            CampaignMembershipProjection.user_id == member_user_id,
+            CampaignMembershipProjection.status == "active",
+        )
+        .with_for_update()
+    )
+    if target is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "campaign member not found")
+    if target.role == "owner":
+        raise HTTPException(status.HTTP_409_CONFLICT, "campaign owner role cannot be changed")
+    target_user = session.get(User, member_user_id)
+    if target_user is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "campaign member no longer exists")
+    if target.role != payload.role:
+        try:
+            receipt = await _runtime(request).grant_campaign_access(
+                campaign_id=campaign_id,
+                principal_id=target_user.principal_id,
+                role=payload.role,
+                by_principal_id=user.principal_id,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+        previous_role = target.role
+        target.role = payload.role
+        target.mcp_receipt = receipt
+        session.add(
+            AuditEvent(
+                actor_user_id=user.id,
+                action="campaign.member.role.change",
+                subject_type="campaign_membership",
+                subject_id=target.id,
+                details={
+                    "campaign_id": campaign_id,
+                    "target_user_id": member_user_id,
+                    "previous_role": previous_role,
+                    "role": payload.role,
+                },
+            )
+        )
+        session.commit()
+    return MembershipView(
+        user_id=target.user_id,
+        display_name=target_user.display_name,
+        role=target.role,
+        status=target.status,
+    )
+
+
+@router.delete("/{campaign_id}/members/{member_user_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_member(
+    campaign_id: str,
+    member_user_id: str,
+    request: Request,
+    user: CurrentUser,
+    session: DbSession,
+) -> None:
+    reviewer = _membership(session, campaign_id, user.id)
+    if reviewer.role not in {"owner", "dm"}:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "DM role required")
+    target = session.scalar(
+        select(CampaignMembershipProjection)
+        .where(
+            CampaignMembershipProjection.campaign_id == campaign_id,
+            CampaignMembershipProjection.user_id == member_user_id,
+        )
+        .with_for_update()
+    )
+    if target is None or target.status != "active":
+        return
+    if target.role == "owner":
+        raise HTTPException(status.HTTP_409_CONFLICT, "campaign owner cannot be removed")
+    if target.role == "dm" and reviewer.role != "owner":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "only owner can remove a DM")
+    target_user = session.get(User, member_user_id)
+    if target_user is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "campaign member no longer exists")
+    try:
+        receipt = await _runtime(request).revoke_campaign_access(
+            campaign_id=campaign_id,
+            principal_id=target_user.principal_id,
+            by_principal_id=user.principal_id,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    target.status = "revoked"
+    target.mcp_receipt = receipt
+    for binding in session.scalars(
+        select(ActorBindingProjection).where(
+            ActorBindingProjection.campaign_id == campaign_id,
+            ActorBindingProjection.user_id == member_user_id,
+        )
+    ):
+        binding.can_control = False
+        binding.can_view_private = False
+        binding.status = "revoked"
+        binding.mcp_receipt = receipt
+    for conversation in session.scalars(
+        select(AgentConversation).where(
+            AgentConversation.campaign_id == campaign_id,
+            AgentConversation.user_id == member_user_id,
+            AgentConversation.status == "active",
+        )
+    ):
+        conversation.status = "closed"
+    session.add(
+        AuditEvent(
+            actor_user_id=user.id,
+            action="campaign.member.revoke",
+            subject_type="campaign_membership",
+            subject_id=target.id,
+            details={"campaign_id": campaign_id, "target_user_id": member_user_id},
+        )
+    )
+    session.commit()
+
+
+@router.get("/{campaign_id}/actors/bindings", response_model=list[ActorBindingView])
+def list_actor_bindings(
+    campaign_id: str, user: CurrentUser, session: DbSession
+) -> list[ActorBindingView]:
+    member = _membership(session, campaign_id, user.id)
+    statement = select(ActorBindingProjection).where(
+        ActorBindingProjection.campaign_id == campaign_id
+    )
+    if member.role not in {"owner", "dm"}:
+        statement = statement.where(ActorBindingProjection.user_id == user.id)
+    items = session.scalars(statement.order_by(ActorBindingProjection.updated_at.desc())).all()
+    return [ActorBindingView.model_validate(item) for item in items]
 
 
 @router.post(
@@ -360,5 +508,19 @@ async def bind_actor(
     item.can_view_private = payload.can_view_private
     item.status = "active" if payload.can_control or payload.can_view_private else "revoked"
     item.mcp_receipt = receipt
+    session.flush()
+    session.add(
+        AuditEvent(
+            actor_user_id=user.id,
+            action="campaign.actor.bind" if item.status == "active" else "campaign.actor.revoke",
+            subject_type="actor_binding",
+            subject_id=item.id,
+            details={
+                "campaign_id": campaign_id,
+                "actor_id": actor_id,
+                "target_user_id": target.id,
+            },
+        )
+    )
     session.commit()
     return ActorBindingView.model_validate(item)

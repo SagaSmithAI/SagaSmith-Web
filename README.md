@@ -15,7 +15,8 @@ The first production slice proves the complete trust chain:
 4. a PC is bound to that player through MCP authority;
 5. an Agent request reserves quota, records actual usage, and releases the remainder;
 6. revocation immediately removes the player's next legal native MCP call;
-7. private Pack data remains private through upload, draft review, finalization, and activation.
+7. local authoring remains draft/review/finalize, while the hosted library privately uploads,
+   imports, and activates only the resulting immutable Pack.
 
 ## Local development
 
@@ -24,7 +25,7 @@ Copy-Item .env.example .env
 docker compose up --build
 ```
 
-API health: `http://127.0.0.1:8080/api/health`
+API health through Caddy: `http://127.0.0.1/api/health`
 
 Run tests directly:
 
@@ -32,6 +33,17 @@ Run tests directly:
 uv sync --all-extras
 uv run pytest
 uv run ruff check .
+```
+
+The real container acceptance suite is intentionally separate from unit tests. It boots
+PostgreSQL, Redis, MinIO, the public D&D MCP server, one real Nanobot worker and a deterministic
+OpenAI-compatible test provider, then verifies account/lobby, authenticated Agent identity,
+dynamic native-tool refresh and execution, exact quota settlement, finalized Pack upload/import/
+activation, membership revocation and audit:
+
+```powershell
+docker compose -p sagasmith-service-e2e -f compose.yaml -f compose.e2e.yaml up -d --build
+uv run python scripts/container_e2e.py
 ```
 
 Architecture and operating references:

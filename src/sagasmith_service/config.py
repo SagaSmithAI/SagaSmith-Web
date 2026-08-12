@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,13 +18,17 @@ class Settings(BaseSettings):
     env: str = "development"
     database_url: str = "sqlite:///./sagasmith-service.db"
     redis_url: str = "redis://127.0.0.1:6379/0"
+    rate_limit_backend: Literal["memory", "redis"] = "memory"
+    auth_rate_limit: int = Field(default=10, ge=1, le=10_000)
+    auth_rate_window_seconds: int = Field(default=60, ge=1, le=86_400)
+    agent_rate_limit: int = Field(default=60, ge=1, le=100_000)
+    pack_rate_limit: int = Field(default=10, ge=1, le=10_000)
     session_secret: SecretStr = Field(
         default=SecretStr("development-only-session-secret-change-me"),
         min_length=32,
     )
     public_origin: str = "http://127.0.0.1:8080"
     dnd_mcp_url: str = "http://127.0.0.1:8767/mcp"
-    dnd_mcp_service_principal: str = "service:sagasmith"
     session_ttl_seconds: int = 60 * 60 * 24 * 30
     secure_cookies: bool = False
     signup_token_quota: int = 1_000_000
@@ -33,12 +38,52 @@ class Settings(BaseSettings):
     private_storage_dir: str = "./data/private"
     exchange_dir: str = "./data/exchange"
     max_pack_bytes: int = 200 * 1024 * 1024
+    max_pack_uncompressed_bytes: int = 2 * 1024 * 1024 * 1024
     bootstrap_admin_email: str = ""
     storage_backend: str = "local"
     object_endpoint: str = "http://127.0.0.1:9000"
     object_bucket: str = "sagasmith-private"
     object_access_key: str = ""
     object_secret_key: SecretStr = SecretStr("")
+
+    @model_validator(mode="after")
+    def validate_production_security(self) -> Settings:
+        if self.env != "production":
+            return self
+        failures: list[str] = []
+        placeholder_markers = ("replace", "change-me", "development-only")
+
+        def is_placeholder(value: str) -> bool:
+            lowered = value.casefold()
+            return any(marker in lowered for marker in placeholder_markers)
+
+        if not self.database_url.startswith("postgresql+psycopg://") or is_placeholder(
+            self.database_url
+        ):
+            failures.append("SAGASMITH_DATABASE_URL must be a non-placeholder PostgreSQL URL")
+        if self.rate_limit_backend != "redis":
+            failures.append("SAGASMITH_RATE_LIMIT_BACKEND must be redis")
+        if not self.secure_cookies:
+            failures.append("SAGASMITH_SECURE_COOKIES must be true")
+        if not self.public_origin.startswith("https://"):
+            failures.append("SAGASMITH_PUBLIC_ORIGIN must use https")
+        if is_placeholder(self.session_secret.get_secret_value()):
+            failures.append("SAGASMITH_SESSION_SECRET must be replaced")
+        agent_key = self.agent_api_key.get_secret_value()
+        if len(agent_key) < 32 or is_placeholder(agent_key):
+            failures.append("SAGASMITH_AGENT_API_KEY must be a non-placeholder 32-byte secret")
+        if self.storage_backend != "s3":
+            failures.append("SAGASMITH_STORAGE_BACKEND must be s3")
+        object_secret = self.object_secret_key.get_secret_value()
+        if (
+            not self.object_access_key
+            or len(object_secret) < 32
+            or is_placeholder(object_secret)
+        ):
+            failures.append("private object-store credentials are required")
+        if failures:
+            raise ValueError("unsafe production configuration: " + "; ".join(failures))
+        return self
 
 
 @lru_cache

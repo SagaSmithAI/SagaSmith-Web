@@ -56,6 +56,29 @@ def test_campaign_join_and_actor_binding_use_authoritative_runtime(
     assert grant[1]["principal_id"] == f"user:{player['id']}"
     assert grant[1]["by_principal_id"] == f"user:{owner['id']}"
 
+    promoted = client.patch(
+        f"/api/campaigns/campaign-1/members/{player['id']}/role",
+        json={"role": "dm"},
+    )
+    assert promoted.status_code == 200
+    assert promoted.json()["role"] == "dm"
+    role_grants = [call for call in dnd_runtime.calls if call[0] == "campaign_access"]
+    assert role_grants[-1][1]["role"] == "dm"
+
+    login(client, "player@example.com")
+    forbidden = client.patch(
+        f"/api/campaigns/campaign-1/members/{player['id']}/role",
+        json={"role": "player"},
+    )
+    assert forbidden.status_code == 403
+    login(client, "dm@example.com")
+    demoted = client.patch(
+        f"/api/campaigns/campaign-1/members/{player['id']}/role",
+        json={"role": "player"},
+    )
+    assert demoted.status_code == 200
+    assert demoted.json()["role"] == "player"
+
     bound = client.put(
         "/api/campaigns/campaign-1/actors/fighter-1/binding",
         json={"user_id": player["id"], "can_control": True, "can_view_private": True},
@@ -100,3 +123,59 @@ def test_campaign_creation_is_idempotent(client: TestClient, dnd_runtime: FakeDn
     assert first.status_code == 201
     assert second.status_code == 201
     assert len([call for call in dnd_runtime.calls if call[0] == "campaign_create"]) == 1
+
+
+def test_member_revoke_uses_authority_and_closes_cloud_access(
+    client: TestClient, dnd_runtime: FakeDndRuntime
+) -> None:
+    owner = register(client, "revoke-dm@example.com", "DM")
+    client.post(
+        "/api/campaigns",
+        headers={"Idempotency-Key": "revoke-campaign-service"},
+        json={"name": "Revoke Campaign"},
+    )
+    player = register(client, "revoke-player@example.com", "Player")
+    requested = client.post("/api/campaigns/campaign-1/join-requests", json={}).json()
+    conversation = client.post(
+        "/api/campaigns/campaign-1/agent/conversations",
+        json={"title": "Closed after revoke"},
+    )
+    assert conversation.status_code == 403
+
+    login(client, "revoke-dm@example.com")
+    approved = client.post(
+        f"/api/campaigns/campaign-1/join-requests/{requested['id']}/decision",
+        json={"decision": "approved"},
+    )
+    assert approved.status_code == 200
+    login(client, "revoke-player@example.com")
+    assert (
+        client.post(
+            "/api/campaigns/campaign-1/agent/conversations",
+            json={"title": "Closed after revoke"},
+        ).status_code
+        == 201
+    )
+
+    login(client, "revoke-dm@example.com")
+    removed = client.delete(f"/api/campaigns/campaign-1/members/{player['id']}")
+    assert removed.status_code == 204
+    call = next(item for item in dnd_runtime.calls if item[0] == "campaign_access_revoke")
+    assert call[1]["principal_id"] == f"user:{player['id']}"
+    assert call[1]["by_principal_id"] == f"user:{owner['id']}"
+
+    login(client, "revoke-player@example.com")
+    assert client.get("/api/campaigns").json() == []
+    assert client.get("/api/campaigns/campaign-1/runtime").status_code == 403
+    assert client.get("/api/campaigns/campaign-1/agent/conversations").status_code == 403
+
+
+def test_campaign_owner_cannot_be_removed(client: TestClient) -> None:
+    owner = register(client, "owner-protected@example.com", "Owner")
+    client.post(
+        "/api/campaigns",
+        headers={"Idempotency-Key": "owner-protected-campaign"},
+        json={"name": "Owner Protected"},
+    )
+    response = client.delete(f"/api/campaigns/campaign-1/members/{owner['id']}")
+    assert response.status_code == 409

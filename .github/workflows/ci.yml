@@ -20,7 +20,14 @@ jobs:
       - run: uv sync --all-extras
       - run: uv run ruff check .
       - run: uv run pytest --cov=sagasmith_service --cov-report=term-missing
+      - run: node --check src/sagasmith_service/web/app.js
       - run: uv run alembic upgrade head
         env:
           SAGASMITH_DATABASE_URL: sqlite:///./migration-ci.db
+      - run: docker compose config --quiet
+        env:
+          POSTGRES_PASSWORD: ci-only
+          MINIO_ROOT_PASSWORD: ci-only
+          OPENAI_API_KEY: ci-only
+          SAGASMITH_AGENT_INTERNAL_KEY: ci-only
       - run: docker build .

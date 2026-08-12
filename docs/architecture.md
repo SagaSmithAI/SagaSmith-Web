@@ -25,7 +25,10 @@ call.
 - A stable MCP principal is derived as `user:<service-user-uuid>`. Browsers cannot submit it.
 - Campaign ownership and lobby workflow are Service concepts; effective membership and actor
   control are granted by `access_grant` and enforced again by MCP at call time.
-- `owner` and `dm` may review applications, create invitations, bind actors, and import Packs.
+- The campaign owner may promote or demote active members between `player` and `dm`; Service calls
+  the MCP grant first and updates its role projection only after the authoritative receipt.
+- `owner` and `dm` may review applications, create invitations, bind actors, and import/activate
+  finalized Packs.
 - A player sees only campaigns with an active membership projection. The MCP remains authoritative
   if a projection is stale.
 - Administrator status grants control-plane operations such as quota grants; it does not imply DM
@@ -50,6 +53,10 @@ conversation lease -> dedicated Agent worker -> dedicated MCP session
 
 The Service-injected context contains the authenticated campaign and principal. It is a semantic
 aid only; every MCP call remains fail-closed on membership, actor, phase, revision and payload.
+The Supervisor also requires the `campaign:user:conversation` key to match that principal, and the
+hosted worker uses the Service user UUID as Nanobot's sender identity. Internal MCP DNS names are
+resolved to exact host CIDRs in an ephemeral mode-0600 worker config; no broad private-network SSRF
+exception is granted.
 
 ## Data ownership
 
@@ -67,7 +74,9 @@ aid only; every MCP call remains fail-closed on membership, actor, phase, revisi
 The hosted library accepts finalized SagaSmith Pack archives, not commercial PDFs. Upload requires
 an explicit right-to-store attestation, is always `distribution=private`, streams through a size
 limit, receives a SHA-256 digest, and has no public download route. Import materializes a short-lived
-copy into a volume shared only with D&D MCP, then calls `content_pack(import)` in Lobby.
+copy into a volume shared only with D&D MCP, then calls `content_pack(import)` in Lobby. Import
+receipts supply the runtime reference; activation is a distinct idempotent `content_pack(activate)`
+call. Service changes its projection to `activated` only after that authoritative receipt.
 
 Source authoring remains `draft -> Agent evidence review -> finalize`. Draft source, extracted text,
 chunks and embeddings stay in private storage. A finalized version is immutable; edits create a new
@@ -82,8 +91,10 @@ content by default.
 - Agent calls reserve quota before provider execution, settle actual tokens afterward, and release
   on failure. Both reservation and settlement are idempotent.
 - Pack import uses campaign, Pack id and archive checksum as its MCP idempotency key.
+- Pack activation uses a caller idempotency key scoped by campaign and immutable Pack identity.
 - PostgreSQL row locks serialize invitation use, join decisions and quota balance changes.
 
-Current open-facade dependency: D&D MCP needs a public, generic campaign-membership revoke operation
-before Service can offer removal. Service must not emulate this by deleting its projection. Actor
-access can already be revoked by setting both permissions false.
+Campaign removal uses the public `access_revoke` facade. Service calls that authority first, then
+revokes its membership/actor projections and closes the removed user's active conversations. A
+failed MCP revocation leaves every Service projection active, so the control plane can never claim
+that access was removed when the authority still permits it.

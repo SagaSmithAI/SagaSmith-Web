@@ -1,0 +1,53 @@
+services:
+  api:
+    environment:
+      SAGASMITH_ENV: test
+      SAGASMITH_DATABASE_URL: postgresql+psycopg://sagasmith:e2e-postgres@postgres:5432/sagasmith_service
+      SAGASMITH_REDIS_URL: redis://redis:6379/0
+      SAGASMITH_RATE_LIMIT_BACKEND: redis
+      SAGASMITH_SESSION_SECRET: e2e-session-secret-that-is-longer-than-thirty-two-bytes
+      SAGASMITH_PUBLIC_ORIGIN: http://127.0.0.1:${SAGASMITH_E2E_API_PORT:-18088}
+      SAGASMITH_DND_MCP_URL: http://dnd-mcp:8767/mcp
+      SAGASMITH_AGENT_API_URL: http://agent:8910
+      SAGASMITH_AGENT_API_KEY: e2e-internal-agent-key
+      SAGASMITH_SECURE_COOKIES: "false"
+      SAGASMITH_BOOTSTRAP_ADMIN_EMAIL: owner-e2e@example.com
+      SAGASMITH_STORAGE_BACKEND: s3
+      SAGASMITH_OBJECT_ENDPOINT: http://minio:9000
+      SAGASMITH_OBJECT_BUCKET: sagasmith-private-e2e
+      SAGASMITH_OBJECT_ACCESS_KEY: sagasmith
+      SAGASMITH_OBJECT_SECRET_KEY: e2e-minio-secret
+      SAGASMITH_SIGNUP_TOKEN_QUOTA: "100000"
+    ports:
+      - "${SAGASMITH_E2E_API_PORT:-18088}:8080"
+
+  postgres:
+    environment:
+      POSTGRES_PASSWORD: e2e-postgres
+
+  minio:
+    environment:
+      MINIO_ROOT_PASSWORD: e2e-minio-secret
+
+  agent:
+    depends_on:
+      dnd-mcp:
+        condition: service_healthy
+      mock-llm:
+        condition: service_started
+    environment:
+      OPENAI_API_KEY: e2e-only-key
+      SAGASMITH_AGENT_INTERNAL_KEY: e2e-internal-agent-key
+    volumes:
+      - ./tests/e2e/agent-config.json:/config/agent-config.json:ro
+
+  mock-llm:
+    image: python:3.12-alpine
+    command: ["python", "/app/mock_openai.py"]
+    volumes:
+      - ./tests/e2e/mock_openai.py:/app/mock_openai.py:ro
+    expose: ["18080"]
+    restart: unless-stopped
+
+  proxy:
+    profiles: ["proxy"]

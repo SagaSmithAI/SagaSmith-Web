@@ -56,6 +56,16 @@ def create_conversation(
         title=payload.title,
     )
     session.add(item)
+    session.flush()
+    session.add(
+        AuditEvent(
+            actor_user_id=user.id,
+            action="agent.conversation.create",
+            subject_type="agent_conversation",
+            subject_id=item.id,
+            details={"campaign_id": campaign_id},
+        )
+    )
     session.commit()
     return ConversationView.model_validate(item)
 
@@ -76,6 +86,31 @@ def list_conversations(
             .order_by(AgentConversation.updated_at.desc())
         ).all()
     ]
+
+
+@router.get("/conversations/{conversation_id}/runs", response_model=list[AgentRunView])
+def list_runs(
+    campaign_id: str,
+    conversation_id: str,
+    user: CurrentUser,
+    session: DbSession,
+) -> list[AgentRunView]:
+    _membership(session, campaign_id, user.id)
+    conversation = session.scalar(
+        select(AgentConversation.id).where(
+            AgentConversation.id == conversation_id,
+            AgentConversation.campaign_id == campaign_id,
+            AgentConversation.user_id == user.id,
+        )
+    )
+    if conversation is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
+    items = session.scalars(
+        select(AgentRun)
+        .where(AgentRun.conversation_id == conversation_id, AgentRun.user_id == user.id)
+        .order_by(AgentRun.created_at)
+    ).all()
+    return [AgentRunView.model_validate(item) for item in items]
 
 
 @router.post("/conversations/{conversation_id}/messages", response_model=AgentRunView)
@@ -151,6 +186,15 @@ async def send_message(
         run.status = "failed"
         run.error_code = "agent_unavailable"
         run.completed_at = now_utc()
+        session.add(
+            AuditEvent(
+                actor_user_id=user.id,
+                action="agent.failed",
+                subject_type="agent_run",
+                subject_id=run.id,
+                details={"campaign_id": campaign_id, "error_code": run.error_code},
+            )
+        )
         session.commit()
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     actual = min(result.total_tokens, int(quota_quantity))

@@ -1,15 +1,19 @@
 {
   "providers": {
-    "openai": { "apiKey": "${OPENAI_API_KEY}" }
+    "openai": {
+      "apiKey": "e2e-only-key",
+      "apiBase": "http://mock-llm:18080/v1",
+      "apiType": "chat_completions"
+    }
   },
   "modelPresets": {
-    "hosted": { "provider": "openai", "model": "gpt-5.4-mini" }
+    "hosted": { "provider": "openai", "model": "sagasmith-e2e" }
   },
   "agents": {
     "defaults": { "modelPreset": "hosted" }
   },
   "api": {
-    "apiKey": "${SAGASMITH_AGENT_INTERNAL_KEY}"
+    "apiKey": "e2e-internal-agent-key"
   },
   "tools": {
     "mcpServers": {
