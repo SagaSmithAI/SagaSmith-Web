@@ -36,6 +36,7 @@ dev = [
 
 [project.scripts]
 sagasmith-service = "sagasmith_service.main:main"
+sagasmith-agent-supervisor = "sagasmith_service.agent_supervisor:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sagasmith_service"]

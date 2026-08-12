@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Protocol
+from urllib.parse import quote
 
 import httpx
 
@@ -55,12 +56,11 @@ class HttpAgentRuntime:
         )
         async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=10)) as client:
             response = await client.post(
-                f"{self.base_url}/v1/chat/completions",
+                f"{self.base_url}/v1/conversations/{quote(session_id, safe='')}/completions",
                 headers=headers,
                 json={
                     "model": "nanobot",
                     "messages": [{"role": "user", "content": authenticated_context}],
-                    "session_id": session_id,
                     "stream": False,
                 },
             )

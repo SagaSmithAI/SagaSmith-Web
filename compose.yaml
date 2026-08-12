@@ -43,18 +43,17 @@ services:
 
   agent:
     build:
-      context: ../SagaSmith-agent
-      dockerfile: Dockerfile
-      args:
-        NANOBOT_EXTRAS: api
-    command: ["serve", "--host", "0.0.0.0", "--port", "8900", "-w", "/workspace"]
+      context: ..
+      dockerfile: SagaSmith-service/infrastructure/Dockerfile.agent-supervisor
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY}
       SAGASMITH_AGENT_INTERNAL_KEY: ${SAGASMITH_AGENT_INTERNAL_KEY:?set SAGASMITH_AGENT_INTERNAL_KEY}
+      SAGASMITH_AGENT_CONFIG: /config/agent-config.json
+      SAGASMITH_AGENT_WORKSPACES: /workspaces
     volumes:
-      - ./secrets/agent-config.json:/home/nanobot/.nanobot/config.json:ro
-      - agent-workspace:/workspace
-    expose: ["8900"]
+      - ./secrets/agent-config.json:/config/agent-config.json:ro
+      - agent-workspace:/workspaces
+    expose: ["8910"]
     depends_on: ["dnd-mcp"]
     restart: unless-stopped
 

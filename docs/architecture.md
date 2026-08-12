@@ -38,10 +38,9 @@ hosted Agent worker owns a real MCP client session, consumes the server's curren
 `tools/list`, listens for `tools/list_changed`, and refreshes schemas before the next call. Lobby,
 Play, Combat and checkout/restore transitions therefore change the real native tool list.
 
-A production worker must be isolated per active campaign conversation (or provide an equivalent
-per-conversation MCP client and tool registry). The single `agent` process in `compose.yaml` is the
-single-server development topology. It is not safe to share one global MCP client across unrelated
-campaigns when their exposure contexts differ. The cloud topology uses a worker supervisor:
+Workers are isolated per active campaign conversation. The private Agent Supervisor starts a
+dedicated Nanobot subprocess for each conversation, giving each one a separate MCP client and tool
+registry without mounting the Docker socket. The cloud topology is:
 
 ```text
 conversation lease -> dedicated Agent worker -> dedicated MCP session

@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     secure_cookies: bool = False
     signup_token_quota: int = 1_000_000
     agent_reservation_tokens: int = 32_768
-    agent_api_url: str = "http://127.0.0.1:8900"
+    agent_api_url: str = "http://127.0.0.1:8910"
     agent_api_key: SecretStr = SecretStr("")
     private_storage_dir: str = "./data/private"
     exchange_dir: str = "./data/exchange"
