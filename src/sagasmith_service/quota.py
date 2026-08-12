@@ -119,9 +119,7 @@ def settle(
     if existing is not None:
         return existing
     reservation = session.scalar(
-        select(QuotaReservation)
-        .where(QuotaReservation.id == reservation_id)
-        .with_for_update()
+        select(QuotaReservation).where(QuotaReservation.id == reservation_id).with_for_update()
     )
     if reservation is None:
         raise ValueError("reservation not found")
@@ -151,9 +149,7 @@ def settle(
 
 def release(session: Session, reservation_id: str) -> None:
     reservation = session.scalar(
-        select(QuotaReservation)
-        .where(QuotaReservation.id == reservation_id)
-        .with_for_update()
+        select(QuotaReservation).where(QuotaReservation.id == reservation_id).with_for_update()
     )
     if reservation is not None and reservation.status == "reserved":
         reservation.status = "released"

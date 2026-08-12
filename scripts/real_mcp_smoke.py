@@ -21,14 +21,10 @@ async def smoke(url: str) -> None:
         idempotency_key=request_key,
     )
     created_result = created.get("result", created)
-    campaign_id = str(
-        created_result.get("id") or created_result.get("campaign_id") or ""
-    )
+    campaign_id = str(created_result.get("id") or created_result.get("campaign_id") or "")
     if not campaign_id:
         raise RuntimeError(f"campaign_create returned no campaign id: {created}")
-    queried = await runtime.get_campaign(
-        campaign_id=campaign_id, principal_id="user:service-smoke"
-    )
+    queried = await runtime.get_campaign(campaign_id=campaign_id, principal_id="user:service-smoke")
     result = queried.get("result", queried)
     if str(result.get("id") or "") != campaign_id:
         raise RuntimeError(f"campaign_query did not return {campaign_id}: {queried}")

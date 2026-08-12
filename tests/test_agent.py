@@ -63,13 +63,11 @@ def test_agent_call_has_authenticated_scope_and_settles_usage(
     assert mismatch.status_code == 409
 
 
-def test_agent_failure_releases_quota(
-    client: TestClient, agent_runtime: FakeAgentRuntime
-) -> None:
+def test_agent_failure_releases_quota(client: TestClient, agent_runtime: FakeAgentRuntime) -> None:
     register_and_create_campaign(client)
-    conversation_id = client.post(
-        "/api/campaigns/campaign-1/agent/conversations", json={}
-    ).json()["id"]
+    conversation_id = client.post("/api/campaigns/campaign-1/agent/conversations", json={}).json()[
+        "id"
+    ]
     agent_runtime.fail = True
     response = client.post(
         f"/api/campaigns/campaign-1/agent/conversations/{conversation_id}/messages",

@@ -40,9 +40,7 @@ def test_campaign_join_and_actor_binding_use_authoritative_runtime(
     assert runtime_call[1]["principal_id"] == f"user:{owner['id']}"
 
     player = register(client, "player@example.com", "Player")
-    requested = client.post(
-        "/api/campaigns/campaign-1/join-requests", json={"message": "申请加入"}
-    )
+    requested = client.post("/api/campaigns/campaign-1/join-requests", json={"message": "申请加入"})
     assert requested.status_code == 201
 
     login(client, "dm@example.com")

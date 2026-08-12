@@ -10,6 +10,9 @@
 | phases | Lobby -> Play -> Combat -> Play; grid and Agent spatial modes; chase/combat exclusivity |
 | continuity | restart/resume; snapshot/branch restore; undo/redo; exposure immediately recoverable |
 | Pack | current `.sagasmith-pack` only; ZIP safety, byte/uncompressed limits, checksum, ownership isolation, MCP validation/import/activation, immutable version |
+| Forge | every artifact type; immutable version; provenance/license; Agent review; moderation; search/favorite/Fork; discussion/spoiler; report/withdraw |
+| public install | cross-account Module/Rule/Character install through real MCP; separate activation; Soul/Skill/Asset library reference; withdrawn release denied |
+| Identity | published Soul pin; invitation/acceptance; `agent:` MCP principal; quota payer; memory namespace/revision; Agent context; authority-first revoke |
 | quota | no grant, concurrent reservations, settle/release, provider retry, exact usage ledger, admin grant audit |
 | recovery | fresh migration; encrypted destination; checksum validation; isolated full restore; restored object re-import through MCP; reconciliation |
 | security | principal spoof attempt, IDOR, CSRF, rate limits, malicious archive, path traversal, secret scan |

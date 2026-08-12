@@ -87,8 +87,10 @@ def router(settings: Settings) -> APIRouter:
     @value.post("/login", response_model=AuthResult)
     def login(payload: LoginRequest, response: Response, session: DbSession) -> AuthResult:
         user = session.scalar(select(User).where(User.email == normalize_email(str(payload.email))))
-        if user is None or user.status != "active" or not verify_password(
-            user.password_hash, payload.password
+        if (
+            user is None
+            or user.status != "active"
+            or not verify_password(user.password_hash, payload.password)
         ):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid email or password")
         _, token = create_session(session, user, settings.session_ttl_seconds)

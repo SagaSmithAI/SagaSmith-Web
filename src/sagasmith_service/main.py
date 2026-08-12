@@ -20,6 +20,8 @@ from sagasmith_service.api.agent import router as agent_router
 from sagasmith_service.api.audit import router as audit_router
 from sagasmith_service.api.auth import router as auth_router
 from sagasmith_service.api.campaigns import router as campaign_router
+from sagasmith_service.api.community import router as community_router
+from sagasmith_service.api.identities import router as identities_router
 from sagasmith_service.api.invites import router as invites_router
 from sagasmith_service.api.operations import router as operations_router
 from sagasmith_service.api.packs import router as packs_router
@@ -40,12 +42,8 @@ from sagasmith_service.security import SESSION_COOKIE
 from sagasmith_service.storage import LocalPrivateStorage, S3PrivateStorage
 
 logger = logging.getLogger("sagasmith_service.http")
-REQUESTS = Counter(
-    "sagasmith_http_requests_total", "HTTP requests", ["method", "route", "status"]
-)
-LATENCY = Histogram(
-    "sagasmith_http_request_seconds", "HTTP request latency", ["method", "route"]
-)
+REQUESTS = Counter("sagasmith_http_requests_total", "HTTP requests", ["method", "route", "status"])
+LATENCY = Histogram("sagasmith_http_request_seconds", "HTTP request latency", ["method", "route"])
 SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9_-]{8,100}$")
 
 
@@ -121,6 +119,12 @@ def create_app(
                 policy = ("pack", settings.pack_rate_limit, 3600)
             elif request.method == "POST" and path == "/api/invites/accept":
                 policy = ("invite", 30, 60)
+            elif request.method == "POST" and path == "/api/community/posts":
+                policy = ("community-post", 30, 60)
+            elif request.method == "POST" and path == "/api/community/reports":
+                policy = ("community-report", 10, 3600)
+            elif request.method == "POST" and path.endswith("/agent-review"):
+                policy = ("artifact-review", 10, 3600)
             if response is None and policy is not None:
                 category, limit, window_seconds = policy
                 client_host = request.client.host if request.client else "unknown"
@@ -156,6 +160,12 @@ def create_app(
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "same-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self'; style-src 'self'; "
+            "img-src 'self' https: data:; connect-src 'self'; object-src 'none'; "
+            "base-uri 'self'; frame-ancestors 'none'"
+        )
         logger.info(
             "request method=%s route=%s status=%s duration_ms=%.2f request_id=%s",
             request.method,
@@ -168,6 +178,8 @@ def create_app(
 
     app.include_router(auth_router(settings))
     app.include_router(campaign_router)
+    app.include_router(community_router)
+    app.include_router(identities_router)
     app.include_router(usage_router)
     app.include_router(agent_router)
     app.include_router(packs_router)

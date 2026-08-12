@@ -167,9 +167,7 @@ def pack_archive(pack_id: str, version: str) -> bytes:
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(
             "package.sagasmith.json",
-            json.dumps(
-                descriptor, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-            ),
+            json.dumps(descriptor, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
         )
         archive.writestr(f"blobs/sha256/{document_checksum}", document_bytes)
     return output.getvalue()
@@ -188,6 +186,73 @@ def register_or_login(client: httpx.Client, payload: dict[str, str]) -> dict:
         ),
         200,
     )["user"]
+
+
+def publish_artifact(
+    client: httpx.Client,
+    *,
+    run_id: str,
+    artifact_type: str,
+    slug: str,
+    title: str,
+    private_pack_id: str | None = None,
+    payload: dict | None = None,
+) -> tuple[dict, dict]:
+    artifact = expect(
+        client.post(
+            "/api/community/artifacts",
+            json={
+                "slug": slug,
+                "artifact_type": artifact_type,
+                "title": title,
+                "summary": "Synthetic original container acceptance fixture.",
+                "system_id": "dnd5e",
+                "visibility": "public",
+                "license_code": "CC-BY-4.0",
+                "rights_attested": True,
+                "source_kind": "original",
+                "provenance": {"fixture": run_id},
+                "tags": ["container-e2e"],
+            },
+        ),
+        201,
+    )
+    release_item = expect(
+        client.post(
+            f"/api/community/artifacts/{artifact['id']}/releases",
+            json={
+                "version": "1.0.0",
+                "manifest": {"fixture": run_id, "type": artifact_type},
+                "payload": payload or {},
+                "compatibility": {"edition": "2024"},
+                "private_pack_id": private_pack_id,
+            },
+        ),
+        201,
+    )
+    reviewed = expect(
+        client.post(
+            f"/api/community/artifacts/{artifact['id']}/releases/{release_item['id']}/agent-review",
+            headers={"Idempotency-Key": f"review-{artifact_type}-{run_id}"},
+        ),
+        200,
+    )
+    if reviewed["status"] != "agent_reviewed":
+        raise RuntimeError(f"hosted Agent did not approve artifact: {reviewed}")
+    expect(
+        client.post(
+            f"/api/community/artifacts/{artifact['id']}/releases/{release_item['id']}/submit"
+        ),
+        200,
+    )
+    published = expect(
+        client.post(
+            f"/api/community/admin/releases/{release_item['id']}/moderate",
+            json={"decision": "approved", "notes": "Container acceptance"},
+        ),
+        200,
+    )
+    return artifact, published
 
 
 def run(base_url: str) -> None:
@@ -259,10 +324,7 @@ def run(base_url: str) -> None:
         ),
         201,
     )
-    message_url = (
-        f"/api/campaigns/{campaign_id}/agent/conversations/"
-        f"{conversation['id']}/messages"
-    )
+    message_url = f"/api/campaigns/{campaign_id}/agent/conversations/{conversation['id']}/messages"
     request_key = f"agent-{run_id}"
     run = expect(
         player.post(
@@ -338,6 +400,50 @@ def run(base_url: str) -> None:
     )
     if promoted["role"] != "dm":
         raise RuntimeError("campaign member was not promoted through MCP authority")
+
+    public_pack_id = f"public-e2e-{run_id}"
+    public_pack = expect(
+        owner.post(
+            "/api/packs",
+            data={
+                "pack_id": public_pack_id,
+                "version": "1.0.0",
+                "title": "Original public container fixture",
+                "kind": "module",
+                "rights_attested": "true",
+            },
+            files={
+                "archive": (
+                    f"{public_pack_id}.sagasmith-pack",
+                    pack_archive(public_pack_id, "1.0.0"),
+                    "application/vnd.sagasmith.content-package+zip",
+                )
+            },
+        ),
+        201,
+    )
+    public_artifact, public_release = publish_artifact(
+        owner,
+        run_id=run_id,
+        artifact_type="module",
+        slug=public_pack_id,
+        title="Original public container module",
+        private_pack_id=public_pack["id"],
+    )
+    catalog = expect(player.get("/api/community/artifacts?q=public+container"), 200)["items"]
+    if public_artifact["id"] not in {item["id"] for item in catalog}:
+        raise RuntimeError("published artifact was not visible cross-account")
+    public_install = expect(
+        player.post(
+            f"/api/community/releases/{public_release['id']}/install",
+            headers={"Idempotency-Key": f"public-install-{run_id}"},
+            json={"campaign_id": campaign_id, "activate": True},
+        ),
+        201,
+    )
+    if public_install["status"] != "activated":
+        raise RuntimeError(f"public Pack did not activate through MCP: {public_install}")
+
     demoted = expect(
         owner.patch(
             f"/api/campaigns/{campaign_id}/members/{player_user['id']}/role",
@@ -347,6 +453,92 @@ def run(base_url: str) -> None:
     )
     if demoted["role"] != "player":
         raise RuntimeError("campaign member was not demoted through MCP authority")
+
+    _soul_artifact, soul_release = publish_artifact(
+        owner,
+        run_id=run_id,
+        artifact_type="soul",
+        slug=f"dm-soul-{run_id}",
+        title="Container DM Soul",
+        payload={"style": "patient", "rules": "MCP authoritative"},
+    )
+    identity = expect(
+        player.post(
+            "/api/identities",
+            json={
+                "handle": f"container-dm-{run_id}",
+                "name": "Container DM Identity",
+                "identity_kind": "dm",
+                "system_id": "dnd5e",
+                "bio": "Synthetic hosted identity.",
+                "visibility": "public",
+                "availability": "available",
+                "active_soul_release_id": soul_release["id"],
+                "memory_policy": {"campaign_isolation": "required"},
+                "public_profile": {},
+            },
+        ),
+        201,
+    )
+    assignment = expect(
+        owner.post(
+            f"/api/identities/campaigns/{campaign_id}/invitations",
+            headers={"Idempotency-Key": f"identity-invite-{run_id}"},
+            json={"identity_id": identity["id"]},
+        ),
+        201,
+    )
+    accepted = expect(
+        player.post(
+            f"/api/identities/assignments/{assignment['id']}/decision",
+            json={"decision": "accepted"},
+        ),
+        200,
+    )
+    if accepted["status"] != "accepted":
+        raise RuntimeError("DM Identity was not granted through MCP")
+    expect(
+        owner.put(
+            f"/api/identities/assignments/{assignment['id']}/memory/current-scene",
+            json={
+                "content": "The party is at the lantern gate.",
+                "audience": "dm",
+                "source": "curated",
+            },
+        ),
+        200,
+    )
+    identity_conversation = expect(
+        owner.post(
+            f"/api/campaigns/{campaign_id}/agent/conversations",
+            json={
+                "title": "Hosted DM Identity",
+                "identity_assignment_id": assignment["id"],
+            },
+        ),
+        201,
+    )
+    identity_run = expect(
+        owner.post(
+            f"/api/campaigns/{campaign_id}/agent/conversations/"
+            f"{identity_conversation['id']}/messages",
+            headers={"Idempotency-Key": f"identity-message-{run_id}"},
+            json={"content": "Query the current character list as the hosted DM."},
+        ),
+        200,
+    )
+    if "dynamic MCP call completed" not in (identity_run["assistant_content"] or ""):
+        raise RuntimeError("hosted DM Identity did not complete a native MCP call")
+    expect(player.delete(f"/api/identities/assignments/{assignment['id']}"), 204)
+    expect(
+        owner.post(
+            f"/api/campaigns/{campaign_id}/agent/conversations/"
+            f"{identity_conversation['id']}/messages",
+            headers={"Idempotency-Key": f"identity-revoked-{run_id}"},
+            json={"content": "This must not run."},
+        ),
+        404,
+    )
 
     expect(
         owner.delete(f"/api/campaigns/{campaign_id}/members/{player_user['id']}"),
@@ -364,6 +556,11 @@ def run(base_url: str) -> None:
         "pack.activate",
         "campaign.member.revoke",
         "campaign.member.role.change",
+        "community.release.approved",
+        "community.release.install",
+        "identity.assignment.accepted",
+        "identity.assignment.revoke",
+        "identity.memory.write",
     }
     if missing := required - actions:
         raise RuntimeError(f"missing audit actions: {sorted(missing)}")
@@ -379,6 +576,8 @@ def run(base_url: str) -> None:
                 "phase": runtime.get("result", runtime).get("effective_game_phase"),
                 "agent_tokens": run["prompt_tokens"] + run["completion_tokens"],
                 "pack_distribution": uploaded["distribution"],
+                "public_artifact_id": public_artifact["id"],
+                "identity_id": identity["id"],
                 "revocation": "enforced",
                 "audit_actions": len(actions),
             },

@@ -75,11 +75,7 @@ class Settings(BaseSettings):
         if self.storage_backend != "s3":
             failures.append("SAGASMITH_STORAGE_BACKEND must be s3")
         object_secret = self.object_secret_key.get_secret_value()
-        if (
-            not self.object_access_key
-            or len(object_secret) < 32
-            or is_placeholder(object_secret)
-        ):
+        if not self.object_access_key or len(object_secret) < 32 or is_placeholder(object_secret):
             failures.append("private object-store credentials are required")
         if failures:
             raise ValueError("unsafe production configuration: " + "; ".join(failures))

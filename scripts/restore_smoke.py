@@ -3,12 +3,13 @@ from __future__ import annotations
 import argparse
 import json
 import time
+import uuid
 
 import httpx
 
 
 def require(response: httpx.Response) -> object:
-    if response.status_code != 200:
+    if response.status_code not in {200, 201}:
         raise RuntimeError(
             f"{response.request.method} {response.request.url} returned "
             f"{response.status_code}: {response.text}"
@@ -41,11 +42,20 @@ def main() -> None:
         )
         campaigns = require(client.get("/api/campaigns"))
         packs = require(client.get("/api/packs"))
+        artifacts = require(client.get("/api/community/artifacts"))
+        identities = require(client.get("/api/identities"))
+        assignments = require(client.get("/api/identities/assignments/mine"))
         audit = require(client.get("/api/admin/audit-events?limit=100"))
         if not isinstance(campaigns, list) or not campaigns:
             raise RuntimeError("restored control database has no campaigns")
         if not isinstance(packs, list) or not packs:
             raise RuntimeError("restored control database has no private Packs")
+        if not isinstance(artifacts, list) or not artifacts:
+            raise RuntimeError("restored Forge catalog has no Artifacts")
+        if not isinstance(identities, list) or not identities:
+            raise RuntimeError("restored Forge catalog has no Identities")
+        if not isinstance(assignments, list) or not assignments:
+            raise RuntimeError("restored control database has no Identity assignments")
         if not isinstance(audit, list) or not any(
             item.get("action") == "campaign.member.revoke" for item in audit
         ):
@@ -58,11 +68,15 @@ def main() -> None:
                 import_campaign = campaign
                 break
         if import_campaign is None:
-            raise RuntimeError("restore smoke needs a campaign without the newest private Pack")
-        pack_import = require(
-            client.post(
-                f"/api/packs/{packs[0]['id']}/campaigns/{import_campaign['id']}/import"
+            import_campaign = require(
+                client.post(
+                    "/api/campaigns",
+                    headers={"Idempotency-Key": f"restore-smoke-{uuid.uuid4().hex}"},
+                    json={"name": "Restore drill import target", "edition": "2024"},
+                )
             )
+        pack_import = require(
+            client.post(f"/api/packs/{packs[0]['id']}/campaigns/{import_campaign['id']}/import")
         )
     print(
         json.dumps(
@@ -70,10 +84,11 @@ def main() -> None:
                 "status": "ok",
                 "campaigns": len(campaigns),
                 "private_packs": len(packs),
+                "artifacts": len(artifacts),
+                "identities": len(identities),
+                "identity_assignments": len(assignments),
                 "audit_events": len(audit),
-                "runtime_phase": runtime.get("result", runtime).get(
-                    "effective_game_phase"
-                ),
+                "runtime_phase": runtime.get("result", runtime).get("effective_game_phase"),
                 "pack_import_status": pack_import.get("status"),
             }
         )

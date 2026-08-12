@@ -41,14 +41,45 @@ class Handler(BaseHTTPRequestHandler):
                 str(message.get("content", ""))
                 for message in messages
                 if isinstance(message, dict)
-                and "[SagaSmith Service authenticated context]"
-                in str(message.get("content", ""))
+                and "[SagaSmith Service authenticated context]" in str(message.get("content", ""))
             ),
             "",
         )
         authenticated = bool(context)
         campaign_match = re.search(r"^campaign_id=(.+)$", context, re.MULTILINE)
         principal_match = re.search(r"^principal_id=(.+)$", context, re.MULTILINE)
+        if campaign_match and campaign_match.group(1) == "community":
+            self._json(
+                200,
+                {
+                    "id": "chatcmpl-artifact-review",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": "sagasmith-e2e",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": json.dumps(
+                                    {
+                                        "approved": True,
+                                        "summary": "Synthetic original fixture is publishable.",
+                                        "findings": [],
+                                    }
+                                ),
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 11,
+                        "completion_tokens": 5,
+                        "total_tokens": 16,
+                    },
+                },
+            )
+            return
         tool_names = {
             str((tool.get("function") or tool).get("name") or "")
             for tool in request.get("tools") or []
@@ -59,18 +90,11 @@ class Handler(BaseHTTPRequestHandler):
             for message in messages
             if isinstance(message, dict) and message.get("role") == "tool"
         ]
-        exposure_name = next(
-            (name for name in tool_names if name.endswith("_exposure")), ""
-        )
+        exposure_name = next((name for name in tool_names if name.endswith("_exposure")), "")
         character_query_name = next(
             (name for name in tool_names if name.endswith("_character_query")), ""
         )
-        if (
-            authenticated
-            and campaign_match
-            and principal_match
-            and not tool_messages
-        ):
+        if authenticated and campaign_match and principal_match and not tool_messages:
             self._tool_call(
                 exposure_name,
                 {
@@ -98,8 +122,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
         if authenticated and campaign_match and principal_match and exposure_name:
             exposure_calls = sum(
-                str(message.get("name", "")).endswith("_exposure")
-                for message in tool_messages
+                str(message.get("name", "")).endswith("_exposure") for message in tool_messages
             )
             if exposure_calls == 1:
                 self._tool_call(
@@ -126,8 +149,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
         native_call_completed = any(
-            str(message.get("name", "")).endswith("_character_query")
-            for message in tool_messages
+            str(message.get("name", "")).endswith("_character_query") for message in tool_messages
         )
         content = (
             "SagaSmith container E2E dynamic MCP call completed."

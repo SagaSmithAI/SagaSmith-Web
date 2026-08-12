@@ -67,13 +67,14 @@ class FakeAgentRuntime:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
         self.fail = False
+        self.content = "你进入了烛堡。"
 
     async def complete(self, **arguments: Any) -> AgentResult:
         self.calls.append(arguments)
         if self.fail:
             raise RuntimeError("agent unavailable")
         return AgentResult(
-            content="你进入了烛堡。",
+            content=self.content,
             request_id="agent-request-1",
             model="test-model",
             prompt_tokens=120,

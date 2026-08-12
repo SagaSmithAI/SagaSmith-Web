@@ -11,9 +11,13 @@ from sagasmith_service.api.dependencies import CurrentUser, DbSession
 from sagasmith_service.integrations.agent import AgentRuntime
 from sagasmith_service.models import (
     AgentConversation,
+    AgentIdentity,
     AgentRun,
+    ArtifactRelease,
     AuditEvent,
     CampaignMembershipProjection,
+    IdentityCampaignAssignment,
+    IdentityMemoryEntry,
     now_utc,
 )
 from sagasmith_service.quota import QuotaExceededError, release, reserve, settle
@@ -27,9 +31,7 @@ from sagasmith_service.schemas import (
 router = APIRouter(prefix="/api/campaigns/{campaign_id}/agent", tags=["agent"])
 
 
-def _membership(
-    session: DbSession, campaign_id: str, user_id: str
-) -> CampaignMembershipProjection:
+def _membership(session: DbSession, campaign_id: str, user_id: str) -> CampaignMembershipProjection:
     item = session.scalar(
         select(CampaignMembershipProjection).where(
             CampaignMembershipProjection.campaign_id == campaign_id,
@@ -50,10 +52,24 @@ def create_conversation(
     session: DbSession,
 ) -> ConversationView:
     _membership(session, campaign_id, user.id)
+    assignment = None
+    if payload.identity_assignment_id:
+        assignment = session.scalar(
+            select(IdentityCampaignAssignment).where(
+                IdentityCampaignAssignment.id == payload.identity_assignment_id,
+                IdentityCampaignAssignment.campaign_id == campaign_id,
+                IdentityCampaignAssignment.status == "accepted",
+            )
+        )
+        if assignment is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, "active Identity assignment required"
+            )
     item = AgentConversation(
         campaign_id=campaign_id,
         user_id=user.id,
         title=payload.title,
+        identity_assignment_id=assignment.id if assignment else None,
     )
     session.add(item)
     session.flush()
@@ -147,15 +163,67 @@ async def send_message(
         if existing.status != "completed":
             raise HTTPException(status.HTTP_409_CONFLICT, "agent request is already in progress")
         return AgentRunView.model_validate(existing)
+    principal_id = user.principal_id
+    campaign_role = membership.role
+    quota_user_id = user.id
+    identity_context: dict = {}
+    session_id = f"{campaign_id}:{user.id}:{conversation_id}"
+    if conversation.identity_assignment_id:
+        assignment = session.scalar(
+            select(IdentityCampaignAssignment).where(
+                IdentityCampaignAssignment.id == conversation.identity_assignment_id,
+                IdentityCampaignAssignment.campaign_id == campaign_id,
+                IdentityCampaignAssignment.status == "accepted",
+            )
+        )
+        if assignment is None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Identity assignment is no longer active")
+        identity = session.get(AgentIdentity, assignment.identity_id)
+        soul = session.get(ArtifactRelease, assignment.soul_release_id)
+        if (
+            identity is None
+            or soul is None
+            or identity.status != "active"
+            or soul.status != "published"
+        ):
+            raise HTTPException(status.HTTP_409_CONFLICT, "Identity runtime is unavailable")
+        memories = session.scalars(
+            select(IdentityMemoryEntry)
+            .where(IdentityMemoryEntry.assignment_id == assignment.id)
+            .order_by(IdentityMemoryEntry.memory_key)
+            .limit(100)
+        ).all()
+        principal_id = identity.principal_id
+        campaign_role = assignment.role
+        quota_user_id = assignment.quota_payer_user_id
+        session_id = f"{campaign_id}:agent:{identity.id}:{conversation_id}"
+        identity_context = {
+            "identity": {
+                "id": identity.id,
+                "name": identity.name,
+                "kind": identity.identity_kind,
+                "memory_namespace": assignment.memory_namespace,
+            },
+            "soul": soul.payload,
+            "campaign_memory": [
+                {
+                    "key": item.memory_key,
+                    "content": item.content,
+                    "audience": item.audience,
+                    "revision": item.revision,
+                }
+                for item in memories
+            ],
+        }
     quota_quantity = Decimal(request.app.state.settings.agent_reservation_tokens)
     try:
         reservation = reserve(
             session,
-            user_id=user.id,
+            user_id=quota_user_id,
             campaign_id=campaign_id,
             metric="llm_tokens",
             quantity=quota_quantity,
-            idempotency_key=f"agent-reserve:{idempotency_key}",
+            idempotency_key=f"agent-reserve:{user.id}:{idempotency_key}",
             ttl_seconds=300,
         )
     except QuotaExceededError as exc:
@@ -173,12 +241,13 @@ async def send_message(
     runtime: AgentRuntime = request.app.state.agent_runtime
     try:
         result = await runtime.complete(
-            session_id=f"{campaign_id}:{user.id}:{conversation_id}",
+            session_id=session_id,
             content=payload.content,
             context={
                 "campaign_id": campaign_id,
-                "principal_id": user.principal_id,
-                "campaign_role": membership.role,
+                "principal_id": principal_id,
+                "campaign_role": campaign_role,
+                **identity_context,
             },
         )
     except RuntimeError as exc:
@@ -202,7 +271,7 @@ async def send_message(
         session,
         reservation_id=reservation.id,
         quantity=Decimal(actual),
-        idempotency_key=f"agent-settle:{idempotency_key}",
+        idempotency_key=f"agent-settle:{user.id}:{idempotency_key}",
         unit="tokens",
         provider="nanobot",
         model=result.model,
@@ -222,7 +291,12 @@ async def send_message(
             action="agent.complete",
             subject_type="agent_run",
             subject_id=run.id,
-            details={"campaign_id": campaign_id, "tokens": actual},
+            details={
+                "campaign_id": campaign_id,
+                "tokens": actual,
+                "quota_user_id": quota_user_id,
+                "identity_assignment_id": conversation.identity_assignment_id,
+            },
         )
     )
     session.commit()

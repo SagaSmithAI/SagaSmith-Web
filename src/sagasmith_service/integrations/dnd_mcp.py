@@ -10,9 +10,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 
 class DndRuntime(Protocol):
-    async def get_campaign(
-        self, *, campaign_id: str, principal_id: str
-    ) -> dict[str, Any]: ...
+    async def get_campaign(self, *, campaign_id: str, principal_id: str) -> dict[str, Any]: ...
 
     async def create_campaign(
         self,
@@ -176,9 +174,7 @@ class StreamableHttpDndRuntime:
                     )
                 listed = await session.list_tools()
                 if name not in {tool.name for tool in listed.tools}:
-                    raise RuntimeError(
-                        f"D&D MCP did not publish {name!r} after exposure update"
-                    )
+                    raise RuntimeError(f"D&D MCP did not publish {name!r} after exposure update")
                 return _tool_payload(await session.call_tool(name, arguments=arguments))
         except Exception as exc:
             raise _runtime_error(exc) from exc
@@ -273,13 +269,9 @@ class StreamableHttpDndRuntime:
         if kind == "module":
             payload["module_id"] = arguments["runtime_ref"]
         elif kind == "addon":
-            payload.update(
-                {"addon_id": arguments["runtime_ref"], "version": arguments["version"]}
-            )
+            payload.update({"addon_id": arguments["runtime_ref"], "version": arguments["version"]})
         elif kind == "core_rules":
-            payload.update(
-                {"pack_id": arguments["runtime_ref"], "version": arguments["version"]}
-            )
+            payload.update({"pack_id": arguments["runtime_ref"], "version": arguments["version"]})
         else:
             raise RuntimeError(f"D&D Pack kind {kind!r} does not support activation")
         return await self._call(

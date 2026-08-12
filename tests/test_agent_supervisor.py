@@ -40,10 +40,13 @@ def test_supervisor_authenticates_and_routes_by_conversation() -> None:
     with TestClient(app) as client:
         assert manager.started is True
         assert client.get("/health").status_code == 200
-        assert client.post(
-            "/v1/conversations/campaign:test-user:conversation/completions",
-            json={"messages": [], "principal_id": "user:test-user"},
-        ).status_code == 401
+        assert (
+            client.post(
+                "/v1/conversations/campaign:test-user:conversation/completions",
+                json={"messages": [], "principal_id": "user:test-user"},
+            ).status_code
+            == 401
+        )
         response = client.post(
             "/v1/conversations/campaign:test-user:conversation/completions",
             headers={"Authorization": "Bearer internal-secret"},
@@ -87,12 +90,16 @@ def test_supervisor_rejects_principal_conversation_mismatch() -> None:
 
 
 def test_conversation_principal_binding_requires_canonical_key() -> None:
+    assert conversation_matches_principal("campaign-id:user-id:conversation-id", "user:user-id")
     assert conversation_matches_principal(
-        "campaign-id:user-id:conversation-id", "user:user-id"
+        "campaign-id:agent:identity-id:conversation-id", "agent:identity-id"
     )
     assert not conversation_matches_principal("campaign-id:conversation-id", "user:user-id")
     assert not conversation_matches_principal(
         "campaign-id:user-id:conversation-id", "user:other-id"
+    )
+    assert not conversation_matches_principal(
+        "campaign-id:agent:identity-id:conversation-id", "agent:other-id"
     )
 
 
@@ -167,9 +174,10 @@ def test_worker_manager_isolates_and_reuses_conversation_processes(
         assert first == repeated == second
         assert len(processes) == 2
         assert len(manager.workers) == 2
-        assert manager.workers["campaign-a:user-a:conversation-a"].port != manager.workers[
-            "campaign-b:user-b:conversation-b"
-        ].port
+        assert (
+            manager.workers["campaign-a:user-a:conversation-a"].port
+            != manager.workers["campaign-b:user-b:conversation-b"].port
+        )
         await manager.close()
 
     asyncio.run(scenario())

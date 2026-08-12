@@ -8,7 +8,7 @@ Replace every `replace-*` value, set the model credential, then run `start.bat` 
 `docker compose up -d --build`.
 
 The five `SAGASMITH_*_CONTEXT` values select the open-source build inputs. Pin reviewed tags or
-commit SHAs for production; never deploy moving `main` references. Remote Git contexts deliberately
+commit SHAs for production; never deploy moving branch references. Remote Git contexts deliberately
 avoid sending unrelated local worktrees, virtual environments or private content to Docker.
 
 The private stack contains Caddy, Service API/Web, PostgreSQL, Redis, MinIO, D&D MCP and Agent.
@@ -22,7 +22,20 @@ Only ports 80/443 are public. Service starts with `alembic upgrade head`. For a 
 - `/metrics`: Prometheus counters and latency histograms; firewall it in production.
 - `X-Request-ID`: accepted only in a safe shape or generated, echoed, and logged.
 - Alert on readiness failures, 5xx rate, Agent/D&D MCP failures, p95 latency, quota settlement lag,
-  disk/object capacity and backup age.
+  moderation queue age, copyright-report age, disk/object capacity and backup age.
+
+## Forge moderation
+
+Only administrators can approve a release or resolve a report. Review the rights statement,
+license, provenance, Agent findings, Pack validation and any suspicious overlap before approval.
+Agent approval is evidence, not a legal determination. Treat copyright, commercial-source,
+privacy, and malware reports as urgent; resolving one withdraws the Artifact and all published
+releases. Never "repair" a questionable commercial upload into a public Pack. Preserve the audit
+trail and contact the uploader outside the public discussion when necessary.
+
+DM/Keeper Identities must use a published Soul and explicit availability. Monitor orphaned pending
+invitations and revoked assignments. Campaign memory is part of the PostgreSQL backup and must be
+handled as DM-private campaign data, not community content.
 
 ## Backup
 

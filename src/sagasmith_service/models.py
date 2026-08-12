@@ -166,9 +166,7 @@ class CampaignProjection(TimestampMixin, Base):
 
 class CampaignMembershipProjection(TimestampMixin, Base):
     __tablename__ = "campaign_membership_projections"
-    __table_args__ = (
-        UniqueConstraint("campaign_id", "user_id", name="uq_campaign_member"),
-    )
+    __table_args__ = (UniqueConstraint("campaign_id", "user_id", name="uq_campaign_member"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     campaign_id: Mapped[str] = mapped_column(
@@ -244,6 +242,9 @@ class AgentConversation(TimestampMixin, Base):
         ForeignKey("campaign_projections.id", ondelete="CASCADE"), index=True
     )
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    identity_assignment_id: Mapped[str | None] = mapped_column(
+        ForeignKey("identity_campaign_assignments.id", ondelete="SET NULL"), index=True
+    )
     title: Mapped[str] = mapped_column(String(160), default="新会话")
     status: Mapped[str] = mapped_column(String(24), default="active", index=True)
 
@@ -316,6 +317,247 @@ class CampaignPackProjection(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(24), default="imported", index=True)
     runtime_ref: Mapped[str | None] = mapped_column(String(160))
     mcp_receipt: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class Artifact(TimestampMixin, Base):
+    """A shareable work. Campaign runtime state never belongs in this table."""
+
+    __tablename__ = "artifacts"
+    __table_args__ = (
+        UniqueConstraint("owner_user_id", "slug", name="uq_artifact_owner_slug"),
+        Index("ix_artifact_catalog", "visibility", "status", "artifact_type"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    slug: Mapped[str] = mapped_column(String(100))
+    artifact_type: Mapped[str] = mapped_column(String(24), index=True)
+    title: Mapped[str] = mapped_column(String(200), index=True)
+    summary: Mapped[str] = mapped_column(String(2000), default="")
+    system_id: Mapped[str] = mapped_column(String(32), default="dnd5e", index=True)
+    visibility: Mapped[str] = mapped_column(String(24), default="private", index=True)
+    status: Mapped[str] = mapped_column(String(24), default="draft", index=True)
+    license_code: Mapped[str] = mapped_column(String(64), default="ARR")
+    rights_attested: Mapped[bool] = mapped_column(Boolean, default=False)
+    source_kind: Mapped[str] = mapped_column(String(32), default="original")
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    forked_from_artifact_id: Mapped[str | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="SET NULL"), index=True
+    )
+    discussion_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class ArtifactCollaborator(TimestampMixin, Base):
+    __tablename__ = "artifact_collaborators"
+    __table_args__ = (UniqueConstraint("artifact_id", "user_id", name="uq_artifact_collaborator"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    artifact_id: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    role: Mapped[str] = mapped_column(String(24), default="editor")
+    status: Mapped[str] = mapped_column(String(24), default="active")
+
+
+class ArtifactRelease(TimestampMixin, Base):
+    """An immutable publication unit after it reaches ``published``."""
+
+    __tablename__ = "artifact_releases"
+    __table_args__ = (
+        UniqueConstraint("artifact_id", "version", name="uq_artifact_release_version"),
+        Index("ix_artifact_release_catalog", "status", "published_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    artifact_id: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="CASCADE"), index=True
+    )
+    version: Mapped[str] = mapped_column(String(80))
+    status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
+    changelog: Mapped[str] = mapped_column(String(4000), default="")
+    manifest: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    compatibility: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    private_pack_id: Mapped[str | None] = mapped_column(
+        ForeignKey("private_packs.id", ondelete="RESTRICT"), index=True
+    )
+    contains_private_source: Mapped[bool] = mapped_column(Boolean, default=False)
+    agent_review: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    agent_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    moderated_by_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
+    moderation_notes: Mapped[str] = mapped_column(String(2000), default="")
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ArtifactFavorite(Base):
+    __tablename__ = "artifact_favorites"
+    __table_args__ = (UniqueConstraint("artifact_id", "user_id", name="uq_artifact_favorite"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    artifact_id: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class ArtifactInstallation(TimestampMixin, Base):
+    __tablename__ = "artifact_installations"
+    __table_args__ = (
+        UniqueConstraint(
+            "installed_by_user_id",
+            "release_id",
+            "target_key",
+            name="uq_artifact_install_target",
+        ),
+        Index("ix_artifact_install_owner", "installed_by_user_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    artifact_id: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="RESTRICT"), index=True
+    )
+    release_id: Mapped[str] = mapped_column(
+        ForeignKey("artifact_releases.id", ondelete="RESTRICT"), index=True
+    )
+    installed_by_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    campaign_id: Mapped[str | None] = mapped_column(
+        ForeignKey("campaign_projections.id", ondelete="CASCADE"), index=True
+    )
+    target_key: Mapped[str] = mapped_column(String(100))
+    install_kind: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(24), default="installed", index=True)
+    runtime_ref: Mapped[str | None] = mapped_column(String(160))
+    campaign_pack_projection_id: Mapped[str | None] = mapped_column(
+        ForeignKey("campaign_pack_projections.id", ondelete="SET NULL")
+    )
+    receipt: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class CommunityPost(TimestampMixin, Base):
+    __tablename__ = "community_posts"
+    __table_args__ = (Index("ix_community_post_target", "target_type", "target_id", "status"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    author_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    target_type: Mapped[str] = mapped_column(String(24))
+    target_id: Mapped[str] = mapped_column(String(36))
+    release_id: Mapped[str | None] = mapped_column(
+        ForeignKey("artifact_releases.id", ondelete="SET NULL"), index=True
+    )
+    parent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("community_posts.id", ondelete="CASCADE"), index=True
+    )
+    category: Mapped[str] = mapped_column(String(24), default="discussion")
+    audience: Mapped[str] = mapped_column(String(24), default="public")
+    spoiler: Mapped[bool] = mapped_column(Boolean, default=False)
+    body: Mapped[str] = mapped_column(String(10_000))
+    status: Mapped[str] = mapped_column(String(24), default="visible", index=True)
+
+
+class CommunityReport(TimestampMixin, Base):
+    __tablename__ = "community_reports"
+    __table_args__ = (Index("ix_community_report_queue", "status", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    reporter_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    target_type: Mapped[str] = mapped_column(String(24))
+    target_id: Mapped[str] = mapped_column(String(36), index=True)
+    reason: Mapped[str] = mapped_column(String(32))
+    details: Mapped[str] = mapped_column(String(2000), default="")
+    status: Mapped[str] = mapped_column(String(24), default="open", index=True)
+    reviewed_by_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"))
+    resolution: Mapped[str] = mapped_column(String(2000), default="")
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AgentIdentity(TimestampMixin, Base):
+    """A persistent hosted persona. Private campaign memory is never stored here."""
+
+    __tablename__ = "agent_identities"
+    __table_args__ = (
+        UniqueConstraint("handle", name="uq_agent_identity_handle"),
+        Index("ix_agent_identity_catalog", "visibility", "status", "identity_kind"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    handle: Mapped[str] = mapped_column(String(80))
+    name: Mapped[str] = mapped_column(String(160), index=True)
+    identity_kind: Mapped[str] = mapped_column(String(24), index=True)
+    system_id: Mapped[str] = mapped_column(String(32), index=True)
+    bio: Mapped[str] = mapped_column(String(2000), default="")
+    avatar_url: Mapped[str | None] = mapped_column(String(500))
+    visibility: Mapped[str] = mapped_column(String(24), default="private", index=True)
+    status: Mapped[str] = mapped_column(String(24), default="draft", index=True)
+    availability: Mapped[str] = mapped_column(String(24), default="unavailable")
+    active_soul_release_id: Mapped[str] = mapped_column(
+        ForeignKey("artifact_releases.id", ondelete="RESTRICT"), index=True
+    )
+    memory_policy: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    public_profile: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+    @property
+    def principal_id(self) -> str:
+        return f"agent:{self.id}"
+
+
+class IdentityCampaignAssignment(TimestampMixin, Base):
+    __tablename__ = "identity_campaign_assignments"
+    __table_args__ = (
+        UniqueConstraint("invited_by_user_id", "idempotency_key", name="uq_identity_invite_retry"),
+        Index("ix_identity_assignment_active", "campaign_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    identity_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_identities.id", ondelete="CASCADE"), index=True
+    )
+    active_key: Mapped[str | None] = mapped_column(String(140), unique=True, index=True)
+    campaign_id: Mapped[str] = mapped_column(
+        ForeignKey("campaign_projections.id", ondelete="CASCADE"), index=True
+    )
+    soul_release_id: Mapped[str] = mapped_column(
+        ForeignKey("artifact_releases.id", ondelete="RESTRICT")
+    )
+    role: Mapped[str] = mapped_column(String(24))
+    status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
+    invited_by_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    quota_payer_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    idempotency_key: Mapped[str] = mapped_column(String(160))
+    memory_namespace: Mapped[str] = mapped_column(String(200))
+    mcp_receipt: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class IdentityMemoryEntry(TimestampMixin, Base):
+    __tablename__ = "identity_memory_entries"
+    __table_args__ = (
+        UniqueConstraint("assignment_id", "memory_key", name="uq_identity_memory_key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    assignment_id: Mapped[str] = mapped_column(
+        ForeignKey("identity_campaign_assignments.id", ondelete="CASCADE"), index=True
+    )
+    memory_key: Mapped[str] = mapped_column(String(100))
+    content: Mapped[str] = mapped_column(Text)
+    audience: Mapped[str] = mapped_column(String(24), default="dm")
+    source: Mapped[str] = mapped_column(String(32), default="curated")
+    revision: Mapped[int] = mapped_column(default=1)
 
 
 class OutboxEvent(Base):

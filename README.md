@@ -5,6 +5,11 @@ self-hosted applications; this repository adds the hosted account, quota, campai
 orchestration, unified Web, billing, and operations layers without becoming an authority for D&D
 game state.
 
+The same deployment includes **SagaSmith Forge**, the account-scoped creation and sharing layer for
+Rule/Module Packs, character blueprints, Souls, Skills, assets, and hosted DM/Keeper Identities.
+Forge shares catalog, immutable release, license, provenance, discussion, favorite, report, and
+moderation primitives while keeping each artifact type's installation semantics explicit.
+
 ## Current target
 
 The first production slice proves the complete trust chain:
@@ -17,6 +22,10 @@ The first production slice proves the complete trust chain:
 6. revocation immediately removes the player's next legal native MCP call;
 7. local authoring remains draft/review/finalize, while the hosted library privately uploads,
    imports, and activates only the resulting immutable Pack.
+8. original artifacts move through draft -> real hosted Agent review -> administrator moderation ->
+   immutable publication; public Packs install through the same authoritative MCP facade.
+9. a hosted DM Identity accepts a campaign invitation, receives an `agent:<uuid>` MCP grant, uses a
+   pinned Soul release and campaign-isolated revisioned memory, and loses access on revocation.
 
 ## Local development
 
@@ -52,6 +61,7 @@ Architecture and operating references:
 - [`docs/threat-model.md`](docs/threat-model.md)
 - [`docs/operations.md`](docs/operations.md)
 - [`docs/test-matrix.md`](docs/test-matrix.md)
+- [`docs/community.md`](docs/community.md)
 
 ## Non-negotiable boundary
 

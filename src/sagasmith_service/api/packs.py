@@ -255,9 +255,7 @@ async def activate_private_pack(
     request: Request,
     user: CurrentUser,
     session: DbSession,
-    idempotency_key: Annotated[
-        str, Header(alias="Idempotency-Key", min_length=8, max_length=160)
-    ],
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=8, max_length=160)],
 ) -> CampaignPackView:
     _dm_membership(session, campaign_id, user.id)
     item = session.scalar(

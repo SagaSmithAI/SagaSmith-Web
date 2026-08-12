@@ -46,10 +46,7 @@ def validate_pack_archive(
             raise PackArchiveError("Pack archive descriptor is missing")
         if any(item.flag_bits & 0x1 for item in infos):
             raise PackArchiveError("encrypted Pack entries are unsupported")
-        if any(
-            name != ARCHIVE_DESCRIPTOR and _BLOB_PATH.fullmatch(name) is None
-            for name in names
-        ):
+        if any(name != ARCHIVE_DESCRIPTOR and _BLOB_PATH.fullmatch(name) is None for name in names):
             raise PackArchiveError("Pack archive contains unsupported paths")
         if sum(item.file_size for item in infos) > max_uncompressed_bytes:
             raise PackArchiveError("Pack archive exceeds the uncompressed size limit")

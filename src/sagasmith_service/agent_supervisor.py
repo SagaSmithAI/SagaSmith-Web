@@ -50,11 +50,13 @@ def trusted_host_cidrs(hosts: str) -> list[str]:
 def conversation_matches_principal(conversation_key: str, principal_id: str) -> bool:
     """Bind the trusted service principal to its isolated conversation worker."""
     parts = conversation_key.split(":")
-    return (
-        len(parts) == 3
-        and all(parts)
-        and principal_id == f"user:{parts[1]}"
-    )
+    if not all(parts):
+        return False
+    if len(parts) == 3:
+        return principal_id == f"user:{parts[1]}"
+    if len(parts) == 4 and parts[1] == "agent":
+        return principal_id == f"agent:{parts[2]}"
+    return False
 
 
 class WorkerManager:

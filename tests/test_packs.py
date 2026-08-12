@@ -70,9 +70,7 @@ def test_private_pack_upload_and_mcp_import(
     listed = client.get("/api/packs")
     assert [item["id"] for item in listed.json()] == [uploaded.json()["id"]]
 
-    imported = client.post(
-        f"/api/packs/{uploaded.json()['id']}/campaigns/campaign-1/import"
-    )
+    imported = client.post(f"/api/packs/{uploaded.json()['id']}/campaigns/campaign-1/import")
     assert imported.status_code == 200, imported.text
     assert imported.json()["status"] == "imported"
     assert imported.json()["runtime_ref"] == "module-1"
@@ -82,9 +80,7 @@ def test_private_pack_upload_and_mcp_import(
     assert call[1]["source_path"].endswith(".sagasmith-pack")
     assert not Path(call[1]["source_path"]).exists()
 
-    repeated = client.post(
-        f"/api/packs/{uploaded.json()['id']}/campaigns/campaign-1/import"
-    )
+    repeated = client.post(f"/api/packs/{uploaded.json()['id']}/campaigns/campaign-1/import")
     assert repeated.status_code == 200
     assert len([item for item in dnd_runtime.calls if item[0] == "content_pack_import"]) == 1
 
@@ -102,9 +98,7 @@ def test_private_pack_upload_and_mcp_import(
         headers={"Idempotency-Key": "activate-private-module"},
     )
     assert repeated_activation.status_code == 200
-    assert len(
-        [item for item in dnd_runtime.calls if item[0] == "content_pack_activate"]
-    ) == 1
+    assert len([item for item in dnd_runtime.calls if item[0] == "content_pack_activate"]) == 1
 
 
 def test_pack_import_reports_private_storage_outage(client: TestClient) -> None:
@@ -132,9 +126,7 @@ def test_pack_import_reports_private_storage_outage(client: TestClient) -> None:
         raise PrivateStorageError("object storage unavailable")
 
     client.app.state.private_storage.materialize_for_runtime = unavailable
-    imported = client.post(
-        f"/api/packs/{uploaded.json()['id']}/campaigns/campaign-1/import"
-    )
+    imported = client.post(f"/api/packs/{uploaded.json()['id']}/campaigns/campaign-1/import")
     assert imported.status_code == 503
     assert imported.json()["detail"] == "private Pack storage is temporarily unavailable"
 
@@ -157,9 +149,7 @@ def test_pack_upload_requires_rights_attestation(client: TestClient) -> None:
             "kind": "module",
             "rights_attested": "false",
         },
-        files={
-            "archive": ("private.sagasmith-pack", pack_archive(), "application/zip")
-        },
+        files={"archive": ("private.sagasmith-pack", pack_archive(), "application/zip")},
     )
     assert response.status_code == 422
 

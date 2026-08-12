@@ -21,6 +21,8 @@ def test_web_shell() -> None:
     response = client.get("/")
     assert response.status_code == 200
     assert "SagaSmith" in response.text
+    assert "SAGASMITH FORGE" in response.text
+    assert "script-src 'self'" in response.headers["Content-Security-Policy"]
 
 
 def test_readiness_metrics_and_request_id() -> None:

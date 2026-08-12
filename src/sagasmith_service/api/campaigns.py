@@ -152,9 +152,7 @@ async def campaign_runtime(
 
 
 @router.get("/{campaign_id}/members", response_model=list[MembershipView])
-def list_members(
-    campaign_id: str, user: CurrentUser, session: DbSession
-) -> list[MembershipView]:
+def list_members(campaign_id: str, user: CurrentUser, session: DbSession) -> list[MembershipView]:
     _membership(session, campaign_id, user.id)
     rows = session.execute(
         select(CampaignMembershipProjection, User)

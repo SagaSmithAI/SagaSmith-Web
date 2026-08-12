@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
 
 class ApiModel(BaseModel):
@@ -107,6 +108,7 @@ class QuotaBalanceView(ApiModel):
 
 class ConversationCreate(ApiModel):
     title: str = Field(default="新会话", min_length=1, max_length=160)
+    identity_assignment_id: str | None = None
 
 
 class ConversationView(ApiModel):
@@ -115,6 +117,7 @@ class ConversationView(ApiModel):
     user_id: str
     title: str
     status: str
+    identity_assignment_id: str | None
 
 
 class AgentMessageRequest(ApiModel):
@@ -216,3 +219,292 @@ class AuditEventView(ApiModel):
     request_id: str | None
     details: dict
     created_at: datetime
+
+
+ArtifactType = Literal["module", "rule", "character", "soul", "skill", "asset"]
+Tag = Annotated[str, Field(min_length=1, max_length=40, pattern=r"^[^<>]+$")]
+
+
+def _json_bytes(*values: Any) -> int:
+    return len(json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+class ArtifactCreate(ApiModel):
+    slug: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,99}$")
+    artifact_type: ArtifactType
+    title: str = Field(min_length=1, max_length=200)
+    summary: str = Field(default="", max_length=2000)
+    system_id: Literal["dnd5e", "coc7e", "system-neutral"] = "dnd5e"
+    visibility: Literal["private", "unlisted", "public"] = "private"
+    license_code: str = Field(default="ARR", min_length=2, max_length=64)
+    rights_attested: bool = False
+    source_kind: Literal["original", "open_licensed", "private_source"] = "original"
+    provenance: dict[str, Any] = Field(default_factory=dict)
+    tags: list[Tag] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def limit_metadata(self) -> ArtifactCreate:
+        if _json_bytes(self.provenance, self.tags) > 32_000:
+            raise ValueError("artifact metadata is too large")
+        return self
+
+
+class ArtifactUpdate(ApiModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    summary: str | None = Field(default=None, max_length=2000)
+    visibility: Literal["private", "unlisted", "public"] | None = None
+    license_code: str | None = Field(default=None, min_length=2, max_length=64)
+    rights_attested: bool | None = None
+    source_kind: Literal["original", "open_licensed", "private_source"] | None = None
+    provenance: dict[str, Any] | None = None
+    tags: list[Tag] | None = Field(default=None, max_length=20)
+    discussion_enabled: bool | None = None
+
+    @model_validator(mode="after")
+    def limit_metadata(self) -> ArtifactUpdate:
+        if _json_bytes(self.provenance or {}, self.tags or []) > 32_000:
+            raise ValueError("artifact metadata is too large")
+        return self
+
+
+class ArtifactView(ApiModel):
+    id: str
+    owner_user_id: str
+    owner_display_name: str
+    slug: str
+    artifact_type: str
+    title: str
+    summary: str
+    system_id: str
+    visibility: str
+    status: str
+    license_code: str
+    rights_attested: bool
+    source_kind: str
+    provenance: dict[str, Any]
+    tags: list[str]
+    forked_from_artifact_id: str | None
+    discussion_enabled: bool
+    favorite_count: int = 0
+    latest_release_id: str | None = None
+    latest_version: str | None = None
+
+
+class ArtifactReleaseCreate(ApiModel):
+    version: str = Field(min_length=1, max_length=80)
+    changelog: str = Field(default="", max_length=4000)
+    manifest: dict[str, Any] = Field(default_factory=dict)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    compatibility: dict[str, Any] = Field(default_factory=dict)
+    private_pack_id: str | None = None
+    contains_private_source: bool = False
+
+    @model_validator(mode="after")
+    def limit_release_json(self) -> ArtifactReleaseCreate:
+        if _json_bytes(self.manifest, self.payload, self.compatibility) > 256_000:
+            raise ValueError("release JSON payload is too large; use a Pack archive")
+        return self
+
+
+class ArtifactForkCreate(ApiModel):
+    slug: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,99}$")
+    title: str = Field(min_length=1, max_length=200)
+
+
+class ArtifactReleaseView(ApiModel):
+    id: str
+    artifact_id: str
+    version: str
+    status: str
+    changelog: str
+    manifest: dict[str, Any]
+    payload: dict[str, Any]
+    compatibility: dict[str, Any]
+    private_pack_id: str | None
+    contains_private_source: bool
+    agent_review: dict[str, Any]
+    moderation_notes: str
+    published_at: datetime | None
+
+
+class AgentReviewRecord(ApiModel):
+    approved: bool
+    summary: str = Field(min_length=1, max_length=2000)
+    findings: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+    reviewer: str = Field(default="hosted-agent", min_length=1, max_length=160)
+
+
+class ModerationDecision(ApiModel):
+    decision: Literal["approved", "rejected", "withdrawn"]
+    notes: str = Field(default="", max_length=2000)
+
+
+class ArtifactInstallRequest(ApiModel):
+    campaign_id: str | None = None
+    activate: bool = False
+
+
+class ArtifactInstallationView(ApiModel):
+    id: str
+    artifact_id: str
+    release_id: str
+    installed_by_user_id: str
+    campaign_id: str | None
+    install_kind: str
+    status: str
+    runtime_ref: str | None
+
+
+class CollaboratorCreate(ApiModel):
+    user_id: str
+    role: Literal["editor", "reviewer"] = "editor"
+
+
+class CommunityPostCreate(ApiModel):
+    target_type: Literal["artifact", "identity"]
+    target_id: str
+    release_id: str | None = None
+    parent_id: str | None = None
+    category: Literal[
+        "discussion", "errata", "rules", "play_report", "suggestion", "announcement"
+    ] = "discussion"
+    audience: Literal["public", "owners"] = "public"
+    spoiler: bool = False
+    body: str = Field(min_length=1, max_length=10_000)
+
+
+class CommunityPostView(ApiModel):
+    id: str
+    author_user_id: str
+    author_display_name: str
+    target_type: str
+    target_id: str
+    release_id: str | None
+    parent_id: str | None
+    category: str
+    audience: str
+    spoiler: bool
+    body: str
+    status: str
+    created_at: datetime
+
+
+class CommunityReportCreate(ApiModel):
+    target_type: Literal["artifact", "identity", "post"]
+    target_id: str
+    reason: Literal["copyright", "commercial_source", "privacy", "abuse", "malware", "other"]
+    details: str = Field(default="", max_length=2000)
+
+
+class CommunityReportDecision(ApiModel):
+    status: Literal["resolved", "dismissed"]
+    resolution: str = Field(min_length=1, max_length=2000)
+
+
+class CommunityReportView(ApiModel):
+    id: str
+    reporter_user_id: str
+    target_type: str
+    target_id: str
+    reason: str
+    details: str
+    status: str
+    resolution: str
+    created_at: datetime
+
+
+class AgentIdentityCreate(ApiModel):
+    handle: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,79}$")
+    name: str = Field(min_length=1, max_length=160)
+    identity_kind: Literal["dm", "keeper", "npc"]
+    system_id: Literal["dnd5e", "coc7e"]
+    bio: str = Field(default="", max_length=2000)
+    avatar_url: str | None = Field(default=None, max_length=500)
+    visibility: Literal["private", "unlisted", "public"] = "private"
+    availability: Literal["unavailable", "invite_only", "available"] = "unavailable"
+    active_soul_release_id: str
+    memory_policy: dict[str, Any] = Field(default_factory=dict)
+    public_profile: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def limit_identity_metadata(self) -> AgentIdentityCreate:
+        if _json_bytes(self.memory_policy, self.public_profile) > 32_000:
+            raise ValueError("Identity metadata is too large")
+        return self
+
+
+class AgentIdentityUpdate(ApiModel):
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    bio: str | None = Field(default=None, max_length=2000)
+    avatar_url: str | None = Field(default=None, max_length=500)
+    visibility: Literal["private", "unlisted", "public"] | None = None
+    availability: Literal["unavailable", "invite_only", "available"] | None = None
+    active_soul_release_id: str | None = None
+    memory_policy: dict[str, Any] | None = None
+    public_profile: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def limit_identity_metadata(self) -> AgentIdentityUpdate:
+        if _json_bytes(self.memory_policy or {}, self.public_profile or {}) > 32_000:
+            raise ValueError("Identity metadata is too large")
+        return self
+
+
+class AgentIdentityView(ApiModel):
+    id: str
+    owner_user_id: str
+    owner_display_name: str
+    handle: str
+    name: str
+    identity_kind: str
+    system_id: str
+    bio: str
+    avatar_url: str | None
+    visibility: str
+    status: str
+    availability: str
+    active_soul_release_id: str
+    memory_policy: dict[str, Any]
+    public_profile: dict[str, Any]
+    principal_id: str
+
+
+class IdentityInviteCreate(ApiModel):
+    identity_id: str
+    quota_payer_user_id: str | None = None
+
+
+class IdentityAssignmentDecision(ApiModel):
+    decision: Literal["accepted", "rejected"]
+
+
+class IdentityAssignmentView(ApiModel):
+    id: str
+    identity_id: str
+    campaign_id: str
+    soul_release_id: str
+    role: str
+    status: str
+    invited_by_user_id: str
+    quota_payer_user_id: str
+    memory_namespace: str
+    responded_at: datetime | None
+    revoked_at: datetime | None
+
+
+class IdentityMemoryUpsert(ApiModel):
+    content: str = Field(min_length=1, max_length=20_000)
+    audience: Literal["dm", "players", "public"] = "dm"
+    source: Literal["curated", "agent_summary", "campaign_event"] = "curated"
+    expected_revision: int | None = Field(default=None, ge=1)
+
+
+class IdentityMemoryView(ApiModel):
+    id: str
+    assignment_id: str
+    memory_key: str
+    content: str
+    audience: str
+    source: str
+    revision: int
+    updated_at: datetime

@@ -79,9 +79,7 @@ def create_invite(
 
 
 @router.get("/api/campaigns/{campaign_id}/invites", response_model=list[InviteView])
-def list_invites(
-    campaign_id: str, user: CurrentUser, session: DbSession
-) -> list[InviteView]:
+def list_invites(campaign_id: str, user: CurrentUser, session: DbSession) -> list[InviteView]:
     _dm(session, campaign_id, user.id)
     return [
         InviteView.model_validate(item)
@@ -94,9 +92,7 @@ def list_invites(
 
 
 @router.delete("/api/campaigns/{campaign_id}/invites/{invite_id}", status_code=204)
-def revoke_invite(
-    campaign_id: str, invite_id: str, user: CurrentUser, session: DbSession
-) -> None:
+def revoke_invite(campaign_id: str, invite_id: str, user: CurrentUser, session: DbSession) -> None:
     _dm(session, campaign_id, user.id)
     item = session.scalar(
         select(CampaignInvite).where(

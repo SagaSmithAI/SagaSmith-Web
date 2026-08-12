@@ -10,6 +10,9 @@ Browser -> Service API/BFF -> hosted Agent worker -> public D&D MCP facade
                            -> PostgreSQL (cloud workflow/projections/usage)
                            -> private S3/MinIO (Pack archives)
 
+Browser -> Forge catalog -> Artifact + immutable Release + discussion/moderation
+                         -> Soul -> hosted Identity -> campaign assignment
+
 D&D MCP -> sagasmith-dnd -> sagasmith-core
 Agent   -> D&D Skills and module-generation Skills
 ```
@@ -22,7 +25,8 @@ call.
 ## Trust and identity
 
 - Browser authentication is an opaque, hashed, revocable server session in an HttpOnly cookie.
-- A stable MCP principal is derived as `user:<service-user-uuid>`. Browsers cannot submit it.
+- A stable human MCP principal is derived as `user:<service-user-uuid>`. An accepted hosted
+  Identity assignment derives `agent:<identity-uuid>`. Browsers cannot submit either principal.
 - Campaign ownership and lobby workflow are Service concepts; effective membership and actor
   control are granted by `access_grant` and enforced again by MCP at call time.
 - The campaign owner may promote or demote active members between `player` and `dm`; Service calls
@@ -53,8 +57,10 @@ conversation lease -> dedicated Agent worker -> dedicated MCP session
 
 The Service-injected context contains the authenticated campaign and principal. It is a semantic
 aid only; every MCP call remains fail-closed on membership, actor, phase, revision and payload.
-The Supervisor also requires the `campaign:user:conversation` key to match that principal, and the
-hosted worker uses the Service user UUID as Nanobot's sender identity. Internal MCP DNS names are
+The Supervisor requires either `campaign:user:conversation` or
+`campaign:agent:identity:conversation` to match its authenticated principal. The hosted worker maps
+the principal prefix to Nanobot's trusted inbound channel, so MCP sees exactly `user:<uuid>` or
+`agent:<uuid>`. Internal MCP DNS names are
 resolved to exact host CIDRs in an ephemeral mode-0600 worker config; no broad private-network SSRF
 exception is granted.
 
@@ -68,6 +74,9 @@ exception is granted.
 | Agent conversation/run and usage receipt | Service + Agent workspace | both backups |
 | private Pack archive | private object storage | versioned object backup |
 | imported/activated Pack state | D&D MCP | MCP backup + immutable archive |
+| public artifact/release metadata, discussions, reports | Service PostgreSQL | PostgreSQL backup |
+| Soul and Identity public profile | Service PostgreSQL | PostgreSQL backup |
+| Identity campaign assignment and curated memory | Service PostgreSQL + MCP access grant | PostgreSQL + MCP backup |
 
 ## Pack lifecycle and copyright
 
@@ -79,9 +88,24 @@ receipts supply the runtime reference; activation is a distinct idempotent `cont
 call. Service changes its projection to `activated` only after that authoritative receipt.
 
 Source authoring remains `draft -> Agent evidence review -> finalize`. Draft source, extracted text,
-chunks and embeddings stay in private storage. A finalized version is immutable; edits create a new
-version. Publication or cross-user sharing is a separate future policy and must reject commercial
-content by default.
+chunks and embeddings stay in private storage. Forge publication is a second trust boundary:
+`release draft -> hosted Agent review -> moderation_pending -> published`. Published releases are
+immutable; edits create a new release. `private_source` and `contains_private_source` releases
+cannot enter moderation, executable Rule payloads are rejected, and commercial source archives
+remain absent from public catalog and download surfaces.
+
+## Artifact, Soul and Identity
+
+An Artifact is a shareable work; a Release is its immutable version. Character artifacts are
+blueprints, not live actors. A Soul is semantic guidance, not an MCP authority or fixed tool list.
+An Identity is a persistent hosted subject pinned to one published Soul release. A campaign
+assignment freezes that Soul release, quota payer, MCP role and a unique memory namespace. Identity
+memory entries are revisioned and can be read or written only by campaign DMs or the Identity
+owner. They never flow back into the public Soul or another campaign.
+
+Rule/Module/Character releases require a validated current Pack. Installing them materializes a
+short-lived archive and calls D&D MCP import; Rule/Module activation remains a distinct call.
+Soul/Skill/Asset releases install as library references and never mutate campaign authority.
 
 ## Consistency
 

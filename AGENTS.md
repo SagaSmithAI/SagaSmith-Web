@@ -18,12 +18,19 @@ complete local/self-hosted products and must never depend on this repository.
 ## Product boundaries
 
 - Keep cloud account, quota, billing, lobby, and administration code in this repository.
+- Keep Forge catalog, release moderation, discussion, hosted Soul/Identity profiles, assignments,
+  and campaign-isolated Identity memory in this repository. Never copy live actor or campaign
+  authority into a community artifact.
 - Consume tagged/reproducible open-source releases through adapters under `integrations/`.
 - Commercial source files, extracted text, chunks, embeddings, Drafts, and Packs are private.
 - Pack publication remains `draft -> Agent review -> finalize`; activation is a separate Lobby
   operation.
 - Browser requests never choose an authoritative principal. The service derives `user:<uuid>`
   from a server-side session and injects it into trusted internal calls.
+- Hosted Identity calls derive `agent:<identity-uuid>` only from an accepted campaign assignment;
+  Soul instructions and memory cannot weaken MCP authorization or dynamic tool exposure.
+- Public releases reject private/commercial source and executable rules. Published releases are
+  immutable, and report-driven withdrawal preserves audit evidence.
 
 ## Completion evidence
 

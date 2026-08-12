@@ -41,7 +41,13 @@ def create_worker_app(agent_loop: Any, model_name: str) -> FastAPI:
         if len(payload.messages) != 1 or payload.messages[0].get("role") != "user":
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "one user message required")
         principal_id = payload.principal_id.strip()
-        if not principal_id.startswith("user:") or len(principal_id) > 160:
+        principal_parts = principal_id.split(":", 1)
+        if (
+            len(principal_parts) != 2
+            or principal_parts[0] not in {"user", "agent"}
+            or not principal_parts[1]
+            or len(principal_id) > 160
+        ):
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid principal")
         content = payload.messages[0].get("content")
         if not isinstance(content, str):
@@ -49,8 +55,8 @@ def create_worker_app(agent_loop: Any, model_name: str) -> FastAPI:
         response = await agent_loop.process_direct(
             content=content,
             session_key=f"service:{payload.session_id}",
-            channel="user",
-            sender_id=principal_id.removeprefix("user:"),
+            channel=principal_parts[0],
+            sender_id=principal_parts[1],
         )
         usage = getattr(agent_loop, "_last_usage", None) or {}
         response_text = str(getattr(response, "content", response) or "")

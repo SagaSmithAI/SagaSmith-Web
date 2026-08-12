@@ -48,3 +48,19 @@ def test_hosted_worker_rejects_untrusted_principal_shape() -> None:
             },
         )
     assert response.status_code == 422
+
+
+def test_hosted_worker_injects_agent_identity_principal() -> None:
+    loop = FakeLoop()
+    with TestClient(create_worker_app(loop, "test-model")) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": "host this scene"}],
+                "session_id": "campaign:agent:identity:conversation",
+                "principal_id": "agent:identity-id",
+            },
+        )
+    assert response.status_code == 200
+    assert loop.calls[0]["channel"] == "agent"
+    assert loop.calls[0]["sender_id"] == "identity-id"
