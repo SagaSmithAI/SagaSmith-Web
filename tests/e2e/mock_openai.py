@@ -48,6 +48,111 @@ class Handler(BaseHTTPRequestHandler):
         authenticated = bool(context)
         campaign_match = re.search(r"^campaign_id=(.+)$", context, re.MULTILINE)
         principal_match = re.search(r"^principal_id=(.+)$", context, re.MULTILINE)
+        module_result = None
+        if "Task: Design a playable outline" in context:
+            module_result = {
+                "outline": {
+                    "premise": "A lantern gate is failing.",
+                    "acts": ["arrival", "repair", "choice"],
+                    "scenes": ["Lantern Gate", "Broken Tower", "Final Choice"],
+                    "endings": ["repair", "release"],
+                    "risks": [],
+                },
+                "summary": "Deterministic Module Studio outline.",
+            }
+        elif "Task: Generate the complete canonical D&D module source" in context:
+            module_result = {
+                "canonical_source": (
+                    "# Lantern Gate\n\n"
+                    "## Premise\nThe lantern gate is failing and shadows threaten the valley.\n\n"
+                    "## Scene 1: Arrival\nThe party receives clear evidence and two routes.\n\n"
+                    "## Scene 2: Broken Tower\n"
+                    "A complete exploration challenge reveals the cause.\n\n"
+                    "## Scene 3: Final Choice\nThe heroes repair or release the gate through "
+                    "negotiation, skill checks, or a legal combat ending.\n\n"
+                    "## Endings\nBoth outcomes settle the threat and campaign continuity.\n"
+                ),
+                "package_decisions": {"version": "1.0.0"},
+                "summary": "Deterministic complete module source.",
+            }
+        elif "Task: Review the mechanically imported draft" in context:
+            source_key_match = re.search(r'"source_key"\s*:\s*"([^"]+)"', context)
+            chunk_hash_match = re.search(r'"chunk_hash"\s*:\s*"([a-f0-9]+)"', context)
+            source_ref = {
+                "source_key": source_key_match.group(1) if source_key_match else "module-source",
+                "page": None,
+                "chunk_hash": chunk_hash_match.group(1) if chunk_hash_match else "0" * 64,
+                "note": "Agent-reviewed generated source evidence.",
+            }
+            module_result = {
+                "approved": True,
+                "summary": "Evidence-grounded and playable.",
+                "findings": [],
+                "package_decisions": {
+                    "version": "1.0.0",
+                    "manifest": {
+                        "title": "Lantern Gate",
+                        "classification": "adventure",
+                        "compatibility": {
+                            "editions": ["2024"],
+                            "required_capabilities": ["module_pack_v2"],
+                        },
+                        "activation": {"mode": "campaign_attach", "default_active": False},
+                        "continuity": {
+                            "series_id": None,
+                            "order": None,
+                            "continues_from": None,
+                            "state_policy": {},
+                        },
+                        "content_summary": {},
+                        "play_profile": {
+                            "starting_level": {"value": 1, "source_refs": [source_ref]},
+                            "expected_end_level": {"value": 2, "source_refs": [source_ref]},
+                            "advancement": {
+                                "modes": ["milestone"],
+                                "recommended": "milestone",
+                                "source_refs": [source_ref],
+                            },
+                            "pregenerated_characters": {
+                                "available": False,
+                                "applicability": "Reviewed; none are included.",
+                                "source_refs": [source_ref],
+                            },
+                        },
+                    },
+                },
+            }
+        elif "Task: Confirm finalization" in context:
+            module_result = {
+                "confirmed": True,
+                "note": "Deterministic evidence review passed before finalization.",
+            }
+        if module_result is not None:
+            self._json(
+                200,
+                {
+                    "id": "chatcmpl-module-studio",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": "sagasmith-e2e",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": json.dumps(module_result),
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 19,
+                        "completion_tokens": 11,
+                        "total_tokens": 30,
+                    },
+                },
+            )
+            return
         if campaign_match and campaign_match.group(1) == "community":
             self._json(
                 200,

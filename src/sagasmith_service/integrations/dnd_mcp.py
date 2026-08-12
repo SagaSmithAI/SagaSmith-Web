@@ -74,6 +74,34 @@ class DndRuntime(Protocol):
         idempotency_key: str,
     ) -> dict[str, Any]: ...
 
+    async def module_draft(
+        self,
+        *,
+        campaign_id: str,
+        action: str,
+        payload: dict[str, Any],
+        principal_id: str,
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]: ...
+
+    async def import_content_artifact(
+        self,
+        *,
+        campaign_id: str,
+        artifact: str,
+        principal_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]: ...
+
+    async def get_content_artifact(
+        self,
+        *,
+        campaign_id: str,
+        artifact: str,
+        principal_id: str,
+    ) -> dict[str, Any]: ...
+
 
 def _tool_payload(result: Any) -> dict[str, Any]:
     if getattr(result, "isError", False):
@@ -281,6 +309,57 @@ class StreamableHttpDndRuntime:
                 "payload": payload,
                 "principal_id": arguments["principal_id"],
                 "idempotency_key": arguments["idempotency_key"],
+            },
+            exposure_principal=arguments["principal_id"],
+            campaign_id=arguments["campaign_id"],
+        )
+
+    async def module_draft(self, **arguments: Any) -> dict[str, Any]:
+        call_arguments: dict[str, Any] = {
+            "campaign_id": arguments["campaign_id"],
+            "action": arguments["action"],
+            "payload": arguments.get("payload") or {},
+            "principal_id": arguments["principal_id"],
+        }
+        if arguments.get("expected_revision") is not None:
+            call_arguments["expected_revision"] = arguments["expected_revision"]
+        if arguments.get("idempotency_key"):
+            call_arguments["idempotency_key"] = arguments["idempotency_key"]
+        return await self._call(
+            "module_draft",
+            call_arguments,
+            exposure_principal=arguments["principal_id"],
+            campaign_id=arguments["campaign_id"],
+        )
+
+    async def import_content_artifact(self, **arguments: Any) -> dict[str, Any]:
+        return await self._call(
+            "content_pack",
+            {
+                "action": "import",
+                "payload": {
+                    "campaign_id": arguments["campaign_id"],
+                    "kind": "module",
+                    "artifact": arguments["artifact"],
+                },
+                "principal_id": arguments["principal_id"],
+                "idempotency_key": arguments["idempotency_key"],
+            },
+            exposure_principal=arguments["principal_id"],
+            campaign_id=arguments["campaign_id"],
+        )
+
+    async def get_content_artifact(self, **arguments: Any) -> dict[str, Any]:
+        return await self._call(
+            "content_pack",
+            {
+                "action": "get",
+                "payload": {
+                    "campaign_id": arguments["campaign_id"],
+                    "kind": "module",
+                    "artifact": arguments["artifact"],
+                },
+                "principal_id": arguments["principal_id"],
             },
             exposure_principal=arguments["principal_id"],
             campaign_id=arguments["campaign_id"],

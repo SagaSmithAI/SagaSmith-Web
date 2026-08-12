@@ -160,6 +160,7 @@ class CampaignProjection(TimestampMixin, Base):
     visibility: Mapped[str] = mapped_column(String(24), default="private", index=True)
     status: Mapped[str] = mapped_column(String(24), default="active", index=True)
     system_id: Mapped[str] = mapped_column(String(32), default="dnd5e")
+    purpose: Mapped[str] = mapped_column(String(24), default="play", index=True)
     mcp_revision: Mapped[int] = mapped_column(default=1)
     mcp_receipt: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
@@ -385,6 +386,11 @@ class ArtifactRelease(TimestampMixin, Base):
     private_pack_id: Mapped[str | None] = mapped_column(
         ForeignKey("private_packs.id", ondelete="RESTRICT"), index=True
     )
+    module_project_id: Mapped[str | None] = mapped_column(
+        ForeignKey("module_projects.id", ondelete="RESTRICT"), index=True
+    )
+    content_artifact: Mapped[str | None] = mapped_column(String(500))
+    content_checksum: Mapped[str | None] = mapped_column(String(64), index=True)
     contains_private_source: Mapped[bool] = mapped_column(Boolean, default=False)
     agent_review: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     agent_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -558,6 +564,176 @@ class IdentityMemoryEntry(TimestampMixin, Base):
     audience: Mapped[str] = mapped_column(String(24), default="dm")
     source: Mapped[str] = mapped_column(String(32), default="curated")
     revision: Mapped[int] = mapped_column(default=1)
+
+
+class ModuleProject(TimestampMixin, Base):
+    """Product projection of one MCP-owned D&D module authoring workflow."""
+
+    __tablename__ = "module_projects"
+    __table_args__ = (
+        UniqueConstraint("owner_user_id", "slug", name="uq_module_project_owner_slug"),
+        Index("ix_module_project_owner_status", "owner_user_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    authoring_campaign_id: Mapped[str] = mapped_column(
+        ForeignKey("campaign_projections.id", ondelete="RESTRICT"), unique=True, index=True
+    )
+    slug: Mapped[str] = mapped_column(String(100))
+    title: Mapped[str] = mapped_column(String(200))
+    brief: Mapped[str] = mapped_column(Text)
+    system_id: Mapped[str] = mapped_column(String(32), default="dnd5e")
+    edition: Mapped[str] = mapped_column(String(16), default="2024")
+    locale: Mapped[str] = mapped_column(String(20), default="zh-CN")
+    version: Mapped[str] = mapped_column(String(80), default="0.1.0")
+    status: Mapped[str] = mapped_column(String(32), default="idea", index=True)
+    specification: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    outline: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    outline_revision: Mapped[int] = mapped_column(default=0)
+    current_source_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    mcp_job_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    mcp_module_id: Mapped[str | None] = mapped_column(String(160))
+    mcp_draft_revision: Mapped[int | None] = mapped_column()
+    mcp_draft_state: Mapped[str | None] = mapped_column(String(32))
+    inspection: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    validation: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    review: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    package_decisions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    final_artifact: Mapped[str | None] = mapped_column(String(500))
+    final_pack_id: Mapped[str | None] = mapped_column(String(160), index=True)
+    final_checksum: Mapped[str | None] = mapped_column(String(64), index=True)
+    finalization: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    published_release_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    budget_tokens: Mapped[int] = mapped_column(default=500_000)
+    used_tokens: Mapped[int] = mapped_column(default=0)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_error: Mapped[str] = mapped_column(String(2000), default="")
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ModuleSource(TimestampMixin, Base):
+    __tablename__ = "module_sources"
+    __table_args__ = (
+        UniqueConstraint("project_id", "generation", name="uq_module_source_generation"),
+        Index("ix_module_source_project_status", "project_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("module_projects.id", ondelete="CASCADE"), index=True
+    )
+    generation: Mapped[int] = mapped_column()
+    source_type: Mapped[str] = mapped_column(String(24))
+    name: Mapped[str] = mapped_column(String(255))
+    storage_key: Mapped[str] = mapped_column(String(500), unique=True)
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    size_bytes: Mapped[int] = mapped_column()
+    media_type: Mapped[str] = mapped_column(String(120))
+    rights_basis: Mapped[str] = mapped_column(String(32))
+    license_code: Mapped[str] = mapped_column(String(64), default="ARR")
+    attribution: Mapped[str] = mapped_column(String(2000), default="")
+    public_eligible: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(String(24), default="ready", index=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class ModuleRun(Base):
+    __tablename__ = "module_runs"
+    __table_args__ = (
+        UniqueConstraint("requested_by_user_id", "idempotency_key", name="uq_module_run_retry"),
+        Index("ix_module_run_queue", "status", "available_at", "created_at"),
+        Index("ix_module_run_project", "project_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("module_projects.id", ondelete="CASCADE"), index=True
+    )
+    requested_by_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    run_type: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="queued", index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(160))
+    input_hash: Mapped[str] = mapped_column(String(64))
+    input_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    attempt: Mapped[int] = mapped_column(default=0)
+    max_attempts: Mapped[int] = mapped_column(default=3)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    lease_owner: Mapped[str | None] = mapped_column(String(100), index=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    reservation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("quota_reservations.id", ondelete="SET NULL")
+    )
+    prompt_tokens: Mapped[int] = mapped_column(default=0)
+    completion_tokens: Mapped[int] = mapped_column(default=0)
+    model: Mapped[str | None] = mapped_column(String(120))
+    upstream_request_id: Mapped[str | None] = mapped_column(String(100))
+    error: Mapped[str] = mapped_column(String(2000), default="")
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ModuleDecision(Base):
+    __tablename__ = "module_decisions"
+    __table_args__ = (Index("ix_module_decision_project", "project_id", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("module_projects.id", ondelete="CASCADE"), index=True
+    )
+    run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("module_runs.id", ondelete="SET NULL"), index=True
+    )
+    actor_user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    decision_type: Mapped[str] = mapped_column(String(40), index=True)
+    project_revision: Mapped[int] = mapped_column()
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class ModuleInstallation(TimestampMixin, Base):
+    __tablename__ = "module_installations"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id", "version", "campaign_id", name="uq_module_project_install_target"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("module_projects.id", ondelete="RESTRICT"), index=True
+    )
+    version: Mapped[str] = mapped_column(String(80))
+    campaign_id: Mapped[str] = mapped_column(
+        ForeignKey("campaign_projections.id", ondelete="CASCADE"), index=True
+    )
+    installed_by_user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    status: Mapped[str] = mapped_column(String(24), default="installed", index=True)
+    runtime_module_id: Mapped[str | None] = mapped_column(String(160))
+    receipt: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class UserNotification(Base):
+    __tablename__ = "user_notifications"
+    __table_args__ = (Index("ix_user_notification_inbox", "user_id", "read_at", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    notification_type: Mapped[str] = mapped_column(String(50), index=True)
+    title: Mapped[str] = mapped_column(String(200))
+    body: Mapped[str] = mapped_column(String(2000), default="")
+    action_url: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class OutboxEvent(Base):

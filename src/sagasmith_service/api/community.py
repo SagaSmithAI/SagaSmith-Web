@@ -872,82 +872,123 @@ async def install_release(
                 status.HTTP_422_UNPROCESSABLE_CONTENT, "campaign is required for this artifact type"
             )
         _dm(session, payload.campaign_id, user.id)
-        pack = session.get(PrivatePack, item.private_pack_id)
-        if pack is None:
-            raise HTTPException(status.HTTP_409_CONFLICT, "release Pack is unavailable")
-        if payload.activate and pack.kind == "preset":
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                "character presets are imported, not activated",
-            )
-        projection = session.scalar(
-            select(CampaignPackProjection).where(
-                CampaignPackProjection.campaign_id == payload.campaign_id,
-                CampaignPackProjection.private_pack_id == pack.id,
-            )
-        )
-        if projection is None:
-            try:
-                exchange_path = request.app.state.private_storage.materialize_for_runtime(
-                    pack.storage_key, pack.id
-                )
-            except PrivateStorageError as exc:
+        if item.content_artifact:
+            if artifact.artifact_type != "module":
                 raise HTTPException(
-                    status.HTTP_503_SERVICE_UNAVAILABLE,
-                    "artifact storage is temporarily unavailable",
-                ) from exc
+                    status.HTTP_409_CONFLICT,
+                    "compiled content artifacts are currently supported for modules only",
+                )
             try:
-                receipt = await request.app.state.dnd_runtime.import_content_pack(
+                receipt = await request.app.state.dnd_runtime.import_content_artifact(
                     campaign_id=payload.campaign_id,
-                    kind=pack.kind,
-                    source_path=str(exchange_path),
+                    artifact=item.content_artifact,
                     principal_id=user.principal_id,
                     idempotency_key=(
-                        f"community-install:{item.id}:{payload.campaign_id}:{idempotency_key}"
+                        f"community-module-install:{item.id}:{payload.campaign_id}:"
+                        f"{idempotency_key}"
                     ),
                 )
+                result = receipt.get("result", receipt)
+                runtime_ref = str(result.get("module_id") or "")
+                if not runtime_ref:
+                    raise RuntimeError("D&D MCP returned no imported module id")
+                activation = {}
+                if payload.activate:
+                    activation = await request.app.state.dnd_runtime.activate_content_pack(
+                        campaign_id=payload.campaign_id,
+                        kind="module",
+                        runtime_ref=runtime_ref,
+                        pack_id=runtime_ref,
+                        version=item.version,
+                        principal_id=user.principal_id,
+                        idempotency_key=(
+                            f"community-module-activate:{item.id}:{payload.campaign_id}:"
+                            f"{idempotency_key}"
+                        ),
+                    )
             except RuntimeError as exc:
                 raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
-            finally:
-                exchange_path.unlink(missing_ok=True)
-            result = receipt.get("result", receipt)
-            if pack.kind == "module":
-                runtime_ref = str(result.get("module_id") or pack.pack_id)
-            elif pack.kind == "addon":
-                runtime_ref = str((result.get("addon") or {}).get("addon_id") or pack.pack_id)
-            else:
-                runtime_ref = pack.pack_id
-            projection = CampaignPackProjection(
-                campaign_id=payload.campaign_id,
-                private_pack_id=pack.id,
-                imported_by_user_id=user.id,
-                status="imported",
-                runtime_ref=runtime_ref,
-                mcp_receipt=receipt,
-            )
-            session.add(projection)
-            session.flush()
+            receipt = {"import": receipt, "activation": activation}
+            install_kind = "campaign_module"
+            campaign_projection_id = None
+            installed_status = "activated" if payload.activate else "installed"
         else:
-            receipt = projection.mcp_receipt
-            runtime_ref = projection.runtime_ref or pack.pack_id
-        if payload.activate and projection.status != "activated":
-            try:
-                activation = await request.app.state.dnd_runtime.activate_content_pack(
-                    campaign_id=payload.campaign_id,
-                    kind=pack.kind,
-                    runtime_ref=runtime_ref,
-                    pack_id=pack.pack_id,
-                    version=pack.version,
-                    principal_id=user.principal_id,
-                    idempotency_key=f"community-activate:{item.id}:{payload.campaign_id}:{idempotency_key}",
+            pack = session.get(PrivatePack, item.private_pack_id)
+            if pack is None:
+                raise HTTPException(status.HTTP_409_CONFLICT, "release Pack is unavailable")
+            if payload.activate and pack.kind == "preset":
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    "character presets are imported, not activated",
                 )
-            except RuntimeError as exc:
-                raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
-            projection.status = "activated"
-            projection.mcp_receipt = {"import": receipt, "activation": activation}
-        install_kind = "campaign_pack"
-        campaign_projection_id = projection.id
-        installed_status = "activated" if projection.status == "activated" else "installed"
+            projection = session.scalar(
+                select(CampaignPackProjection).where(
+                    CampaignPackProjection.campaign_id == payload.campaign_id,
+                    CampaignPackProjection.private_pack_id == pack.id,
+                )
+            )
+            if projection is None:
+                try:
+                    exchange_path = request.app.state.private_storage.materialize_for_runtime(
+                        pack.storage_key, pack.id
+                    )
+                except PrivateStorageError as exc:
+                    raise HTTPException(
+                        status.HTTP_503_SERVICE_UNAVAILABLE,
+                        "artifact storage is temporarily unavailable",
+                    ) from exc
+                try:
+                    receipt = await request.app.state.dnd_runtime.import_content_pack(
+                        campaign_id=payload.campaign_id,
+                        kind=pack.kind,
+                        source_path=str(exchange_path),
+                        principal_id=user.principal_id,
+                        idempotency_key=(
+                            f"community-install:{item.id}:{payload.campaign_id}:{idempotency_key}"
+                        ),
+                    )
+                except RuntimeError as exc:
+                    raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+                finally:
+                    exchange_path.unlink(missing_ok=True)
+                result = receipt.get("result", receipt)
+                if pack.kind == "module":
+                    runtime_ref = str(result.get("module_id") or pack.pack_id)
+                elif pack.kind == "addon":
+                    runtime_ref = str((result.get("addon") or {}).get("addon_id") or pack.pack_id)
+                else:
+                    runtime_ref = pack.pack_id
+                projection = CampaignPackProjection(
+                    campaign_id=payload.campaign_id,
+                    private_pack_id=pack.id,
+                    imported_by_user_id=user.id,
+                    status="imported",
+                    runtime_ref=runtime_ref,
+                    mcp_receipt=receipt,
+                )
+                session.add(projection)
+                session.flush()
+            else:
+                receipt = projection.mcp_receipt
+                runtime_ref = projection.runtime_ref or pack.pack_id
+            if payload.activate and projection.status != "activated":
+                try:
+                    activation = await request.app.state.dnd_runtime.activate_content_pack(
+                        campaign_id=payload.campaign_id,
+                        kind=pack.kind,
+                        runtime_ref=runtime_ref,
+                        pack_id=pack.pack_id,
+                        version=pack.version,
+                        principal_id=user.principal_id,
+                        idempotency_key=f"community-activate:{item.id}:{payload.campaign_id}:{idempotency_key}",
+                    )
+                except RuntimeError as exc:
+                    raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+                projection.status = "activated"
+                projection.mcp_receipt = {"import": receipt, "activation": activation}
+            install_kind = "campaign_pack"
+            campaign_projection_id = projection.id
+            installed_status = "activated" if projection.status == "activated" else "installed"
     else:
         if payload.campaign_id is not None:
             raise HTTPException(

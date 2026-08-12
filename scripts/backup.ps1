@@ -26,7 +26,7 @@ if ($resolvedDestination -eq [System.IO.Path]::GetFullPath($repo)) {
 }
 New-Item -ItemType Directory -Force -Path $resolvedDestination | Out-Null
 
-$writers = @("api", "agent", "dnd-mcp", "minio")
+$writers = @("api", "module-worker", "agent", "dnd-mcp", "minio")
 $stopped = $false
 Push-Location $repo
 try {
@@ -83,7 +83,9 @@ try {
 } finally {
     if ($stopped) {
         Invoke-CheckedNative -Executable "docker" -Arguments @(
-            $composeArgs + @("up", "-d", "--wait", "minio", "dnd-mcp", "agent", "api")
+            $composeArgs + @(
+                "up", "-d", "--wait", "minio", "dnd-mcp", "agent", "module-worker", "api"
+            )
         )
     }
     Pop-Location

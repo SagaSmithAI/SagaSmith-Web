@@ -297,6 +297,9 @@ class ArtifactReleaseCreate(ApiModel):
     payload: dict[str, Any] = Field(default_factory=dict)
     compatibility: dict[str, Any] = Field(default_factory=dict)
     private_pack_id: str | None = None
+    module_project_id: str | None = None
+    content_artifact: str | None = Field(default=None, max_length=500)
+    content_checksum: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     contains_private_source: bool = False
 
     @model_validator(mode="after")
@@ -321,6 +324,9 @@ class ArtifactReleaseView(ApiModel):
     payload: dict[str, Any]
     compatibility: dict[str, Any]
     private_pack_id: str | None
+    module_project_id: str | None
+    content_artifact: str | None
+    content_checksum: str | None
     contains_private_source: bool
     agent_review: dict[str, Any]
     moderation_notes: str
@@ -508,3 +514,178 @@ class IdentityMemoryView(ApiModel):
     source: str
     revision: int
     updated_at: datetime
+
+
+ModuleProjectStatus = Literal[
+    "idea",
+    "outlining",
+    "outline_ready",
+    "generating",
+    "draft_review",
+    "ready_to_finalize",
+    "finalizing",
+    "compiled",
+    "failed",
+    "canceled",
+    "archived",
+]
+
+
+class ModuleProjectCreate(ApiModel):
+    slug: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,99}$")
+    title: str = Field(min_length=1, max_length=200)
+    brief: str = Field(min_length=20, max_length=100_000)
+    edition: Literal["2014", "2024"] = "2024"
+    locale: str = Field(default="zh-CN", min_length=2, max_length=20)
+    version: str = Field(default="0.1.0", min_length=1, max_length=80)
+    module_shape: Literal["one_shot", "short", "long", "sandbox"] = "one_shot"
+    starting_level: int = Field(default=1, ge=1, le=20)
+    ending_level: int = Field(default=1, ge=1, le=20)
+    party_size: int = Field(default=4, ge=1, le=12)
+    session_hours: int = Field(default=4, ge=1, le=200)
+    advancement_mode: Literal["milestone", "xp"] = "milestone"
+    tone: str = Field(default="", max_length=1000)
+    safety: list[str] = Field(default_factory=list, max_length=50)
+    budget_tokens: int = Field(default=500_000, ge=32_768, le=10_000_000)
+
+    @model_validator(mode="after")
+    def validate_levels_and_size(self) -> ModuleProjectCreate:
+        if self.ending_level < self.starting_level:
+            raise ValueError("ending_level cannot be lower than starting_level")
+        if _json_bytes(self.safety) > 16_000:
+            raise ValueError("safety metadata is too large")
+        return self
+
+
+class ModuleProjectView(ApiModel):
+    id: str
+    owner_user_id: str
+    authoring_campaign_id: str
+    slug: str
+    title: str
+    brief: str
+    system_id: str
+    edition: str
+    locale: str
+    version: str
+    status: str
+    specification: dict[str, Any]
+    outline: dict[str, Any]
+    outline_revision: int
+    current_source_id: str | None
+    mcp_job_id: str | None
+    mcp_module_id: str | None
+    mcp_draft_revision: int | None
+    mcp_draft_state: str | None
+    inspection: dict[str, Any]
+    validation: dict[str, Any]
+    review: dict[str, Any]
+    final_artifact: str | None
+    final_pack_id: str | None
+    final_checksum: str | None
+    finalization: dict[str, Any]
+    published_release_id: str | None
+    budget_tokens: int
+    used_tokens: int
+    last_error: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ModuleSourceView(ApiModel):
+    id: str
+    project_id: str
+    generation: int
+    source_type: str
+    name: str
+    sha256: str
+    size_bytes: int
+    media_type: str
+    rights_basis: str
+    license_code: str
+    attribution: str
+    public_eligible: bool
+    status: str
+    metadata_json: dict[str, Any]
+    created_at: datetime
+
+
+class ModuleRunRequest(ApiModel):
+    instruction: str = Field(default="", max_length=20_000)
+    version: str | None = Field(default=None, min_length=1, max_length=80)
+
+
+class ModuleOutlineDecision(ApiModel):
+    approved: bool
+    feedback: str = Field(default="", max_length=20_000)
+
+
+class ModuleFinalizeRequest(ApiModel):
+    confirmed: bool
+    note: str = Field(min_length=10, max_length=2000)
+    version: str | None = Field(default=None, min_length=1, max_length=80)
+
+
+class ModuleInstallRequest(ApiModel):
+    campaign_id: str
+    activate: bool = False
+
+
+class ModulePublishRequest(ApiModel):
+    visibility: Literal["unlisted", "public"] = "public"
+    license_code: str = Field(min_length=2, max_length=64)
+    rights_attested: bool
+    source_kind: Literal["original", "open_licensed"]
+    provenance: dict[str, Any] = Field(default_factory=dict)
+    summary: str = Field(default="", max_length=2000)
+    tags: list[Tag] = Field(default_factory=list, max_length=20)
+    changelog: str = Field(default="", max_length=4000)
+
+    @model_validator(mode="after")
+    def validate_publication(self) -> ModulePublishRequest:
+        if not self.rights_attested:
+            raise ValueError("rights attestation is required")
+        if self.source_kind == "open_licensed" and not self.provenance:
+            raise ValueError("open licensed publication requires provenance")
+        return self
+
+
+class ModuleRunView(ApiModel):
+    id: str
+    project_id: str
+    requested_by_user_id: str
+    run_type: str
+    status: str
+    input_payload: dict[str, Any]
+    result: dict[str, Any]
+    attempt: int
+    max_attempts: int
+    prompt_tokens: int
+    completion_tokens: int
+    model: str | None
+    error: str
+    cancel_requested: bool
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+
+
+class ModuleInstallationView(ApiModel):
+    id: str
+    project_id: str
+    version: str
+    campaign_id: str
+    installed_by_user_id: str
+    status: str
+    runtime_module_id: str | None
+    receipt: dict[str, Any]
+
+
+class NotificationView(ApiModel):
+    id: str
+    notification_type: str
+    title: str
+    body: str
+    action_url: str | None
+    created_at: datetime
+    read_at: datetime | None

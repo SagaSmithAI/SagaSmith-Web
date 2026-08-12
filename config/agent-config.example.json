@@ -6,7 +6,10 @@
     "hosted": { "provider": "openai", "model": "gpt-5.4-mini" }
   },
   "agents": {
-    "defaults": { "modelPreset": "hosted" }
+    "defaults": {
+      "modelPreset": "hosted",
+      "externalSkillsDirs": ["/opt/sagasmith/skills"]
+    }
   },
   "api": {
     "apiKey": "${SAGASMITH_AGENT_INTERNAL_KEY}"

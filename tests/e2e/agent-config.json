@@ -10,7 +10,10 @@
     "hosted": { "provider": "openai", "model": "sagasmith-e2e" }
   },
   "agents": {
-    "defaults": { "modelPreset": "hosted" }
+    "defaults": {
+      "modelPreset": "hosted",
+      "externalSkillsDirs": ["/opt/sagasmith/skills"]
+    }
   },
   "api": {
     "apiKey": "e2e-internal-agent-key"

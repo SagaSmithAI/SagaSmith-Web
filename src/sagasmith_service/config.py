@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     auth_rate_window_seconds: int = Field(default=60, ge=1, le=86_400)
     agent_rate_limit: int = Field(default=60, ge=1, le=100_000)
     pack_rate_limit: int = Field(default=10, ge=1, le=10_000)
+    module_rate_limit: int = Field(default=60, ge=1, le=10_000)
     session_secret: SecretStr = Field(
         default=SecretStr("development-only-session-secret-change-me"),
         min_length=32,
@@ -35,10 +36,18 @@ class Settings(BaseSettings):
     agent_reservation_tokens: int = 32_768
     agent_api_url: str = "http://127.0.0.1:8910"
     agent_api_key: SecretStr = SecretStr("")
+    agent_completion_timeout_seconds: int = Field(default=900, ge=30, le=3600)
     private_storage_dir: str = "./data/private"
     exchange_dir: str = "./data/exchange"
     max_pack_bytes: int = 200 * 1024 * 1024
     max_pack_uncompressed_bytes: int = 2 * 1024 * 1024 * 1024
+    max_module_source_bytes: int = 100 * 1024 * 1024
+    module_agent_reservation_tokens: int = 131_072
+    module_worker_poll_seconds: float = 1.0
+    module_worker_lease_seconds: int = 900
+    module_worker_concurrency: int = 2
+    module_worker_metrics_port: int = Field(default=9101, ge=1024, le=65_535)
+    module_run_retry_seconds: int = 15
     bootstrap_admin_email: str = ""
     storage_backend: str = "local"
     object_endpoint: str = "http://127.0.0.1:9000"

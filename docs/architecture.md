@@ -17,6 +17,27 @@ D&D MCP -> sagasmith-dnd -> sagasmith-core
 Agent   -> D&D Skills and module-generation Skills
 ```
 
+## Module Studio
+
+Module Studio is the primary D&D creation surface. A hidden Lobby campaign gives each project a
+real MCP authorization and revision context, but hidden authoring campaigns never appear in the
+normal campaign list. PostgreSQL persists projects, source generations, immutable decisions,
+leased tasks, retries, installations, notifications and quota receipts. Sources live in private
+object storage and are materialized into the MCP exchange volume only for the duration of import.
+
+The Module worker asks the Hosted Agent to follow the installed `sagasmith-modulegen` Skill and
+return strict semantic decisions. The Service transports those explicit decisions to
+`module_draft(start|get|evidence|edit|finalize)`. D&D MCP still owns extraction evidence, draft
+revision, validation, idempotency, mechanical import and the compiled content artifact. A task
+lease survives API restarts; an expired lease is requeued, while cached Agent decisions and stable
+MCP idempotency keys prevent duplicate charging or duplicate authoritative writes.
+
+The product states are `idea -> outline_ready -> generating -> draft_review ->
+ready_to_finalize -> compiled`; `failed` and `canceled` are resumable. Finalization requires both an
+approved evidence review and a fresh explicit Agent confirmation. Compiled artifacts can be
+installed directly into owned/DM campaigns or submitted to Forge moderation. Published community
+installs import the same MCP artifact and never reconstruct rule or module state in Service.
+
 The Service never opens the D&D MCP database. Campaign state, phase, random streams, revisions,
 idempotency, snapshots, branches, undo/redo, actor scope, settlement, and Pack activation remain
 MCP-owned. Service records a receipt and a disposable projection after a successful public tool
@@ -77,6 +98,9 @@ exception is granted.
 | public artifact/release metadata, discussions, reports | Service PostgreSQL | PostgreSQL backup |
 | Soul and Identity public profile | Service PostgreSQL | PostgreSQL backup |
 | Identity campaign assignment and curated memory | Service PostgreSQL + MCP access grant | PostgreSQL + MCP backup |
+| Module project/task/decision/version metadata | Service PostgreSQL | PostgreSQL backup |
+| Module source generations | private object storage | versioned object backup |
+| Module draft and compiled artifact | D&D MCP | D&D state backup/snapshot |
 
 ## Pack lifecycle and copyright
 

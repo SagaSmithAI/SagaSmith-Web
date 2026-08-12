@@ -129,6 +129,7 @@ def list_campaigns(user: CurrentUser, session: DbSession) -> list[CampaignView]:
         .where(
             CampaignMembershipProjection.user_id == user.id,
             CampaignMembershipProjection.status == "active",
+            CampaignProjection.purpose == "play",
         )
         .order_by(CampaignProjection.updated_at.desc())
     ).all()

@@ -68,7 +68,9 @@ try {
         $composeArgs + @("run", "--no-deps", "--rm", "api", "alembic", "upgrade", "head")
     )
     Invoke-CheckedNative -Executable "docker" -Arguments @(
-        $composeArgs + @("up", "-d", "--wait", "minio", "dnd-mcp", "agent", "api")
+        $composeArgs + @(
+            "up", "-d", "--wait", "minio", "dnd-mcp", "agent", "module-worker", "api"
+        )
     )
     Write-Host "Isolated restore completed for project $ProjectName. Proxy was not started."
     Write-Host "Run the acceptance checks before directing any traffic to this project."

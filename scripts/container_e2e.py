@@ -188,6 +188,38 @@ def register_or_login(client: httpx.Client, payload: dict[str, str]) -> dict:
     )["user"]
 
 
+def wait_module_run(
+    client: httpx.Client, project_id: str, run_id: str, *, timeout_seconds: int = 180
+) -> dict:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        item = expect(client.get(f"/api/modules/{project_id}/runs/{run_id}"), 200)
+        if item["status"] == "succeeded":
+            return item
+        if item["status"] in {"failed", "canceled"}:
+            raise RuntimeError(f"Module Studio task did not complete: {item}")
+        time.sleep(0.5)
+    raise RuntimeError(f"Module Studio task timed out: {run_id}")
+
+
+def enqueue_module(
+    client: httpx.Client,
+    project_id: str,
+    action: str,
+    run_id: str,
+    payload: dict | None = None,
+) -> dict:
+    item = expect(
+        client.post(
+            f"/api/modules/{project_id}/{action}",
+            headers={"Idempotency-Key": f"module-{action}-{run_id}"},
+            json=payload or {},
+        ),
+        202,
+    )
+    return wait_module_run(client, project_id, item["id"])
+
+
 def publish_artifact(
     client: httpx.Client,
     *,
@@ -350,6 +382,69 @@ def run(base_url: str) -> None:
     actual_tokens = Decimal(run["prompt_tokens"] + run["completion_tokens"])
     if not ledger or Decimal(ledger[0]["quantity"]) != actual_tokens or actual_tokens <= 0:
         raise RuntimeError(f"Agent usage was not settled: {ledger}")
+
+    module_project = expect(
+        owner.post(
+            "/api/modules",
+            headers={"Idempotency-Key": f"module-project-{run_id}"},
+            json={
+                "slug": f"lantern-gate-{run_id}",
+                "title": "Lantern Gate",
+                "brief": (
+                    "Create an original D&D one-shot about repairing a failing lantern gate."
+                ),
+                "edition": "2024",
+                "locale": "en-US",
+                "version": "1.0.0",
+                "module_shape": "one_shot",
+                "starting_level": 1,
+                "ending_level": 1,
+                "party_size": 4,
+                "session_hours": 4,
+                "advancement_mode": "milestone",
+            },
+        ),
+        201,
+    )
+    project_id = module_project["id"]
+    enqueue_module(owner, project_id, "outline", run_id)
+    expect(
+        owner.post(
+            f"/api/modules/{project_id}/outline-decision",
+            json={"approved": True, "feedback": "Container acceptance approval"},
+        ),
+        200,
+    )
+    enqueue_module(owner, project_id, "generate", run_id)
+    enqueue_module(owner, project_id, "review", run_id)
+    enqueue_module(
+        owner,
+        project_id,
+        "finalize",
+        run_id,
+        {
+            "confirmed": True,
+            "note": "Container acceptance confirms evidence-reviewed finalization.",
+            "version": "1.0.0",
+        },
+    )
+    compiled_module = expect(owner.get(f"/api/modules/{project_id}"), 200)
+    if (
+        compiled_module["status"] != "compiled"
+        or not compiled_module["final_artifact"]
+        or len(compiled_module["final_checksum"] or "") != 64
+    ):
+        raise RuntimeError(f"Module Studio did not compile through MCP: {compiled_module}")
+    enqueue_module(
+        owner,
+        project_id,
+        "install",
+        run_id,
+        {"campaign_id": campaign_id, "activate": True},
+    )
+    installations = expect(owner.get(f"/api/modules/{project_id}/installations"), 200)["items"]
+    if not installations or installations[0]["status"] != "active":
+        raise RuntimeError(f"Compiled module did not activate: {installations}")
 
     pack_id = f"private-e2e-{run_id}"
     uploaded = expect(
@@ -561,6 +656,8 @@ def run(base_url: str) -> None:
         "identity.assignment.accepted",
         "identity.assignment.revoke",
         "identity.memory.write",
+        "module.run.finalize.complete",
+        "module.run.install.complete",
     }
     if missing := required - actions:
         raise RuntimeError(f"missing audit actions: {sorted(missing)}")
@@ -577,6 +674,7 @@ def run(base_url: str) -> None:
                 "agent_tokens": run["prompt_tokens"] + run["completion_tokens"],
                 "pack_distribution": uploaded["distribution"],
                 "public_artifact_id": public_artifact["id"],
+                "module_project_id": project_id,
                 "identity_id": identity["id"],
                 "revocation": "enforced",
                 "audit_actions": len(actions),

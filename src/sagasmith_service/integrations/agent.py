@@ -32,9 +32,10 @@ class AgentRuntime(Protocol):
 
 
 class HttpAgentRuntime:
-    def __init__(self, base_url: str, api_key: str = "") -> None:
+    def __init__(self, base_url: str, api_key: str = "", *, timeout_seconds: int = 180) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
+        self.timeout_seconds = timeout_seconds
 
     async def complete(
         self,
@@ -66,7 +67,9 @@ class HttpAgentRuntime:
             )
         context_lines.extend(["[Player message]", content])
         authenticated_context = "\n".join(context_lines)
-        async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=10)) as client:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(self.timeout_seconds, connect=10)
+        ) as client:
             response = await client.post(
                 f"{self.base_url}/v1/conversations/{quote(session_id, safe='')}/completions",
                 headers=headers,

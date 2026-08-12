@@ -13,6 +13,8 @@
 | Forge | every artifact type; immutable version; provenance/license; Agent review; moderation; search/favorite/Fork; discussion/spoiler; report/withdraw |
 | public install | cross-account Module/Rule/Character install through real MCP; separate activation; Soul/Skill/Asset library reference; withdrawn release denied |
 | Identity | published Soul pin; invitation/acceptance; `agent:` MCP principal; quota payer; memory namespace/revision; Agent context; authority-first revoke |
+| Module Studio | hidden authoring campaign; source limits/rights; outline approval; Module Gen Skill lookup; persistent lease/recovery/cancel/retry; strict Agent decisions; real `module_draft` evidence/edit/finalize; revision and idempotency; project quota; SSE/notification |
+| Module delivery | immutable compiled artifact; direct and published cross-campaign import; optional activation; version collision; restart/resume; source publication boundary |
 | quota | no grant, concurrent reservations, settle/release, provider retry, exact usage ledger, admin grant audit |
 | recovery | fresh migration; encrypted destination; checksum validation; isolated full restore; restored object re-import through MCP; reconciliation |
 | security | principal spoof attempt, IDOR, CSRF, rate limits, malicious archive, path traversal, secret scan |

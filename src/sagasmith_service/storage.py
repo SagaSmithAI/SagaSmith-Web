@@ -24,7 +24,14 @@ class LocalPrivateStorage:
         self.root.mkdir(parents=True, exist_ok=True)
         self.exchange_root.mkdir(parents=True, exist_ok=True)
 
-    def put(self, key: str, source: BinaryIO, *, max_bytes: int) -> tuple[str, int]:
+    def put(
+        self,
+        key: str,
+        source: BinaryIO,
+        *,
+        max_bytes: int,
+        content_type: str = "application/vnd.sagasmith.content-package+zip",
+    ) -> tuple[str, int]:
         destination = (self.root / key).resolve()
         if self.root not in destination.parents:
             raise ValueError("invalid storage key")
@@ -41,6 +48,37 @@ class LocalPrivateStorage:
                 digest.update(chunk)
                 target.write(chunk)
         return digest.hexdigest(), size
+
+    def read_bytes(self, key: str, *, max_bytes: int) -> bytes:
+        source = (self.root / key).resolve()
+        if self.root not in source.parents or not source.is_file():
+            raise PrivateStorageError("private object is unavailable")
+        if source.stat().st_size > max_bytes:
+            raise PrivateStorageError("private object exceeds the read limit")
+        return source.read_bytes()
+
+    def delete(self, key: str) -> None:
+        source = (self.root / key).resolve()
+        if self.root not in source.parents:
+            raise ValueError("invalid storage key")
+        source.unlink(missing_ok=True)
+
+    def materialize_source(self, key: str, artifact_id: str, name: str) -> Path:
+        source = (self.root / key).resolve()
+        if self.root not in source.parents or not source.is_file():
+            raise PrivateStorageError("module source object is unavailable")
+        suffix = Path(name).suffix.casefold()
+        if suffix not in {".pdf", ".md", ".markdown", ".txt"}:
+            raise ValueError("unsupported module source extension")
+        destination = (self.exchange_root / f"module-source-{artifact_id}{suffix}").resolve()
+        if self.exchange_root not in destination.parents:
+            raise ValueError("invalid exchange path")
+        try:
+            shutil.copyfile(source, destination)
+        except OSError as exc:
+            destination.unlink(missing_ok=True)
+            raise PrivateStorageError("module source could not be materialized") from exc
+        return destination
 
     def materialize_for_runtime(self, key: str, artifact_id: str) -> Path:
         source = (self.root / key).resolve()
@@ -83,7 +121,14 @@ class S3PrivateStorage:
         except Exception:
             self.client.create_bucket(Bucket=bucket)
 
-    def put(self, key: str, source: BinaryIO, *, max_bytes: int) -> tuple[str, int]:
+    def put(
+        self,
+        key: str,
+        source: BinaryIO,
+        *,
+        max_bytes: int,
+        content_type: str = "application/vnd.sagasmith.content-package+zip",
+    ) -> tuple[str, int]:
         digest = hashlib.sha256()
         size = 0
         temporary_name = ""
@@ -101,7 +146,7 @@ class S3PrivateStorage:
                 self.bucket,
                 key,
                 ExtraArgs={
-                    "ContentType": "application/vnd.sagasmith.content-package+zip",
+                    "ContentType": content_type,
                     "Metadata": {"sha256": digest.hexdigest()},
                 },
             )
@@ -109,6 +154,41 @@ class S3PrivateStorage:
         finally:
             if temporary_name:
                 Path(temporary_name).unlink(missing_ok=True)
+
+    def read_bytes(self, key: str, *, max_bytes: int) -> bytes:
+        try:
+            response = self.client.get_object(Bucket=self.bucket, Key=key)
+            size = int(response.get("ContentLength") or 0)
+            if size > max_bytes:
+                raise PrivateStorageError("private object exceeds the read limit")
+            payload = response["Body"].read(max_bytes + 1)
+        except PrivateStorageError:
+            raise
+        except Exception as exc:
+            raise PrivateStorageError("private object is unavailable") from exc
+        if len(payload) > max_bytes:
+            raise PrivateStorageError("private object exceeds the read limit")
+        return bytes(payload)
+
+    def delete(self, key: str) -> None:
+        try:
+            self.client.delete_object(Bucket=self.bucket, Key=key)
+        except Exception as exc:
+            raise PrivateStorageError("private object could not be deleted") from exc
+
+    def materialize_source(self, key: str, artifact_id: str, name: str) -> Path:
+        suffix = Path(name).suffix.casefold()
+        if suffix not in {".pdf", ".md", ".markdown", ".txt"}:
+            raise ValueError("unsupported module source extension")
+        destination = (self.exchange_root / f"module-source-{artifact_id}{suffix}").resolve()
+        if self.exchange_root not in destination.parents:
+            raise ValueError("invalid exchange path")
+        try:
+            self.client.download_file(self.bucket, key, str(destination))
+        except Exception as exc:
+            destination.unlink(missing_ok=True)
+            raise PrivateStorageError("module source could not be materialized") from exc
+        return destination
 
     def materialize_for_runtime(self, key: str, artifact_id: str) -> Path:
         destination = (self.exchange_root / f"{artifact_id}{ARCHIVE_EXTENSION}").resolve()

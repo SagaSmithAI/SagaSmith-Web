@@ -15,6 +15,10 @@ class FakeDndRuntime:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.fail_grant = False
+        self.campaign_count = 0
+        self.module_revision = 1
+        self.final_pack_id = ""
+        self.final_pack_version = ""
 
     async def get_campaign(self, **arguments: Any) -> dict[str, Any]:
         self.calls.append(("campaign_get", arguments))
@@ -29,7 +33,8 @@ class FakeDndRuntime:
 
     async def create_campaign(self, **arguments: Any) -> dict[str, Any]:
         self.calls.append(("campaign_create", arguments))
-        return {"id": "campaign-1", "revision": 1}
+        self.campaign_count += 1
+        return {"id": f"campaign-{self.campaign_count}", "revision": 1}
 
     async def grant_campaign_access(self, **arguments: Any) -> dict[str, Any]:
         self.calls.append(("campaign_access", arguments))
@@ -58,9 +63,84 @@ class FakeDndRuntime:
         self.calls.append(("content_pack_import", arguments))
         return {"action": "import", "result": {"module_id": "module-1"}}
 
+    async def import_content_artifact(self, **arguments: Any) -> dict[str, Any]:
+        self.calls.append(("content_pack_import", arguments))
+        return {"action": "import", "result": {"module_id": "module-1"}}
+
     async def activate_content_pack(self, **arguments: Any) -> dict[str, Any]:
         self.calls.append(("content_pack_activate", arguments))
         return {"action": "activate", "result": {"active": True}}
+
+    async def get_content_artifact(self, **arguments: Any) -> dict[str, Any]:
+        self.calls.append(("content_pack_get", arguments))
+        return {
+            "action": "get",
+            "result": {
+                "id": self.final_pack_id,
+                "version": self.final_pack_version,
+                "checksum": "a" * 64,
+            },
+        }
+
+    async def module_draft(self, **arguments: Any) -> dict[str, Any]:
+        self.calls.append(("module_draft", arguments))
+        action = arguments["action"]
+        if action == "evidence":
+            return {
+                "action": "evidence",
+                "result": [
+                    {
+                        "id": "chunk-1",
+                        "content": "A complete encounter with a legal ending.",
+                        "source_ref": {"chunk_hash": "b" * 64},
+                    }
+                ],
+            }
+        if action == "get":
+            return {
+                "action": "get",
+                "result": {
+                    "job": {
+                        "id": "draft-job-1",
+                        "state": "imported",
+                        "revision": self.module_revision,
+                    },
+                    "pack_draft": {},
+                },
+            }
+        if action == "finalize":
+            self.module_revision += 1
+            self.final_pack_id = str(arguments["payload"]["pack_id"])
+            self.final_pack_version = str(arguments["payload"]["version"])
+            return {
+                "action": "finalize",
+                "result": {
+                    "job": {
+                        "id": "draft-job-1",
+                        "state": "compiled",
+                        "revision": self.module_revision,
+                        "module_id": "module-authoring-1",
+                    },
+                    "artifact": "artifact://module/compiled-1",
+                    "summary": {"pack_id": "module-pack-1", "checksum": "a" * 64},
+                },
+            }
+        self.module_revision += 1
+        return {
+            "action": action,
+            "result": {
+                "job_id": "draft-job-1",
+                "job": {
+                    "id": "draft-job-1",
+                    "state": "imported",
+                    "revision": self.module_revision,
+                    "module_id": "module-authoring-1",
+                },
+                "module_id": "module-authoring-1",
+                "inspection": {"scenes": 3},
+                "validation": {"valid": True},
+            },
+        }
 
 
 class FakeAgentRuntime:

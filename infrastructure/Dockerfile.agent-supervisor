@@ -6,6 +6,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates git bubblewrap openssh-client libmagic1 && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY --from=agent_source . ./SagaSmith-agent
+COPY --from=module_gen_skills . /opt/sagasmith/skills/sagasmith-modulegen
+RUN test -f /opt/sagasmith/skills/sagasmith-modulegen/SKILL.md
 RUN mkdir ./SagaSmith-service
 COPY pyproject.toml README.md LICENSE ./SagaSmith-service/
 RUN mkdir -p ./SagaSmith-service/src/sagasmith_service
@@ -14,7 +16,7 @@ RUN pip install "/build/SagaSmith-agent[api]" /build/SagaSmith-service
 COPY src ./SagaSmith-service/src
 RUN pip install --no-deps /build/SagaSmith-service
 RUN useradd -m -u 10002 supervisor && mkdir -p /workspaces /config && \
-    chown -R supervisor:supervisor /workspaces /config
+    chown -R supervisor:supervisor /workspaces /config /opt/sagasmith/skills
 USER supervisor
 EXPOSE 8910
 CMD ["sagasmith-agent-supervisor"]

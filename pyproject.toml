@@ -38,6 +38,7 @@ dev = [
 sagasmith-service = "sagasmith_service.main:main"
 sagasmith-agent-supervisor = "sagasmith_service.agent_supervisor:main"
 sagasmith-hosted-agent-worker = "sagasmith_service.agent_worker:main"
+sagasmith-module-worker = "sagasmith_service.module_worker:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sagasmith_service"]

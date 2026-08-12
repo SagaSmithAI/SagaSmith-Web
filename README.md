@@ -26,6 +26,10 @@ The first production slice proves the complete trust chain:
    immutable publication; public Packs install through the same authoritative MCP facade.
 9. a hosted DM Identity accepts a campaign invitation, receives an `agent:<uuid>` MCP grant, uses a
    pinned Soul release and campaign-isolated revisioned memory, and loses access on revocation.
+10. Module Studio runs the complete D&D authoring product flow: brief/source -> outline approval ->
+    persistent Agent generation -> MCP-owned evidence review/edit -> explicit finalization ->
+    immutable release -> cross-campaign import and activation. Pack is an internal compiled artifact,
+    not a user-facing authoring concept.
 
 ## Local development
 
@@ -45,7 +49,8 @@ uv run ruff check .
 ```
 
 The real container acceptance suite is intentionally separate from unit tests. It boots
-PostgreSQL, Redis, MinIO, the public D&D MCP server, one real Nanobot worker and a deterministic
+PostgreSQL, Redis, MinIO, the public D&D MCP server, real Nanobot workers, the persistent Module
+Studio worker and a deterministic
 OpenAI-compatible test provider, then verifies account/lobby, authenticated Agent identity,
 dynamic native-tool refresh and execution, exact quota settlement, finalized Pack upload/import/
 activation, membership revocation and audit:

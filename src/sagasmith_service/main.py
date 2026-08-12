@@ -23,6 +23,8 @@ from sagasmith_service.api.campaigns import router as campaign_router
 from sagasmith_service.api.community import router as community_router
 from sagasmith_service.api.identities import router as identities_router
 from sagasmith_service.api.invites import router as invites_router
+from sagasmith_service.api.modules import NOTIFICATION_ROUTER
+from sagasmith_service.api.modules import router as modules_router
 from sagasmith_service.api.operations import router as operations_router
 from sagasmith_service.api.packs import router as packs_router
 from sagasmith_service.api.usage import router as usage_router
@@ -69,7 +71,9 @@ def create_app(
     app.state.session_factory = make_session_factory(engine)
     app.state.dnd_runtime = dnd_runtime or StreamableHttpDndRuntime(settings.dnd_mcp_url)
     app.state.agent_runtime = agent_runtime or HttpAgentRuntime(
-        settings.agent_api_url, settings.agent_api_key.get_secret_value()
+        settings.agent_api_url,
+        settings.agent_api_key.get_secret_value(),
+        timeout_seconds=settings.agent_completion_timeout_seconds,
     )
     app.state.rate_limiter = rate_limiter or (
         RedisRateLimiter(settings.redis_url)
@@ -117,6 +121,8 @@ def create_app(
                 policy = ("agent", settings.agent_rate_limit, 60)
             elif request.method == "POST" and path == "/api/packs":
                 policy = ("pack", settings.pack_rate_limit, 3600)
+            elif request.method == "POST" and path.startswith("/api/modules"):
+                policy = ("module", settings.module_rate_limit, 3600)
             elif request.method == "POST" and path == "/api/invites/accept":
                 policy = ("invite", 30, 60)
             elif request.method == "POST" and path == "/api/community/posts":
@@ -180,6 +186,8 @@ def create_app(
     app.include_router(campaign_router)
     app.include_router(community_router)
     app.include_router(identities_router)
+    app.include_router(modules_router)
+    app.include_router(NOTIFICATION_ROUTER)
     app.include_router(usage_router)
     app.include_router(agent_router)
     app.include_router(packs_router)

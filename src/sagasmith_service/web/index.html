@@ -12,8 +12,30 @@
       <form id="auth-form"><div class="tabs"><button type="button" data-mode="login" class="active">登录</button><button type="button" data-mode="register">注册</button></div><label>邮箱<input name="email" type="email" required></label><label id="name-row" hidden>显示名称<input name="display_name"></label><label>密码<input name="password" type="password" required minlength="12"></label><button class="primary">进入 SagaSmith</button><p id="auth-error" class="error"></p></form>
     </section>
     <section id="app" hidden>
-      <aside><button class="nav active" data-view="campaigns">战役</button><button class="nav" data-view="forge">发现</button><button class="nav" data-view="studio">创作台</button><button class="nav" data-view="identities">DM / Keeper</button><button class="nav" data-view="packs">私有 Pack</button><button class="nav" data-view="usage">用量</button><button id="logout" class="nav bottom">退出</button></aside>
+      <aside><button class="nav active" data-view="campaigns">战役</button><button class="nav" data-view="modules">模组工坊</button><button class="nav" data-view="forge">发现</button><button class="nav" data-view="studio">创作台</button><button class="nav" data-view="identities">DM / Keeper</button><button class="nav" data-view="packs">私有 Pack</button><button class="nav" data-view="usage">用量</button><button id="logout" class="nav bottom">退出</button></aside>
       <div class="workspace">
+        <section id="modules-view" class="view" hidden>
+          <div class="view-head"><div><p class="eyebrow">D&amp;D MODULE STUDIO</p><h2>模组工坊</h2><p class="muted">从创意和资料开始，由 Hosted Agent 按 Module Gen 流程生成、审校并编译。</p></div><button id="new-module" class="primary">新建模组</button></div>
+          <form id="module-form" class="card inline-form" hidden>
+            <label>Slug<input name="slug" pattern="[a-z0-9][a-z0-9-]{1,99}" required></label><label>标题<input name="title" required maxlength="200"></label><label>版本<input name="version" value="0.1.0" required></label>
+            <label>规则版本<select name="edition"><option value="2024">D&amp;D 2024</option><option value="2014">D&amp;D 2014</option></select></label><label>起始等级<input name="starting_level" type="number" min="1" max="20" value="1"></label><label>结束等级<input name="ending_level" type="number" min="1" max="20" value="1"></label>
+            <label>队伍人数<input name="party_size" type="number" min="1" max="12" value="4"></label><label>预计时长<input name="session_hours" type="number" min="1" value="4"></label><label>形态<select name="module_shape"><option value="one_shot">单次冒险</option><option value="short">短篇</option><option value="long">长篇</option><option value="sandbox">沙盒</option></select></label>
+            <label class="wide">创意简报<textarea name="brief" minlength="20" required placeholder="主题、冲突、玩家体验、限制与希望出现的内容"></textarea></label><div class="actions wide"><button type="button" id="cancel-module">取消</button><button class="primary">创建项目</button></div>
+          </form>
+          <div id="module-list" class="grid"></div>
+          <section id="module-detail" hidden>
+            <button id="close-module" class="link">← 返回模组项目</button><div class="module-hero card"><div><p id="module-state" class="eyebrow"></p><h2 id="module-title"></h2><p id="module-brief" class="muted"></p></div><div id="module-budget" class="budget-pill"></div></div>
+            <div class="module-layout"><div>
+              <section class="card module-stage"><h3>工作流</h3><div id="module-timeline" class="timeline"></div><div id="module-actions" class="actions left"></div><textarea id="module-instruction" rows="3" placeholder="给 Agent 的补充要求或修订意见"></textarea></section>
+              <section class="card module-stage"><h3>提纲与审校</h3><pre id="module-outline" class="module-json"></pre><div id="module-review"></div></section>
+              <section class="card module-stage"><h3>任务记录</h3><div id="module-runs"></div></section>
+            </div><aside class="module-sidebar">
+              <form id="module-source-form" class="card module-stage" enctype="multipart/form-data"><h3>来源资料</h3><label>PDF / Markdown / TXT<input name="source" type="file" accept=".pdf,.md,.markdown,.txt" required></label><label>权利基础<select name="rights_basis"><option value="original">原创</option><option value="open_licensed">开放许可</option><option value="reference_only">仅私下参考</option></select></label><label>许可证<input name="license_code" value="ARR"></label><label>署名<input name="attribution"></label><button>上传资料</button><div id="module-sources"></div></form>
+              <form id="module-install-form" class="card module-stage" hidden><h3>安装到战役</h3><select name="campaign_id" required></select><label class="check"><input name="activate" type="checkbox">安装后立即激活</label><button>安装</button></form>
+              <form id="module-publish-form" class="card module-stage" hidden><h3>提交发布</h3><label>来源类型<select name="source_kind"><option value="original">原创</option><option value="open_licensed">开放许可衍生</option></select></label><label>许可证<select name="license_code"><option>CC-BY-4.0</option><option>CC-BY-SA-4.0</option><option>CC0-1.0</option><option>OGL-1.0a</option><option>ORC-1.0</option></select></label><label>来源、署名与许可说明<textarea name="provenance" required placeholder="原创声明，或开放许可来源与署名"></textarea></label><label class="check"><input name="rights_attested" type="checkbox" required>我确认拥有发布权利并已完成必要署名</label><label>简介<textarea name="summary"></textarea></label><button>提交平台审核</button></form>
+            </aside></div>
+          </section>
+        </section>
         <section id="campaigns-view" class="view"><div class="view-head"><div><p class="eyebrow">CAMPAIGNS</p><h2>我的战役</h2></div><button id="new-campaign" class="primary">新建战役</button></div>
           <form id="invite-accept-form" class="card horizontal-form"><label>加入战役邀请<input name="token" minlength="32" placeholder="粘贴邀请代码"></label><button>接受邀请</button></form>
           <div id="campaign-list" class="grid"></div>

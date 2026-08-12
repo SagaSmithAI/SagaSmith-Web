@@ -10,6 +10,11 @@ services:
     environment:
       SAGASMITH_EXCHANGE_DIR: /srv/sagasmith/exchange
     expose: ["8080"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
     volumes:
       - exchange-data:/srv/sagasmith/exchange
     depends_on:
@@ -22,6 +27,31 @@ services:
       dnd-mcp:
         condition: service_healthy
       agent:
+        condition: service_healthy
+    restart: unless-stopped
+
+  module-worker:
+    build: .
+    env_file:
+      - path: .env
+        required: false
+    command: ["sagasmith-module-worker"]
+    entrypoint: []
+    environment:
+      SAGASMITH_EXCHANGE_DIR: /srv/sagasmith/exchange
+    expose: ["9101"]
+    volumes:
+      - exchange-data:/srv/sagasmith/exchange
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      dnd-mcp:
+        condition: service_healthy
+      agent:
+        condition: service_healthy
+      api:
         condition: service_healthy
     restart: unless-stopped
 
@@ -60,6 +90,7 @@ services:
       dockerfile: infrastructure/Dockerfile.agent-supervisor
       additional_contexts:
         agent_source: ${SAGASMITH_AGENT_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-agent.git#main}
+        module_gen_skills: ${SAGASMITH_MODULE_GEN_SKILLS_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-module-gen-skills.git#master}
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY}
       SAGASMITH_AGENT_INTERNAL_KEY: ${SAGASMITH_AGENT_INTERNAL_KEY:?set SAGASMITH_AGENT_INTERNAL_KEY}
