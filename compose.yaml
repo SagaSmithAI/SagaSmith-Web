@@ -25,8 +25,13 @@ services:
 
   dnd-mcp:
     build:
-      context: ..
-      dockerfile: SagaSmith-service/infrastructure/Dockerfile.dnd-mcp
+      context: .
+      dockerfile: infrastructure/Dockerfile.dnd-mcp
+      additional_contexts:
+        core: ${SAGASMITH_CORE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-core.git#main}
+        dnd: ${SAGASMITH_DND_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-dnd.git#main}
+        dnd_mcp: ${SAGASMITH_DND_MCP_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-dnd-mcp.git#main}
+        dnd_skills: ${SAGASMITH_DND_SKILLS_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-dnd-skills.git#main}
     environment:
       SAGASMITH_DND_MCP_TRANSPORT: streamable-http
       SAGASMITH_DND_MCP_HTTP_HOST: 0.0.0.0
@@ -43,8 +48,10 @@ services:
 
   agent:
     build:
-      context: ..
-      dockerfile: SagaSmith-service/infrastructure/Dockerfile.agent-supervisor
+      context: .
+      dockerfile: infrastructure/Dockerfile.agent-supervisor
+      additional_contexts:
+        agent_source: ${SAGASMITH_AGENT_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-agent.git#main}
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY}
       SAGASMITH_AGENT_INTERNAL_KEY: ${SAGASMITH_AGENT_INTERNAL_KEY:?set SAGASMITH_AGENT_INTERNAL_KEY}

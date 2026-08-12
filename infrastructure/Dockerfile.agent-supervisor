@@ -4,8 +4,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates git bubblewrap openssh-client libmagic1 && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
-COPY SagaSmith-agent ./SagaSmith-agent
-COPY SagaSmith-service ./SagaSmith-service
+COPY --from=agent_source . ./SagaSmith-agent
+COPY . ./SagaSmith-service
 RUN pip install "/build/SagaSmith-agent[api]" /build/SagaSmith-service
 RUN useradd -m -u 10002 supervisor && mkdir -p /workspaces /config && \
     chown -R supervisor:supervisor /workspaces /config

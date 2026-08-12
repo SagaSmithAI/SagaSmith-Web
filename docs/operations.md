@@ -7,6 +7,10 @@ The server checks out this private repository beside the required open repositor
 Replace every `replace-*` value, set the model credential, then run `start.bat` or
 `docker compose up -d --build`.
 
+The five `SAGASMITH_*_CONTEXT` values select the open-source build inputs. Pin reviewed tags or
+commit SHAs for production; never deploy moving `main` references. Remote Git contexts deliberately
+avoid sending unrelated local worktrees, virtual environments or private content to Docker.
+
 The private stack contains Caddy, Service API/Web, PostgreSQL, Redis, MinIO, D&D MCP and Agent.
 Only ports 80/443 are public. Service starts with `alembic upgrade head`. For a real hostname set
 `SAGASMITH_SITE_ADDRESS` to the hostname and `SAGASMITH_SECURE_COOKIES=true`.
