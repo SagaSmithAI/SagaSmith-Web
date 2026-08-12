@@ -1,0 +1,126 @@
+name: sagasmith-service
+
+services:
+  api:
+    build: .
+    env_file:
+      - path: .env
+        required: false
+    command: ["sagasmith-service"]
+    expose: ["8080"]
+    volumes:
+      - exchange-data:/srv/sagasmith/exchange
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      dnd-mcp:
+        condition: service_started
+      agent:
+        condition: service_started
+    restart: unless-stopped
+
+  dnd-mcp:
+    build:
+      context: ..
+      dockerfile: SagaSmith-service/infrastructure/Dockerfile.dnd-mcp
+    environment:
+      SAGASMITH_DND_MCP_TRANSPORT: streamable-http
+      SAGASMITH_DND_MCP_HTTP_HOST: 0.0.0.0
+      SAGASMITH_DND_MCP_HTTP_PORT: 8767
+      SAGASMITH_DND_MCP_HOME: /state
+      SAGASMITH_DND_SKILLS_DIR: /build/SagaSmith-dnd-skills
+      SAGASMITH_DND_MCP_RULE_IMPORT_ROOTS: /srv/sagasmith/exchange
+      SAGASMITH_DND_MCP_MODULE_IMPORT_ROOTS: /srv/sagasmith/exchange
+    volumes:
+      - dnd-state:/state
+      - exchange-data:/srv/sagasmith/exchange
+    expose: ["8767"]
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: ../SagaSmith-agent
+      dockerfile: Dockerfile
+      args:
+        NANOBOT_EXTRAS: api
+    command: ["serve", "--host", "0.0.0.0", "--port", "8900", "-w", "/workspace"]
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY}
+      SAGASMITH_AGENT_INTERNAL_KEY: ${SAGASMITH_AGENT_INTERNAL_KEY:?set SAGASMITH_AGENT_INTERNAL_KEY}
+    volumes:
+      - ./secrets/agent-config.json:/home/nanobot/.nanobot/config.json:ro
+      - agent-workspace:/workspace
+    expose: ["8900"]
+    depends_on: ["dnd-mcp"]
+    restart: unless-stopped
+
+  proxy:
+    image: caddy:2.10-alpine
+    environment:
+      SAGASMITH_SITE_ADDRESS: ${SAGASMITH_SITE_ADDRESS:-:80}
+    volumes:
+      - ./infrastructure/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    depends_on: ["api"]
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: sagasmith_service
+      POSTGRES_USER: sagasmith
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sagasmith -d sagasmith_service"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: sagasmith
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
+    volumes:
+      - object-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
+  object-data:
+  exchange-data:
+  dnd-state:
+  agent-workspace:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,17 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libmagic1 poppler-utils tesseract-ocr && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+COPY sagasmith-core ./sagasmith-core
+COPY sagasmith-dnd ./sagasmith-dnd
+COPY SagaSmith-dnd-mcp ./SagaSmith-dnd-mcp
+COPY SagaSmith-dnd-skills ./SagaSmith-dnd-skills
+RUN pip install "/build/sagasmith-core[vector,documents,ocr]" \
+    "/build/sagasmith-dnd[all]" "/build/SagaSmith-dnd-mcp[dense]"
+RUN useradd -m -u 10001 sagasmith && mkdir -p /state /exchange && \
+    chown -R sagasmith:sagasmith /state /exchange
+USER sagasmith
+EXPOSE 8767
+CMD ["sagasmith-dnd-mcp"]

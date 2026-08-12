@@ -1,0 +1,23 @@
+{
+  "providers": {
+    "openai": { "apiKey": "${OPENAI_API_KEY}" }
+  },
+  "modelPresets": {
+    "hosted": { "provider": "openai", "model": "gpt-5.4-mini" }
+  },
+  "agents": {
+    "defaults": { "modelPreset": "hosted" }
+  },
+  "api": {
+    "apiKey": "${SAGASMITH_AGENT_INTERNAL_KEY}"
+  },
+  "tools": {
+    "mcpServers": {
+      "sagasmith_dnd": {
+        "type": "streamableHttp",
+        "url": "http://dnd-mcp:8767/mcp",
+        "enabledTools": ["*"]
+      }
+    }
+  }
+}

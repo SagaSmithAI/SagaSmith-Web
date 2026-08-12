@@ -1,0 +1,81 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Protocol
+
+import httpx
+
+
+@dataclass(frozen=True)
+class AgentResult:
+    content: str
+    request_id: str | None
+    model: str | None
+    prompt_tokens: int
+    completion_tokens: int
+
+    @property
+    def total_tokens(self) -> int:
+        return self.prompt_tokens + self.completion_tokens
+
+
+class AgentRuntime(Protocol):
+    async def complete(
+        self,
+        *,
+        session_id: str,
+        content: str,
+        context: dict[str, Any],
+    ) -> AgentResult: ...
+
+
+class HttpAgentRuntime:
+    def __init__(self, base_url: str, api_key: str = "") -> None:
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+
+    async def complete(
+        self,
+        *,
+        session_id: str,
+        content: str,
+        context: dict[str, Any],
+    ) -> AgentResult:
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        authenticated_context = "\n".join(
+            [
+                "[SagaSmith Service authenticated context]",
+                f"campaign_id={context['campaign_id']}",
+                f"principal_id={context['principal_id']}",
+                f"campaign_role={context['campaign_role']}",
+                "Use these identifiers as authoritative call arguments; MCP validates every write.",
+                "[Player message]",
+                content,
+            ]
+        )
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180, connect=10)) as client:
+            response = await client.post(
+                f"{self.base_url}/v1/chat/completions",
+                headers=headers,
+                json={
+                    "model": "nanobot",
+                    "messages": [{"role": "user", "content": authenticated_context}],
+                    "session_id": session_id,
+                    "stream": False,
+                },
+            )
+        if response.status_code >= 400:
+            raise RuntimeError(f"Agent returned HTTP {response.status_code}")
+        payload = response.json()
+        try:
+            content_value = str(payload["choices"][0]["message"]["content"])
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError("Agent returned an invalid completion") from exc
+        usage = payload.get("usage") or {}
+        return AgentResult(
+            content=content_value,
+            request_id=payload.get("id"),
+            model=payload.get("model"),
+            prompt_tokens=int(usage.get("prompt_tokens") or 0),
+            completion_tokens=int(usage.get("completion_tokens") or 0),
+        )
