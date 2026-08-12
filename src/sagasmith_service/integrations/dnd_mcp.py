@@ -84,7 +84,14 @@ class StreamableHttpDndRuntime:
         self.url = url
         self.bearer_token = bearer_token
 
-    async def _call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def _call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        exposure_principal: str,
+        campaign_id: str | None,
+    ) -> dict[str, Any]:
         headers = {}
         if self.bearer_token:
             headers["Authorization"] = f"Bearer {self.bearer_token}"
@@ -97,10 +104,56 @@ class StreamableHttpDndRuntime:
             )
             session = await stack.enter_async_context(ClientSession(read, write))
             await session.initialize()
+            exposure_args: dict[str, Any] = {
+                "action": "open",
+                "principal_id": exposure_principal,
+            }
+            if campaign_id is not None:
+                exposure_args["campaign_id"] = campaign_id
+            _tool_payload(await session.call_tool("exposure", arguments=exposure_args))
+            search = _tool_payload(
+                await session.call_tool(
+                    "exposure",
+                    arguments={
+                        "action": "search",
+                        "campaign_id": campaign_id,
+                        "principal_id": exposure_principal,
+                        "query": name,
+                    },
+                )
+            )
+            matched_tools = {
+                str(item.get("tool_id") or "") for item in search.get("matches", [])
+            }
+            visible_tools = {str(item) for item in search.get("visible_tools", [])}
+            if name not in matched_tools and name not in visible_tools:
+                raise RuntimeError(
+                    f"D&D MCP does not expose {name!r} in the current context: {search}"
+                )
+            if name not in visible_tools:
+                _tool_payload(
+                    await session.call_tool(
+                        "exposure",
+                        arguments={
+                            "action": "set",
+                            "campaign_id": campaign_id,
+                            "principal_id": exposure_principal,
+                            "add_tool_ids": [name],
+                        },
+                    )
+                )
+            listed = await session.list_tools()
+            if name not in {tool.name for tool in listed.tools}:
+                raise RuntimeError(f"D&D MCP did not publish {name!r} after exposure update")
             return _tool_payload(await session.call_tool(name, arguments=arguments))
 
     async def create_campaign(self, **arguments: Any) -> dict[str, Any]:
-        return await self._call("campaign_create", arguments)
+        return await self._call(
+            "campaign_create",
+            arguments,
+            exposure_principal=arguments["principal_id"],
+            campaign_id=None,
+        )
 
     async def get_campaign(self, **arguments: Any) -> dict[str, Any]:
         return await self._call(
@@ -110,6 +163,8 @@ class StreamableHttpDndRuntime:
                 "payload": {"campaign_id": arguments["campaign_id"]},
                 "principal_id": arguments["principal_id"],
             },
+            exposure_principal=arguments["principal_id"],
+            campaign_id=arguments["campaign_id"],
         )
 
     async def grant_campaign_access(self, **arguments: Any) -> dict[str, Any]:
@@ -122,6 +177,8 @@ class StreamableHttpDndRuntime:
                 "payload": {"role": arguments["role"]},
                 "by_principal_id": arguments["by_principal_id"],
             },
+            exposure_principal=arguments["by_principal_id"],
+            campaign_id=arguments["campaign_id"],
         )
 
     async def grant_actor_access(self, **arguments: Any) -> dict[str, Any]:
@@ -138,6 +195,8 @@ class StreamableHttpDndRuntime:
                 },
                 "by_principal_id": arguments["by_principal_id"],
             },
+            exposure_principal=arguments["by_principal_id"],
+            campaign_id=arguments["campaign_id"],
         )
 
     async def import_content_pack(self, **arguments: Any) -> dict[str, Any]:
@@ -153,4 +212,6 @@ class StreamableHttpDndRuntime:
                 "principal_id": arguments["principal_id"],
                 "idempotency_key": arguments["idempotency_key"],
             },
+            exposure_principal=arguments["principal_id"],
+            campaign_id=arguments["campaign_id"],
         )

@@ -17,3 +17,7 @@
 Unit/API coverage in this repository is the fast gate. The dynamic-tool, phase, restore and native
 call rows require the real hosted Agent plus D&D MCP and cannot be replaced with fabricated tool
 results.
+
+With an isolated D&D MCP running, execute
+`uv run python scripts/real_mcp_smoke.py --url http://127.0.0.1:8767/mcp` to prove campaign creation
+and authoritative phase read through the real public facade.
