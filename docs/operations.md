@@ -2,10 +2,11 @@
 
 ## Single-server installation
 
-The server checks out this private repository beside the required open repositories. Run
-`install.bat` on Windows or copy `.env.example` and `config/agent-config.example.json` manually.
-Replace every `replace-*` value, set the model credential, then run `start.bat` or
-`docker compose up -d --build`.
+The server checks out this private repository beside the required open repositories. Copy
+`.env.example` to `.env` and `config/agent-config.example.json` to
+`secrets/agent-config.json`, then replace every `replace-*` value and set the model credential.
+Start the hosted stack with `docker compose up -d --build`; inspect it with
+`docker compose ps` and stop it with `docker compose down`.
 
 The six `SAGASMITH_*_CONTEXT` values select the open-source build inputs, including
 `SAGASMITH_MODULE_GEN_SKILLS_CONTEXT`. Pin reviewed tags or
@@ -45,7 +46,8 @@ handled as DM-private campaign data, not community content.
 
 ## Backup
 
-`backup.bat` creates a timestamped folder containing a PostgreSQL custom dump and compressed copies
+`powershell -NoProfile -File scripts/backup.ps1` creates a timestamped folder containing a
+PostgreSQL custom dump and compressed copies
 of private object storage, D&D state and Agent workspaces, plus SHA-256 checksums. Copy the completed
 folder to encrypted off-host storage. Redis is a queue/cache and is not a recovery authority.
 The script stops all application writers for a consistent cut, records the Service commit and dirty
@@ -73,7 +75,8 @@ year. Object versioning is additional protection, not a substitute for a separat
 8. Verify Lobby -> Play -> Combat -> Play, snapshot/branch restore, undo/redo, quota idempotency and
    private Pack access before reopening traffic.
 
-`restore.bat` refuses the live project name, requires `RESTORE-<project>` confirmation, requires a
+`powershell -NoProfile -File scripts/restore.ps1` refuses the live project name, requires
+`RESTORE-<project>` confirmation, requires a
 fresh project with no existing volumes, verifies hashes before extraction, and never starts the
 proxy. The automated smoke waits for external readiness, logs in, checks control-plane/audit state,
 reads authoritative campaign state, then downloads a restored private Pack from object storage and
