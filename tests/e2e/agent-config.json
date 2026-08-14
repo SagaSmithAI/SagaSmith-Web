@@ -12,7 +12,10 @@
   "agents": {
     "defaults": {
       "modelPreset": "hosted",
-      "externalSkillsDirs": ["/opt/sagasmith/skills"]
+      "externalSkillsDirs": [
+        "/opt/sagasmith/skills/dnd",
+        "/opt/sagasmith/skills/modulegen"
+      ]
     }
   },
   "api": {
@@ -24,6 +27,9 @@
         "type": "streamableHttp",
         "url": "http://dnd-mcp:8767/mcp",
         "injectPrincipal": true,
+        "sessionScoped": true,
+        "toolTimeout": 900,
+        "exposeResourcesAndPrompts": true,
         "enabledTools": ["*"]
       }
     }

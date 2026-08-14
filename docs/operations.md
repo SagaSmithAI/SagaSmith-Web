@@ -1,5 +1,20 @@
 # Operations and recovery
 
+## Component release gate
+
+The default Compose build uses immutable reviewed SagaSmith revisions. Before changing any
+component context, update `component-versions.json`, review the upstream protocol changes, and run:
+
+```powershell
+uv run python scripts/audit_components.py --fetch --strict
+uv run python scripts/audit_components.py --scope build --strict --json
+docker compose config
+```
+
+Do not replace the pinned defaults with moving branches in a production release. Environment
+overrides are intended for an explicit candidate revision during review, after which the accepted
+SHA becomes the new lock.
+
 ## Single-server installation
 
 The server checks out this private repository beside the required open repositories. Copy

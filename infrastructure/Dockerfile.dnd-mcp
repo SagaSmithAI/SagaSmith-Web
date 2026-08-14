@@ -8,6 +8,7 @@ COPY --from=core . ./sagasmith-core
 COPY --from=dnd . ./sagasmith-dnd
 COPY --from=dnd_mcp . ./SagaSmith-dnd-mcp
 COPY --from=dnd_skills . ./SagaSmith-dnd-skills
+COPY --from=module_gen_skills . ./SagaSmith-module-gen-skills
 RUN pip install "/build/sagasmith-core[documents]" \
     "/build/sagasmith-dnd[documents,images]" "/build/SagaSmith-dnd-mcp"
 RUN useradd -m -u 10001 sagasmith && mkdir -p /state /srv/sagasmith/exchange && \

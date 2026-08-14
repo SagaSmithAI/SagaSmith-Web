@@ -6,8 +6,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates git bubblewrap openssh-client libmagic1 && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY --from=agent_source . ./SagaSmith-agent
-COPY --from=module_gen_skills . /opt/sagasmith/skills/sagasmith-modulegen
-RUN test -f /opt/sagasmith/skills/sagasmith-modulegen/SKILL.md
+COPY --from=dnd_skills ./full/skills /opt/sagasmith/skills/dnd
+COPY --from=module_gen_skills . /opt/sagasmith/skills/modulegen
+RUN test -f /opt/sagasmith/skills/dnd/dnd-dm/SKILL.md && \
+    test -f /opt/sagasmith/skills/modulegen/SKILL.md
 RUN mkdir ./SagaSmith-service
 COPY pyproject.toml README.md LICENSE ./SagaSmith-service/
 RUN mkdir -p ./SagaSmith-service/src/sagasmith_service

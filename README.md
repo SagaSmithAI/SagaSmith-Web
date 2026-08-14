@@ -67,6 +67,14 @@ Architecture and operating references:
 - [`docs/operations.md`](docs/operations.md)
 - [`docs/test-matrix.md`](docs/test-matrix.md)
 - [`docs/community.md`](docs/community.md)
+- [`docs/component-audit-2026-08-14.md`](docs/component-audit-2026-08-14.md)
+
+Audited public build inputs are pinned in [`component-versions.json`](component-versions.json).
+Before a release, fetch and verify every sibling repository with:
+
+```powershell
+uv run python scripts/audit_components.py --fetch --strict
+```
 
 ## Non-negotiable boundary
 
