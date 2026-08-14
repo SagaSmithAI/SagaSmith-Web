@@ -79,7 +79,7 @@ def inspect_component(
     )
     if branch != component["branch"]:
         problems.append(f"branch is {branch!r}")
-    if head != component["revision"]:
+    if component["revision"] != "self" and head != component["revision"]:
         problems.append(f"revision is {head}")
     if _normalize_remote(remote) != _normalize_remote(component["remote"]):
         problems.append(f"origin is {remote!r}")

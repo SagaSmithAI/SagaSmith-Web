@@ -31,7 +31,7 @@ being silently mixed into the D&D control plane.
 | `sagasmith-coc-ui` | `d6c52b9fa08a` | real CoC gateway workbench | audited local UI |
 | `SagaSmith-narrative-mcp` | `f6d84f837309` | hardened system-neutral authority and snapshots | audited independent local authority |
 | `SagaSmith-narrative-skills` | `48d2621aebb6` | hardened narrative runtime workflows | audited local skills |
-| `SagaSmith-service` | `214b15a9cb39` | migration normalization after M4 | integration worktree base |
+| `SagaSmith-service` | `self` (`214b15a9cb39` base) | migration normalization after M4 | integration worktree; cannot self-pin its resulting commit |
 | `sagasmith-ui` | `ff0fae483553` | Apache-2.0 relicensing | legacy local shell; no current protocol authority |
 | `SagaSmithAI.github.io` | `91ca1bb789f4` | public Pack/combat boundary documentation | public documentation |
 

@@ -126,7 +126,8 @@
     {
       "repository": "SagaSmith-service",
       "branch": "main",
-      "revision": "214b15a9cb39c9df84ba4a7499028c6d53cbfefb",
+      "revision": "self",
+      "base_revision": "214b15a9cb39c9df84ba4a7499028c6d53cbfefb",
       "remote": "https://github.com/SagaSmithAI/SagaSmith-service.git",
       "usage": "control-plane-workspace",
       "enforced": false
