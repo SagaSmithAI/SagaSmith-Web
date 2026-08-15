@@ -60,10 +60,10 @@ services:
       context: .
       dockerfile: infrastructure/Dockerfile.dnd-mcp
       additional_contexts:
-        core: ${SAGASMITH_CORE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-core.git#028cf19391279953ed353def04f0b2dbf918dbbc}
-        dnd: ${SAGASMITH_DND_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-dnd.git#346ec293442171c4ae80272c6b4e9d30b608d0a3}
-        dnd_mcp: ${SAGASMITH_DND_MCP_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-dnd-mcp.git#2219d18aee53014adb7cb4b768313d6aa033cf28}
-        dnd_skills: ${SAGASMITH_DND_SKILLS_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-dnd-skills.git#1e44c39b36e5802337c9ed0f76d6f9e0b0549729}
+        core: ${SAGASMITH_CORE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-core.git#7b36d3da232cd05ad0e36bde891f8bc2f532bf6f}
+        dnd: ${SAGASMITH_DND_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-dnd.git#0dce1aad7ad7f7d442c39c0c8699ed957ff4fe12}
+        dnd_mcp: ${SAGASMITH_DND_MCP_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-dnd-mcp.git#740aa64aaabf8e2d6c28da59c12fb4e5fad4faed}
+        dnd_skills: ${SAGASMITH_DND_SKILLS_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-dnd-skills.git#a45a3b37147478f38493ccf07545920aa6a6c07a}
         module_gen_skills: ${SAGASMITH_MODULE_GEN_SKILLS_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-module-gen-skills.git#6a6261f52a88dab7bb360df6dbfcd1443b500bbd}
     environment:
       SAGASMITH_DND_MCP_TRANSPORT: streamable-http
@@ -91,8 +91,8 @@ services:
       context: .
       dockerfile: infrastructure/Dockerfile.agent-supervisor
       additional_contexts:
-        agent_source: ${SAGASMITH_AGENT_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-agent.git#211782e99269f10cb3dcfed2f5ce26bfd0be2330}
-        dnd_skills: ${SAGASMITH_DND_SKILLS_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-dnd-skills.git#1e44c39b36e5802337c9ed0f76d6f9e0b0549729}
+        agent_source: ${SAGASMITH_AGENT_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-agent.git#873c71c9c132d3af238249c7fd5a165513e058a8}
+        dnd_skills: ${SAGASMITH_DND_SKILLS_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-dnd-skills.git#a45a3b37147478f38493ccf07545920aa6a6c07a}
         module_gen_skills: ${SAGASMITH_MODULE_GEN_SKILLS_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-module-gen-skills.git#6a6261f52a88dab7bb360df6dbfcd1443b500bbd}
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY}

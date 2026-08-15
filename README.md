@@ -68,6 +68,7 @@ Architecture and operating references:
 - [`docs/test-matrix.md`](docs/test-matrix.md)
 - [`docs/community.md`](docs/community.md)
 - [`docs/component-audit-2026-08-14.md`](docs/component-audit-2026-08-14.md)
+- [`docs/component-audit-2026-08-16.md`](docs/component-audit-2026-08-16.md)
 
 Audited public build inputs are pinned in [`component-versions.json`](component-versions.json).
 Before a release, fetch and verify every sibling repository with:

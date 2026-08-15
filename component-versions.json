@@ -1,6 +1,6 @@
 {
   "schema": "sagasmith.component-lock/v1",
-  "audited_at": "2026-08-14T19:00:00+08:00",
+  "audited_at": "2026-08-16T10:00:00+08:00",
   "product_scope": "hosted-dnd",
   "components": [
     {
@@ -14,7 +14,7 @@
     {
       "repository": "SagaSmith-agent",
       "branch": "main",
-      "revision": "211782e99269f10cb3dcfed2f5ce26bfd0be2330",
+      "revision": "873c71c9c132d3af238249c7fd5a165513e058a8",
       "remote": "https://github.com/SagaSmithAI/SagaSmith-agent.git",
       "usage": "build",
       "enforced": true
@@ -30,7 +30,7 @@
     {
       "repository": "SagaSmith-coc-mcp",
       "branch": "main",
-      "revision": "d98502ac86844f1f89e1561317f7a8aff01a0255",
+      "revision": "908fefa505ceacdc603e20eb20cf053e1d77b187",
       "remote": "https://github.com/SagaSmithAI/SagaSmith-coc-mcp.git",
       "usage": "audited-local-authority",
       "enforced": false
@@ -38,7 +38,7 @@
     {
       "repository": "SagaSmith-coc-skills",
       "branch": "master",
-      "revision": "441e7c21f86d69ea9f8e3d13ef41cc1de3f03b68",
+      "revision": "8f547f371c47a6ef2f70b2174174e104d650a7c7",
       "remote": "https://github.com/SagaSmithAI/SagaSmith-coc-skills.git",
       "usage": "audited-local-skills",
       "enforced": false
@@ -54,7 +54,7 @@
     {
       "repository": "sagasmith-core",
       "branch": "main",
-      "revision": "028cf19391279953ed353def04f0b2dbf918dbbc",
+      "revision": "7b36d3da232cd05ad0e36bde891f8bc2f532bf6f",
       "remote": "https://github.com/SagaSmithAI/Sagasmith-core.git",
       "usage": "build",
       "enforced": true
@@ -62,7 +62,7 @@
     {
       "repository": "sagasmith-dnd",
       "branch": "main",
-      "revision": "346ec293442171c4ae80272c6b4e9d30b608d0a3",
+      "revision": "0dce1aad7ad7f7d442c39c0c8699ed957ff4fe12",
       "remote": "https://github.com/SagaSmithAI/Sagasmith-dnd.git",
       "usage": "build",
       "enforced": true
@@ -70,7 +70,7 @@
     {
       "repository": "SagaSmith-dnd-content-library",
       "branch": "main",
-      "revision": "3adca46b468501df359338861361d5721fdf0332",
+      "revision": "cd3224767822d55c0c511a52e2377bfbb0e0a969",
       "remote": "https://github.com/SagaSmithAI/SagaSmith-dnd-content-library.git",
       "usage": "audited-local-catalog",
       "enforced": false
@@ -78,7 +78,7 @@
     {
       "repository": "SagaSmith-dnd-mcp",
       "branch": "main",
-      "revision": "2219d18aee53014adb7cb4b768313d6aa033cf28",
+      "revision": "740aa64aaabf8e2d6c28da59c12fb4e5fad4faed",
       "remote": "https://github.com/SagaSmithAI/SagaSmith-dnd-mcp.git",
       "usage": "build",
       "enforced": true
@@ -86,7 +86,7 @@
     {
       "repository": "SagaSmith-dnd-skills",
       "branch": "master",
-      "revision": "1e44c39b36e5802337c9ed0f76d6f9e0b0549729",
+      "revision": "a45a3b37147478f38493ccf07545920aa6a6c07a",
       "remote": "https://github.com/SagaSmithAI/SagaSmith-dnd-skills.git",
       "usage": "build",
       "enforced": true
@@ -110,7 +110,7 @@
     {
       "repository": "SagaSmith-narrative-mcp",
       "branch": "main",
-      "revision": "f6d84f837309be3dc8fec1863a98dd996649960d",
+      "revision": "81f7c9303e7c4cd45db59d86701361f2b569e0ca",
       "remote": "https://github.com/SagaSmithAI/SagaSmith-narrative-mcp.git",
       "usage": "audited-local-authority",
       "enforced": false
