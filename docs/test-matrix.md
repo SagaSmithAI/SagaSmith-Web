@@ -3,9 +3,11 @@
 | Area | Required evidence |
 |---|---|
 | account | register/login/logout; duplicate email; revoked/expired session; admin separation |
-| lobby | owner campaign creation; idempotent retry; application approve/reject; invite expire/revoke/limit |
+| admission | owner campaign creation; idempotent retry; application approve/reject; invite expire/revoke/limit |
 | authority | MCP receipt before projection; player cannot review; actor bind/revoke; stale revision rejected |
-| Agent | authenticated scope injection; per-conversation session; failure release; retry same payload; payload mismatch conflict |
+| room + Agent | shared ordered timeline; audience filtering; authenticated sender scope; per-principal session; chat without Agent; action quota settlement; retry same payload; payload mismatch conflict |
+| synchronized panels | SSE message and `state.changed`; Character/Play/Combat/Module projection refresh; player intents; DM phase/combat commands; stream reconnect recovery |
+| live-room UI | private character-card scope; character/spells/inventory/party drawer; inspected versus acting actor; Grid-only map; token hover-safe fields; target/destination action context; expanded Grid preserves the single composer |
 | dynamic tools | real host lookup; Lobby/Play/Combat list changes; `tools/list_changed`; next legal native call |
 | phases | Lobby -> Play -> Combat -> Play; grid and Agent spatial modes; chase/combat exclusivity |
 | continuity | restart/resume; snapshot/branch restore; undo/redo; exposure immediately recoverable |

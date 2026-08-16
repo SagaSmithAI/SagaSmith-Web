@@ -48,7 +48,7 @@ call.
 - Browser authentication is an opaque, hashed, revocable server session in an HttpOnly cookie.
 - A stable human MCP principal is derived as `user:<service-user-uuid>`. An accepted hosted
   Identity assignment derives `agent:<identity-uuid>`. Browsers cannot submit either principal.
-- Campaign ownership and lobby workflow are Service concepts; effective membership and actor
+- Campaign ownership and admission workflow are Service concepts; effective membership and actor
   control are granted by `access_grant` and enforced again by MCP at call time.
 - The campaign owner may promote or demote active members between `player` and `dm`; Service calls
   the MCP grant first and updates its role projection only after the authoritative receipt.
@@ -61,20 +61,46 @@ call.
 
 ## Dynamic native tools
 
-The browser does not receive or imitate MCP tools. It talks to an Agent conversation endpoint. A
-hosted Agent worker owns a real MCP client session, consumes the server's current native
+The browser does not receive or imitate MCP tools. It posts chat or action messages to a shared
+campaign room. Ordinary chat is persisted without invoking the Agent; an action starts a
+sender-scoped Agent run whose result is appended to the same ordered room timeline. A hosted Agent
+worker owns a real MCP client session, consumes the server's current native
 `tools/list`, listens for `tools/list_changed`, and refreshes schemas before the next call. Lobby,
 Play, Combat and checkout/restore transitions therefore change the real native tool list.
 
-Workers are isolated per active campaign conversation. The private Agent Supervisor starts a
-dedicated Nanobot subprocess for each conversation, giving each one a separate MCP client and tool
-registry without mounting the Docker socket. The cloud topology is:
+Workers are isolated by campaign and authenticated principal. The private Agent Supervisor starts
+a dedicated Nanobot subprocess for each principal's stable room conversation, giving every human
+or hosted Identity a separate MCP client and tool registry without mounting the Docker socket.
+Shared room context is only the sender-visible message window; it never changes that worker's
+principal or actor scope. The cloud topology is:
 
 ```text
-conversation lease -> dedicated Agent worker -> dedicated MCP session
-                   -> persisted Agent workspace/session volume
-                   -> idle timeout -> graceful close -> resumable lease
+campaign room -> principal-scoped conversation lease -> dedicated Agent worker
+                                              -> dedicated MCP session
+                                              -> persisted workspace/session volume
+                                              -> idle timeout -> graceful close -> resumable lease
 ```
+
+Room messages and room events use monotonic per-room sequence numbers in PostgreSQL. The browser
+opens an SSE stream after loading a REST snapshot. Message events append to the timeline, while
+`state.changed` invalidates the Character, Play, Combat and Module projections. Panel commands use
+the same authenticated room action path or a narrow Service-to-MCP facade; panels never write game
+tables or reproduce rules. A periodic projection refresh is only recovery for a lost stream, not a
+second authority.
+
+The live room uses one shared, persistent composer with three synchronized surfaces: a collapsible
+left character drawer, the central room timeline, and right scene/combat/module/member panels. The
+character drawer switches between the full private card, spells, equipment/inventory and an
+audience-safe party summary. Full cards are fetched separately through `character_query(view=get)`
+only for DM or an actor binding with `can_view_private`; other characters are never delivered to
+the browser as hidden DOM data. Selecting a character for inspection is distinct from selecting the
+actor that will perform the next action.
+
+Grid Combat is rendered only when the MCP audience projection says the active encounter uses
+`positioning_mode=grid` and includes a battle map. The expanded map reuses the same composer DOM,
+so its draft and selected audience survive expansion. Token, target and destination selections are
+sent to the Agent as declared action context, not authoritative facts; the Agent must validate them
+through MCP. Agent-positioned Combat never synthesizes coordinates or a fallback grid.
 
 The Service-injected context contains the authenticated campaign and principal. It is a semantic
 aid only; every MCP call remains fail-closed on membership, actor, phase, revision and payload.
@@ -92,7 +118,7 @@ exception is granted.
 | users, sessions, quotas, invitations, applications | Service PostgreSQL | PostgreSQL backup |
 | campaign/member/actor display projection | Service cache | MCP reconciliation |
 | campaign world and mechanic state | D&D MCP | D&D state backup/snapshot |
-| Agent conversation/run and usage receipt | Service + Agent workspace | both backups |
+| room message/event/read cursor and Agent run/usage receipt | Service + Agent workspace | both backups |
 | private Pack archive | private object storage | versioned object backup |
 | imported/activated Pack state | D&D MCP | MCP backup + immutable archive |
 | public artifact/release metadata, discussions, reports | Service PostgreSQL | PostgreSQL backup |

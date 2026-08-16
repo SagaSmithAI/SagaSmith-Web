@@ -27,6 +27,7 @@ from sagasmith_service.api.modules import NOTIFICATION_ROUTER
 from sagasmith_service.api.modules import router as modules_router
 from sagasmith_service.api.operations import router as operations_router
 from sagasmith_service.api.packs import router as packs_router
+from sagasmith_service.api.rooms import router as rooms_router
 from sagasmith_service.api.usage import router as usage_router
 from sagasmith_service.audit import bind_request_id, reset_request_id
 from sagasmith_service.config import Settings, get_settings
@@ -190,6 +191,7 @@ def create_app(
     app.include_router(NOTIFICATION_ROUTER)
     app.include_router(usage_router)
     app.include_router(agent_router)
+    app.include_router(rooms_router)
     app.include_router(packs_router)
     app.include_router(invites_router)
     app.include_router(admin_router)

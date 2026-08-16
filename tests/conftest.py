@@ -31,6 +31,94 @@ class FakeDndRuntime:
             },
         }
 
+    async def get_panel_state(self, **arguments: Any) -> dict[str, Any]:
+        self.calls.append(("panel_state", arguments))
+        return {
+            "campaign": {
+                "id": arguments["campaign_id"],
+                "revision": 7,
+                "effective_game_phase": "play",
+            },
+            "phase": "play",
+            "revision": 7,
+            "party": {"members": ["actor-1"]},
+            "characters": [
+                {
+                    "id": "actor-1",
+                    "name": "Aria",
+                    "revision": 3,
+                    "sheet": {"combat": {"hp": {"value": 12, "maximum": 18}}},
+                }
+            ],
+            "modules": [{"id": "module-1", "title": "Test Module"}],
+            "current_module": {"scene": {"id": "scene-1", "title": "Gate"}},
+            "combat": None,
+        }
+
+    async def get_character_card(self, **arguments: Any) -> dict[str, Any]:
+        self.calls.append(("character_card", arguments))
+        return {
+            "id": arguments["character_id"],
+            "campaign_id": arguments["campaign_id"],
+            "name": "Aria",
+            "character_type": "pc",
+            "revision": 3,
+            "sheet": {
+                "progression": {
+                    "level": 5,
+                    "classes": [{"name": "Fighter", "level": 5}],
+                },
+                "combat": {"hp": {"value": 12, "max": 18, "temp": 2}},
+                "abilities": {},
+                "skills": {},
+                "spellcasting": {"spell_slots": {}},
+                "content": {"spells": [], "features": [], "feats": [], "activities": []},
+                "inventory": {"items": [], "equipment_slots": {}, "wallet": {}},
+                "conditions": [],
+                "resources": {},
+                "traits": {},
+            },
+            "derived": {
+                "hit_points": {"value": 12, "max": 18, "temp": 2},
+                "armor_class": 16,
+                "initiative": 3,
+                "speed": {"walk": 30},
+                "ability_scores": {},
+                "ability_modifiers": {},
+                "saving_throws": {},
+                "skills": {},
+                "inventory": {"encumbrance": {}},
+            },
+        }
+
+    async def set_game_phase(self, **arguments: Any) -> dict[str, Any]:
+        self.calls.append(("phase_set", arguments))
+        return {
+            "action": "set",
+            "result": {
+                "effective_game_phase": arguments["tool_profile"],
+                "campaign_revision": arguments["expected_revision"] + 1,
+            },
+        }
+
+    async def start_combat(self, **arguments: Any) -> dict[str, Any]:
+        self.calls.append(("combat_start", arguments))
+        return {
+            "result": {
+                "campaign_revision": arguments["expected_revision"] + 1,
+                "combat": {"active": True, "combatants": arguments["participant_ids"]},
+            }
+        }
+
+    async def end_combat(self, **arguments: Any) -> dict[str, Any]:
+        self.calls.append(("combat_end", arguments))
+        return {
+            "result": {
+                "campaign_revision": arguments["expected_revision"] + 1,
+                "combat": {"active": False, "outcome": arguments["outcome"]},
+            }
+        }
+
     async def create_campaign(self, **arguments: Any) -> dict[str, Any]:
         self.calls.append(("campaign_create", arguments))
         self.campaign_count += 1

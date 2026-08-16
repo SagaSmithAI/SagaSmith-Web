@@ -17,7 +17,8 @@ complete local/self-hosted products and must never depend on this repository.
 
 ## Product boundaries
 
-- Keep cloud account, quota, billing, lobby, and administration code in this repository.
+- Keep cloud account, quota, billing, campaign admission, room messaging, and administration code
+  in this repository. `lobby` is reserved for the D&D MCP runtime phase.
 - Keep Forge catalog, release moderation, discussion, hosted Soul/Identity profiles, assignments,
   and campaign-isolated Identity memory in this repository. Never copy live actor or campaign
   authority into a community artifact.

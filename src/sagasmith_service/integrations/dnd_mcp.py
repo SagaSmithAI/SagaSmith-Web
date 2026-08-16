@@ -102,6 +102,49 @@ class DndRuntime(Protocol):
         principal_id: str,
     ) -> dict[str, Any]: ...
 
+    async def get_panel_state(
+        self, *, campaign_id: str, principal_id: str
+    ) -> dict[str, Any]: ...
+
+    async def get_character_card(
+        self, *, campaign_id: str, character_id: str, principal_id: str
+    ) -> dict[str, Any]: ...
+
+    async def set_game_phase(
+        self,
+        *,
+        campaign_id: str,
+        principal_id: str,
+        tool_profile: str,
+        expected_revision: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]: ...
+
+    async def start_combat(
+        self,
+        *,
+        campaign_id: str,
+        principal_id: str,
+        participant_ids: list[str],
+        positioning_mode: str,
+        name: str,
+        participant_config: list[dict[str, Any]],
+        battle_map: dict[str, Any] | None,
+        battle_map_override_reason: str | None,
+        expected_revision: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]: ...
+
+    async def end_combat(
+        self,
+        *,
+        campaign_id: str,
+        principal_id: str,
+        outcome: dict[str, Any],
+        expected_revision: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]: ...
+
 
 def _tool_payload(result: Any) -> dict[str, Any]:
     if getattr(result, "isError", False):
@@ -360,6 +403,147 @@ class StreamableHttpDndRuntime:
                     "artifact": arguments["artifact"],
                 },
                 "principal_id": arguments["principal_id"],
+            },
+            exposure_principal=arguments["principal_id"],
+            campaign_id=arguments["campaign_id"],
+        )
+
+    @staticmethod
+    def _result(value: dict[str, Any]) -> Any:
+        return value.get("result", value)
+
+    async def get_panel_state(self, **arguments: Any) -> dict[str, Any]:
+        campaign_id = arguments["campaign_id"]
+        principal_id = arguments["principal_id"]
+        campaign_receipt = await self.get_campaign(
+            campaign_id=campaign_id, principal_id=principal_id
+        )
+        campaign = self._result(campaign_receipt)
+        phase = str(campaign.get("effective_game_phase") or "lobby")
+        party_receipt = await self._call(
+            "campaign_query",
+            {
+                "view": "party",
+                "payload": {"campaign_id": campaign_id},
+                "principal_id": principal_id,
+            },
+            exposure_principal=principal_id,
+            campaign_id=campaign_id,
+        )
+        characters_receipt = await self._call(
+            "character_query",
+            {
+                "view": "list",
+                "payload": {"campaign_id": campaign_id},
+                "principal_id": principal_id,
+            },
+            exposure_principal=principal_id,
+            campaign_id=campaign_id,
+        )
+        modules_receipt = await self._call(
+            "module_query",
+            {"campaign_id": campaign_id, "view": "list", "principal_id": principal_id},
+            exposure_principal=principal_id,
+            campaign_id=campaign_id,
+        )
+        current_module: Any = None
+        try:
+            current_receipt = await self._call(
+                "module_query",
+                {"campaign_id": campaign_id, "view": "current", "principal_id": principal_id},
+                exposure_principal=principal_id,
+                campaign_id=campaign_id,
+            )
+            current_module = self._result(current_receipt)
+        except RuntimeError:
+            current_module = None
+        combat: Any = None
+        if phase == "combat":
+            combat_receipt = await self._call(
+                "combat_query",
+                {"campaign_id": campaign_id, "view": "status", "principal_id": principal_id},
+                exposure_principal=principal_id,
+                campaign_id=campaign_id,
+            )
+            combat = self._result(combat_receipt)
+        return {
+            "campaign": campaign,
+            "phase": phase,
+            "revision": int(campaign.get("revision") or campaign.get("campaign_revision") or 0),
+            "party": self._result(party_receipt),
+            "characters": self._result(characters_receipt),
+            "modules": self._result(modules_receipt),
+            "current_module": current_module,
+            "combat": combat,
+        }
+
+    async def get_character_card(self, **arguments: Any) -> dict[str, Any]:
+        campaign_id = arguments["campaign_id"]
+        receipt = await self._call(
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": arguments["character_id"]},
+                "principal_id": arguments["principal_id"],
+            },
+            exposure_principal=arguments["principal_id"],
+            campaign_id=campaign_id,
+        )
+        character = self._result(receipt)
+        if not isinstance(character, dict) or str(character.get("campaign_id") or "") != str(
+            campaign_id
+        ):
+            raise RuntimeError("D&D MCP returned a character outside the campaign")
+        return character
+
+    async def set_game_phase(self, **arguments: Any) -> dict[str, Any]:
+        return await self._call(
+            "game_phase",
+            {
+                "campaign_id": arguments["campaign_id"],
+                "action": "set",
+                "tool_profile": arguments["tool_profile"],
+                "principal_id": arguments["principal_id"],
+                "expected_revision": arguments["expected_revision"],
+                "idempotency_key": arguments["idempotency_key"],
+            },
+            exposure_principal=arguments["principal_id"],
+            campaign_id=arguments["campaign_id"],
+        )
+
+    async def start_combat(self, **arguments: Any) -> dict[str, Any]:
+        call_arguments = {
+            "campaign_id": arguments["campaign_id"],
+            "participant_ids": arguments["participant_ids"],
+            "participant_config": arguments.get("participant_config") or [],
+            "positioning_mode": arguments["positioning_mode"],
+            "name": arguments["name"],
+            "principal_id": arguments["principal_id"],
+            "expected_revision": arguments["expected_revision"],
+            "idempotency_key": arguments["idempotency_key"],
+        }
+        if arguments.get("battle_map") is not None:
+            call_arguments["battle_map"] = arguments["battle_map"]
+        if arguments.get("battle_map_override_reason"):
+            call_arguments["battle_map_override_reason"] = arguments[
+                "battle_map_override_reason"
+            ]
+        return await self._call(
+            "combat_start",
+            call_arguments,
+            exposure_principal=arguments["principal_id"],
+            campaign_id=arguments["campaign_id"],
+        )
+
+    async def end_combat(self, **arguments: Any) -> dict[str, Any]:
+        return await self._call(
+            "combat_end",
+            {
+                "campaign_id": arguments["campaign_id"],
+                "outcome": arguments["outcome"],
+                "principal_id": arguments["principal_id"],
+                "expected_revision": arguments["expected_revision"],
+                "idempotency_key": arguments["idempotency_key"],
             },
             exposure_principal=arguments["principal_id"],
             campaign_id=arguments["campaign_id"],

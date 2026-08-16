@@ -13,6 +13,7 @@ from sagasmith_service.models import (
     AuditEvent,
     CampaignMembershipProjection,
     CampaignProjection,
+    CampaignRoom,
     JoinRequest,
     User,
     now_utc,
@@ -108,6 +109,7 @@ async def create_campaign(
             mcp_receipt=stored_receipt,
         )
     )
+    session.add(CampaignRoom(campaign_id=campaign_id))
     session.add(
         AuditEvent(
             actor_user_id=user.id,

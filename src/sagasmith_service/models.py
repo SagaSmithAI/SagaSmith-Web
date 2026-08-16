@@ -250,6 +250,92 @@ class AgentConversation(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(24), default="active", index=True)
 
 
+class CampaignRoom(TimestampMixin, Base):
+    __tablename__ = "campaign_rooms"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    campaign_id: Mapped[str] = mapped_column(
+        ForeignKey("campaign_projections.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    next_message_sequence: Mapped[int] = mapped_column(default=1)
+    next_event_sequence: Mapped[int] = mapped_column(default=1)
+
+
+class CampaignMessage(Base):
+    __tablename__ = "campaign_messages"
+    __table_args__ = (
+        UniqueConstraint("room_id", "sequence", name="uq_campaign_message_sequence"),
+        UniqueConstraint("room_id", "client_message_id", name="uq_campaign_message_retry"),
+        Index("ix_campaign_message_timeline", "room_id", "sequence"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    room_id: Mapped[str] = mapped_column(
+        ForeignKey("campaign_rooms.id", ondelete="CASCADE"), index=True
+    )
+    campaign_id: Mapped[str] = mapped_column(
+        ForeignKey("campaign_projections.id", ondelete="CASCADE"), index=True
+    )
+    sequence: Mapped[int] = mapped_column()
+    sender_type: Mapped[str] = mapped_column(String(24), index=True)
+    sender_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    sender_display_name: Mapped[str] = mapped_column(String(160))
+    message_type: Mapped[str] = mapped_column(String(32), default="chat", index=True)
+    audience: Mapped[str] = mapped_column(String(24), default="public", index=True)
+    audience_user_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    content: Mapped[str] = mapped_column(Text)
+    structured_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    reply_to_message_id: Mapped[str | None] = mapped_column(
+        ForeignKey("campaign_messages.id", ondelete="SET NULL"), index=True
+    )
+    trigger_message_id: Mapped[str | None] = mapped_column(
+        ForeignKey("campaign_messages.id", ondelete="SET NULL"), index=True
+    )
+    mcp_revision: Mapped[int | None] = mapped_column()
+    mcp_receipt: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(24), default="completed", index=True)
+    client_message_id: Mapped[str] = mapped_column(String(160))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CampaignRoomEvent(Base):
+    __tablename__ = "campaign_room_events"
+    __table_args__ = (
+        UniqueConstraint("room_id", "sequence", name="uq_campaign_room_event_sequence"),
+        Index("ix_campaign_room_event_stream", "room_id", "sequence"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    room_id: Mapped[str] = mapped_column(
+        ForeignKey("campaign_rooms.id", ondelete="CASCADE"), index=True
+    )
+    sequence: Mapped[int] = mapped_column()
+    event_type: Mapped[str] = mapped_column(String(50), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class CampaignRoomReadCursor(Base):
+    __tablename__ = "campaign_room_read_cursors"
+    __table_args__ = (UniqueConstraint("room_id", "user_id", name="uq_campaign_room_reader"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    room_id: Mapped[str] = mapped_column(
+        ForeignKey("campaign_rooms.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    last_read_sequence: Mapped[int] = mapped_column(default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, onupdate=now_utc
+    )
+
+
 class AgentRun(Base):
     __tablename__ = "agent_runs"
     __table_args__ = (
@@ -260,6 +346,9 @@ class AgentRun(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     conversation_id: Mapped[str] = mapped_column(
         ForeignKey("agent_conversations.id", ondelete="CASCADE"), index=True
+    )
+    trigger_message_id: Mapped[str | None] = mapped_column(
+        ForeignKey("campaign_messages.id", ondelete="SET NULL"), index=True
     )
     campaign_id: Mapped[str] = mapped_column(String(64), index=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)

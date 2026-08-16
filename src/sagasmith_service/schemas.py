@@ -124,6 +124,84 @@ class AgentMessageRequest(ApiModel):
     content: str = Field(min_length=1, max_length=100_000)
 
 
+class CampaignRoomView(ApiModel):
+    id: str
+    campaign_id: str
+    status: str
+    next_message_sequence: int
+    next_event_sequence: int
+
+
+class CampaignMessageCreate(ApiModel):
+    content: str = Field(min_length=1, max_length=100_000)
+    mode: Literal["chat", "action", "narration"] = "action"
+    audience: Literal["public", "dm", "private"] = "public"
+    audience_user_ids: list[Annotated[str, Field(min_length=1, max_length=64)]] = Field(
+        default_factory=list, max_length=32
+    )
+    reply_to_message_id: str | None = None
+    structured_payload: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_audience(self) -> CampaignMessageCreate:
+        if self.audience == "private" and not self.audience_user_ids:
+            raise ValueError("private messages require at least one audience user")
+        if self.audience != "private" and self.audience_user_ids:
+            raise ValueError("audience_user_ids are only valid for private messages")
+        if len(json.dumps(self.structured_payload, ensure_ascii=False).encode("utf-8")) > 32_000:
+            raise ValueError("structured_payload is too large")
+        return self
+
+
+class CampaignMessageView(ApiModel):
+    id: str
+    room_id: str
+    campaign_id: str
+    sequence: int
+    sender_type: str
+    sender_user_id: str | None
+    sender_display_name: str
+    message_type: str
+    audience: str
+    audience_user_ids: list[str]
+    content: str
+    structured_payload: dict[str, Any]
+    reply_to_message_id: str | None
+    trigger_message_id: str | None
+    mcp_revision: int | None
+    status: str
+    created_at: datetime
+    completed_at: datetime | None
+
+
+class CampaignRoomSnapshot(ApiModel):
+    room: CampaignRoomView
+    messages: list[CampaignMessageView]
+    event_cursor: int
+
+
+class CampaignRoomReadUpdate(ApiModel):
+    last_read_sequence: int = Field(ge=0)
+
+
+class CampaignPanelAction(ApiModel):
+    action: Literal[
+        "phase.set",
+        "combat.start",
+        "combat.end",
+        "character.intent",
+        "play.intent",
+        "combat.intent",
+    ]
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def limit_payload(self) -> CampaignPanelAction:
+        if len(json.dumps(self.payload, ensure_ascii=False).encode("utf-8")) > 32_000:
+            raise ValueError("panel action payload is too large")
+        return self
+
+
 class AgentRunView(ApiModel):
     id: str
     conversation_id: str
