@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import json
 import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel
@@ -17,9 +20,12 @@ class WorkerCompletionRequest(BaseModel):
     session_id: str
     principal_id: str
     stream: bool = False
+    response_contract: dict[str, Any] | None = None
 
 
 def create_worker_app(agent_loop: Any, model_name: str) -> FastAPI:
+    turn_guard = asyncio.Lock()
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         await agent_loop._connect_mcp()
@@ -52,14 +58,153 @@ def create_worker_app(agent_loop: Any, model_name: str) -> FastAPI:
         content = payload.messages[0].get("content")
         if not isinstance(content, str):
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "text content required")
-        response = await agent_loop.process_direct(
-            content=content,
-            session_key=f"service:{payload.session_id}",
-            channel=principal_parts[0],
-            sender_id=principal_parts[1],
-        )
+        async with turn_guard:
+            structured_tool = None
+            activity_tool = None
+            receipt_hook = None
+            turn_tools = None
+            registered_tools = None
+            if payload.response_contract is not None:
+                contract = payload.response_contract
+                try:
+                    from nanobot.agent.hook import AgentHook
+                    from nanobot.agent.resolution_presentation import (
+                        normalize_resolution_presentation,
+                    )
+                    from nanobot.agent.tools.structured_output import StructuredOutputTool
+
+                    terminal_contract = dict(contract.get("terminal") or contract)
+                    activity_contract = contract.get("activity")
+                    callback = dict(contract.get("activity_callback") or {})
+
+                    if activity_contract is not None:
+                        from nanobot.agent.tools.base import Tool, ToolResult
+
+                        class RoomActivityTool(Tool):
+                            def __init__(self) -> None:
+                                self._name = str(activity_contract["name"])
+                                self._description = str(activity_contract["description"])
+                                self._parameters = dict(activity_contract["parameters"])
+
+                            @property
+                            def name(self) -> str:
+                                return self._name
+
+                            @property
+                            def description(self) -> str:
+                                return self._description
+
+                            @property
+                            def parameters(self) -> dict[str, Any]:
+                                return dict(self._parameters)
+
+                            @property
+                            def exclusive(self) -> bool:
+                                return True
+
+                            async def execute(self, **kwargs: Any) -> ToolResult:
+                                async with httpx.AsyncClient(timeout=10) as client:
+                                    response = await client.post(
+                                        str(callback["url"]),
+                                        headers={
+                                            "Authorization": f"Bearer {callback['token']}"
+                                        },
+                                        json=kwargs,
+                                    )
+                                if response.status_code >= 400:
+                                    return ToolResult.error(
+                                        "Room activity was rejected by the host."
+                                    )
+                                return ToolResult("Room activity accepted.")
+
+                    class ReceiptCaptureHook(AgentHook):
+                        def __init__(self) -> None:
+                            super().__init__()
+                            self.receipts: list[dict[str, Any]] = []
+                            self.bytes = 0
+
+                        async def after_execute_tool(
+                            self,
+                            _context: Any,
+                            tool_call: Any,
+                            _tool: Any,
+                            _params: Any,
+                            result: Any,
+                        ) -> None:
+                            try:
+                                structured = normalize_resolution_presentation(
+                                    getattr(result, "structured_content", None)
+                                )
+                            except ValueError:
+                                return
+                            if structured is None or len(self.receipts) >= 32:
+                                return
+                            try:
+                                size = len(
+                                    json.dumps(structured, ensure_ascii=False).encode("utf-8")
+                                )
+                            except (TypeError, ValueError):
+                                return
+                            if size > 131_072 or self.bytes + size > 262_144:
+                                return
+                            self.bytes += size
+                            self.receipts.append(
+                                {
+                                    "tool": str(getattr(tool_call, "name", ""))[:160],
+                                    "structured_content": structured,
+                                }
+                            )
+
+                    registered_tools = await agent_loop._tools_for_session(
+                        f"service:{payload.session_id}"
+                    )
+                    structured_tool = StructuredOutputTool(
+                        name=str(terminal_contract["name"]),
+                        description=str(terminal_contract["description"]),
+                        parameters=dict(terminal_contract["parameters"]),
+                    )
+                    if registered_tools.has(structured_tool.name):
+                        raise ValueError("structured response tool name is already registered")
+                    registered_tools.register(structured_tool)
+                    if activity_contract is not None:
+                        if not callback.get("url") or not callback.get("token"):
+                            raise ValueError("activity callback is incomplete")
+                        activity_tool = RoomActivityTool()
+                        if registered_tools.has(activity_tool.name):
+                            raise ValueError("activity tool name is already registered")
+                        registered_tools.register(activity_tool)
+                    turn_tools = registered_tools
+                    receipt_hook = ReceiptCaptureHook()
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise HTTPException(
+                        status.HTTP_422_UNPROCESSABLE_CONTENT,
+                        "invalid structured response contract",
+                    ) from exc
+            try:
+                response = await agent_loop.process_direct(
+                    content=content,
+                    session_key=f"service:{payload.session_id}",
+                    channel=principal_parts[0],
+                    sender_id=principal_parts[1],
+                    tools=turn_tools,
+                    hooks=[receipt_hook] if receipt_hook is not None else None,
+                )
+                structured_output = (
+                    structured_tool.submission if structured_tool is not None else None
+                )
+                tool_receipts = receipt_hook.receipts if receipt_hook is not None else []
+            finally:
+                if registered_tools is not None and structured_tool is not None:
+                    registered_tools.unregister(structured_tool.name)
+                if registered_tools is not None and activity_tool is not None:
+                    registered_tools.unregister(activity_tool.name)
         usage = getattr(agent_loop, "_last_usage", None) or {}
         response_text = str(getattr(response, "content", response) or "")
+        if structured_tool is not None and structured_output is None:
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY,
+                "agent did not submit the required structured response",
+            )
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
             "object": "chat.completion",
@@ -77,6 +222,8 @@ def create_worker_app(agent_loop: Any, model_name: str) -> FastAPI:
                 "completion_tokens": int(usage.get("completion_tokens") or 0),
                 "total_tokens": int(usage.get("total_tokens") or 0),
             },
+            "structured_output": structured_output,
+            "tool_receipts": tool_receipts,
         }
 
     return app
