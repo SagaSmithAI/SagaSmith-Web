@@ -1,9 +1,12 @@
 # SagaSmith Service
 
-Private hosted SagaSmith product. The public SagaSmith repositories remain complete local and
-self-hosted applications; this repository adds the hosted account, quota, campaign-lobby,
-orchestration, unified Web, billing, and operations layers without becoming an authority for D&D
-or CoC game state.
+[Website](https://sagasmithai.github.io) · [Platform overview](https://github.com/SagaSmithAI/.github/blob/main/profile/README.md) · [Public content repository](https://github.com/SagaSmithAI/SagaSmith-dnd-content-library) · [All repositories](https://github.com/orgs/SagaSmithAI/repositories)
+
+Publicly visible source for the hosted SagaSmith product. Repository visibility does not change
+the proprietary terms in [LICENSE](LICENSE). The open local and self-hosted SagaSmith repositories
+remain complete applications; this repository adds hosted accounts, quota, campaign rooms, Agent
+orchestration, unified Web, billing, and operations without becoming an authority for D&D or CoC
+game state.
 
 The same deployment includes **SagaSmith Forge**, the account-scoped creation and sharing layer for
 Rule/Module Packs, character blueprints, Souls, Skills, assets, and hosted DM/Keeper Identities.
