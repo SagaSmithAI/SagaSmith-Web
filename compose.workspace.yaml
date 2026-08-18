@@ -14,10 +14,7 @@ services:
     build:
       additional_contexts:
         core: ../sagasmith-core
-        dnd: ../sagasmith-dnd
-        dnd_mcp: ../SagaSmith-dnd-mcp
-        dnd_skills: ../SagaSmith-dnd-skills
-        module_gen_skills: ../SagaSmith-module-gen-skills
+        dnd_domain: ../sagasmith-dnd
 
   coc-mcp:
     environment:
@@ -27,10 +24,7 @@ services:
     build:
       additional_contexts:
         core: ../sagasmith-core
-        coc: ../sagasmith-coc
-        coc_mcp: ../SagaSmith-coc-mcp
-        coc_skills: ../SagaSmith-coc-skills
-        module_gen_skills: ../SagaSmith-module-gen-skills
+        coc_domain: ../sagasmith-coc
 
   agent:
     environment:
@@ -42,6 +36,7 @@ services:
     build:
       additional_contexts:
         agent_source: ../SagaSmith-agent
-        dnd_skills: ../SagaSmith-dnd-skills
-        coc_skills: ../SagaSmith-coc-skills
-        module_gen_skills: ../SagaSmith-module-gen-skills
+        core: ../sagasmith-core
+        dnd_domain: ../sagasmith-dnd
+        coc_domain: ../sagasmith-coc
+        narrative_domain: ../sagasmith-narrative

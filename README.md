@@ -5,8 +5,8 @@
 Publicly visible source for the hosted SagaSmith product. Repository visibility does not change
 the proprietary terms in [LICENSE](LICENSE). The open local and self-hosted SagaSmith repositories
 remain complete applications; this repository adds hosted accounts, quota, campaign rooms, Agent
-orchestration, unified Web, billing, and operations without becoming an authority for D&D or CoC
-game state.
+orchestration, unified Web, billing, and operations without becoming an authority for D&D, CoC,
+or Narrative game state.
 
 The same deployment includes **SagaSmith Forge**, the account-scoped creation and sharing layer for
 Rule/Module Packs, character blueprints, Souls, Skills, assets, and hosted DM/Keeper Identities.
@@ -60,7 +60,7 @@ Service-owned, hash-locked `infrastructure/agent-supervisor-requirements.txt`, g
 Service and Agent constraints. This is an integrated deployment lock, not a third reusable package.
 
 The real container acceptance suite is intentionally separate from unit tests. It boots
-PostgreSQL, Redis, MinIO, both public system MCP servers, real Nanobot workers, the persistent Module
+PostgreSQL, Redis, MinIO, the D&D and CoC network MCP servers, real Nanobot workers, the persistent Module
 Studio worker and a deterministic
 OpenAI-compatible test provider, then verifies account/lobby, authenticated Agent identity,
 system-directed dynamic native-tool refresh and execution for D&D and CoC, exact quota settlement,
@@ -91,6 +91,8 @@ uv run python scripts/audit_components.py --fetch --strict
 
 ## Non-negotiable boundary
 
-The control plane stores cloud workflow and projections only. Every authoritative campaign,
+The control plane stores cloud workflow and projections only. D&D and CoC run as isolated network
+domain services. Narrative runs as a process-local stdio domain for each Agent worker because its
+capability contract explicitly rejects shared network transport. Every authoritative campaign,
 membership, actor, phase, revision, combat, random, and Pack activation write goes through the
-current public D&D MCP facade and is reconciled from an MCP receipt.
+matching domain MCP facade and is reconciled from an MCP receipt.

@@ -7,10 +7,11 @@ complete local/self-hosted products and must never depend on this repository.
 
 - This service owns accounts, sessions, plans, quota reservations, usage, billing, invitations,
   join-request workflow, notifications, hosted process orchestration, and cloud projections.
-- `SagaSmith-dnd-mcp` remains the only authority for campaign membership, actor authority,
-  revisions, idempotency, random streams, atomic settlement, phases, and Pack activation.
-- `sagasmith-dnd` owns deterministic D&D mechanics. `sagasmith-core` owns system-neutral
-  persistence, documents, retrieval, versions, and transactions.
+- The matching MCP inside `sagasmith-dnd`, `sagasmith-coc`, or `sagasmith-narrative` remains the
+  only authority for campaign membership, actor authority, revisions, idempotency, random streams,
+  atomic settlement, phases, and Pack activation.
+- Each domain monorepo owns its deterministic mechanics, MCP, Skills, and domain UI where present.
+  `sagasmith-core` owns system-neutral persistence, documents, retrieval, versions, and transactions.
 - The service may cache projections but must not write open-source game tables directly.
 - Agent and Workbench clients must use the server-owned dynamic MCP tool list. Never introduce a
   fixed tool superset, text imitation, compatibility alias, or fallback protocol.

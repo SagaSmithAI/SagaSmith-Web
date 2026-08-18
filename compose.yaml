@@ -65,19 +65,16 @@ services:
       context: .
       dockerfile: infrastructure/Dockerfile.dnd-mcp
       additional_contexts:
-        core: ${SAGASMITH_CORE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-core.git#7b36d3da232cd05ad0e36bde891f8bc2f532bf6f}
-        dnd: ${SAGASMITH_DND_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-dnd.git#0dce1aad7ad7f7d442c39c0c8699ed957ff4fe12}
-        dnd_mcp: ${SAGASMITH_DND_MCP_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-dnd-mcp.git#740aa64aaabf8e2d6c28da59c12fb4e5fad4faed}
-        dnd_skills: ${SAGASMITH_DND_SKILLS_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-dnd-skills.git#a45a3b37147478f38493ccf07545920aa6a6c07a}
-        module_gen_skills: ${SAGASMITH_MODULE_GEN_SKILLS_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-module-gen-skills.git#6a6261f52a88dab7bb360df6dbfcd1443b500bbd}
+        core: ${SAGASMITH_CORE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-core.git#1c37b882ec031e5ffed7741d0c8559a17d171b47}
+        dnd_domain: ${SAGASMITH_DND_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-dnd.git#33b13e17b4facbee8ebaa59915c3e4bd6fe41dd7}
     environment:
       SAGASMITH_DND_MCP_TRANSPORT: streamable-http
       SAGASMITH_DND_MCP_HTTP_HOST: 0.0.0.0
       SAGASMITH_DND_MCP_HTTP_PORT: 8767
       SAGASMITH_DND_MCP_HOME: /state
       SAGASMITH_DND_MCP_DENSE_ENABLED: "0"
-      SAGASMITH_DND_SKILLS_DIR: /build/SagaSmith-dnd-skills
-      SAGASMITH_MODULEGEN_SKILLS_DIR: /build/SagaSmith-module-gen-skills
+      SAGASMITH_DND_SKILLS_DIR: /build/sagasmith-dnd/skills
+      SAGASMITH_MODULEGEN_SKILLS_DIR: /build/sagasmith-dnd/skills/dnd-module-generator
       SAGASMITH_DND_MCP_RULE_IMPORT_ROOTS: /srv/sagasmith/exchange
       SAGASMITH_DND_MCP_MODULE_IMPORT_ROOTS: /srv/sagasmith/exchange
     volumes:
@@ -96,19 +93,16 @@ services:
       context: .
       dockerfile: infrastructure/Dockerfile.coc-mcp
       additional_contexts:
-        core: ${SAGASMITH_CORE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-core.git#7b36d3da232cd05ad0e36bde891f8bc2f532bf6f}
-        coc: ${SAGASMITH_COC_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-coc.git#bd95caae9ad19d23e48cf86e7bd3e9cec65d9338}
-        coc_mcp: ${SAGASMITH_COC_MCP_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-coc-mcp.git#908fefa505ceacdc603e20eb20cf053e1d77b187}
-        coc_skills: ${SAGASMITH_COC_SKILLS_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-coc-skills.git#8f547f371c47a6ef2f70b2174174e104d650a7c7}
-        module_gen_skills: ${SAGASMITH_MODULE_GEN_SKILLS_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-module-gen-skills.git#6a6261f52a88dab7bb360df6dbfcd1443b500bbd}
+        core: ${SAGASMITH_CORE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-core.git#1c37b882ec031e5ffed7741d0c8559a17d171b47}
+        coc_domain: ${SAGASMITH_COC_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-coc.git#eb2af2d6e2eb99df18625f8b5f041ab1fef57351}
     environment:
       SAGASMITH_COC_MCP_TRANSPORT: streamable-http
       SAGASMITH_COC_MCP_HTTP_HOST: 0.0.0.0
       SAGASMITH_COC_MCP_HTTP_PORT: 8768
       SAGASMITH_COC_MCP_HOME: /state
       SAGASMITH_COC_MCP_DENSE_ENABLED: "0"
-      SAGASMITH_COC_SKILLS_DIR: /build/SagaSmith-coc-skills
-      SAGASMITH_MODULEGEN_SKILLS_DIR: /build/SagaSmith-module-gen-skills
+      SAGASMITH_COC_SKILLS_DIR: /build/sagasmith-coc/skills
+      SAGASMITH_MODULEGEN_SKILLS_DIR: /build/sagasmith-coc/skills/coc-module-generator
       SAGASMITH_COC_MCP_MODULE_IMPORT_ROOTS: /srv/sagasmith/exchange
     volumes:
       - coc-state:/state
@@ -126,10 +120,11 @@ services:
       context: .
       dockerfile: infrastructure/Dockerfile.agent-supervisor
       additional_contexts:
-        agent_source: ${SAGASMITH_AGENT_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-agent.git#873c71c9c132d3af238249c7fd5a165513e058a8}
-        dnd_skills: ${SAGASMITH_DND_SKILLS_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-dnd-skills.git#a45a3b37147478f38493ccf07545920aa6a6c07a}
-        coc_skills: ${SAGASMITH_COC_SKILLS_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-coc-skills.git#8f547f371c47a6ef2f70b2174174e104d650a7c7}
-        module_gen_skills: ${SAGASMITH_MODULE_GEN_SKILLS_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-module-gen-skills.git#6a6261f52a88dab7bb360df6dbfcd1443b500bbd}
+        agent_source: ${SAGASMITH_AGENT_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-agent.git#9154d0a35f8bf20612828bc7359de307ea3f068a}
+        core: ${SAGASMITH_CORE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-core.git#1c37b882ec031e5ffed7741d0c8559a17d171b47}
+        dnd_domain: ${SAGASMITH_DND_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-dnd.git#33b13e17b4facbee8ebaa59915c3e4bd6fe41dd7}
+        coc_domain: ${SAGASMITH_COC_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-coc.git#eb2af2d6e2eb99df18625f8b5f041ab1fef57351}
+        narrative_domain: ${SAGASMITH_NARRATIVE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-narrative.git#62a9adc1bdb9090376e2ee4f3e70edc343f2d948}
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY}
       SAGASMITH_AGENT_INTERNAL_KEY: ${SAGASMITH_AGENT_INTERNAL_KEY:?set SAGASMITH_AGENT_INTERNAL_KEY}
