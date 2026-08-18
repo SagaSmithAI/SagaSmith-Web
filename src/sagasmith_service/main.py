@@ -33,6 +33,7 @@ from sagasmith_service.audit import bind_request_id, reset_request_id
 from sagasmith_service.config import Settings, get_settings
 from sagasmith_service.database import Base, make_engine, make_session_factory
 from sagasmith_service.integrations.agent import AgentRuntime, HttpAgentRuntime
+from sagasmith_service.integrations.coc_mcp import StreamableHttpCocRuntime
 from sagasmith_service.integrations.dnd_mcp import DndRuntime, StreamableHttpDndRuntime
 from sagasmith_service.rate_limit import (
     MemoryRateLimiter,
@@ -56,6 +57,7 @@ def create_app(
     dnd_runtime: DndRuntime | None = None,
     agent_runtime: AgentRuntime | None = None,
     rate_limiter: RateLimiter | None = None,
+    coc_runtime: object | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
     engine = engine or make_engine(settings.database_url)
@@ -71,6 +73,11 @@ def create_app(
     app.state.engine = engine
     app.state.session_factory = make_session_factory(engine)
     app.state.dnd_runtime = dnd_runtime or StreamableHttpDndRuntime(settings.dnd_mcp_url)
+    app.state.coc_runtime = coc_runtime or StreamableHttpCocRuntime(settings.coc_mcp_url)
+    app.state.game_runtimes = {
+        "dnd5e": app.state.dnd_runtime,
+        "coc7e": app.state.coc_runtime,
+    }
     app.state.agent_runtime = agent_runtime or HttpAgentRuntime(
         settings.agent_api_url,
         settings.agent_api_key.get_secret_value(),

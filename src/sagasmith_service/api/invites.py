@@ -12,6 +12,7 @@ from sagasmith_service.models import (
     AuditEvent,
     CampaignInvite,
     CampaignMembershipProjection,
+    CampaignProjection,
     JoinRequest,
     User,
     now_utc,
@@ -26,6 +27,17 @@ from sagasmith_service.schemas import (
 from sagasmith_service.security import token_hash
 
 router = APIRouter(tags=["campaign-invites"])
+
+
+def _campaign_runtime(request: Request, session: DbSession, campaign_id: str) -> Any:
+    campaign = session.get(CampaignProjection, campaign_id)
+    if campaign is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "campaign not found")
+    runtimes = getattr(request.app.state, "game_runtimes", {})
+    runtime = runtimes.get(campaign.system_id) if isinstance(runtimes, dict) else None
+    if runtime is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "unsupported game system")
+    return runtime
 
 
 def _dm(session: DbSession, campaign_id: str, user_id: str) -> CampaignMembershipProjection:
@@ -169,7 +181,9 @@ async def accept_invite(
         if creator is None:
             raise HTTPException(status.HTTP_409_CONFLICT, "invite owner no longer exists")
         try:
-            receipt = await request.app.state.dnd_runtime.grant_campaign_access(
+            receipt = await _campaign_runtime(
+                request, session, item.campaign_id
+            ).grant_campaign_access(
                 campaign_id=item.campaign_id,
                 principal_id=user.principal_id,
                 role="player",

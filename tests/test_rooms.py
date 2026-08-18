@@ -4,7 +4,8 @@ from conftest import FakeAgentRuntime, FakeDndRuntime
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from sagasmith_service.models import CampaignRoomEvent
+from sagasmith_service.api.rooms import _activity_token
+from sagasmith_service.models import AgentRun, CampaignRoomEvent
 
 PASSWORD = "correct horse battery staple"
 
@@ -123,6 +124,80 @@ def test_room_is_shared_and_agent_receives_sender_visible_timeline(
     assert timeline[1]["sender_user_id"] == player["id"]
     assert timeline[2]["trigger_message_id"] == timeline[1]["id"]
     assert timeline[0]["sender_user_id"] == owner["id"]
+
+
+def test_room_activity_accepts_only_safe_scoped_state_transitions(
+    client: TestClient,
+) -> None:
+    register(client, "room-owner@example.com", "DM")
+    create_campaign(client)
+    posted = client.post(
+        "/api/campaigns/campaign-1/room/messages",
+        headers={"Idempotency-Key": "activity-trigger"},
+        json={"content": "我检查现场。", "mode": "action"},
+    )
+    assert posted.status_code == 200, posted.text
+    with client.app.state.session_factory() as session:
+        run = session.scalar(select(AgentRun).where(AgentRun.campaign_id == "campaign-1"))
+        assert run is not None
+        run.status = "running"
+        run_id = run.id
+        session.commit()
+    token = _activity_token(
+        client.app.state.settings.session_secret,
+        "campaign-1",
+        run_id,
+    )
+    endpoint = f"/api/campaigns/campaign-1/room/internal-activity/{run_id}"
+    headers = {"Authorization": f"Bearer {token}"}
+    started = client.post(
+        endpoint,
+        headers=headers,
+        json={
+            "schema": "sagasmith.room-activity/v1",
+            "run_id": run_id,
+            "activity_id": "rules-1",
+            "audience": {"kind": "public"},
+            "code": "reviewing_rules",
+            "state": "started",
+        },
+    )
+    assert started.status_code == 200, started.text
+    completed = client.post(
+        endpoint,
+        headers=headers,
+        json={
+            "schema": "sagasmith.room-activity/v1",
+            "run_id": run_id,
+            "activity_id": "rules-1",
+            "audience": {"kind": "public"},
+            "code": "reviewing_rules",
+            "state": "completed",
+        },
+    )
+    assert completed.status_code == 200, completed.text
+    leaked_roll = client.post(
+        endpoint,
+        headers=headers,
+        json={
+            "schema": "sagasmith.room-activity/v1",
+            "run_id": run_id,
+            "activity_id": "secret-roll",
+            "audience": {"kind": "public"},
+            "code": "resolving_roll",
+            "state": "started",
+        },
+    )
+    assert leaked_roll.status_code == 422
+    with client.app.state.session_factory() as session:
+        activity_events = session.scalars(
+            select(CampaignRoomEvent).where(CampaignRoomEvent.event_type == "room.activity")
+        ).all()
+    assert [event.payload["state"] for event in activity_events] == [
+        "started",
+        "completed",
+    ]
+    assert all("text" not in event.payload for event in activity_events)
 
 
 def test_room_audience_and_panel_actions_are_authorized_and_refreshable(
@@ -312,6 +387,7 @@ def test_character_card_requires_private_actor_scope(
 def test_product_shell_contains_live_room_and_operable_panels(client: TestClient) -> None:
     page = client.get("/")
     assert page.status_code == 200
+    assert 'rel="manifest" href="/manifest.webmanifest"' in page.text
     for element_id in (
         'id="messages"',
         'id="character-sidebar"',
@@ -325,3 +401,301 @@ def test_product_shell_contains_live_room_and_operable_panels(client: TestClient
         'id="module-panel"',
     ):
         assert element_id in page.text
+    manifest = client.get("/manifest.webmanifest")
+    assert manifest.status_code == 200
+    assert manifest.json()["icons"][0]["src"] == "/sagasmith-icon.svg"
+    service_worker = client.get("/service-worker.js")
+    assert service_worker.status_code == 200
+    assert 'url.pathname.startsWith("/api/")' in service_worker.text
+    assert client.get("/sagasmith-icon.svg").status_code == 200
+
+
+def test_structured_room_turn_projects_actor_identity_and_personal_suggestions(
+    client: TestClient, agent_runtime: FakeAgentRuntime, dnd_runtime: FakeDndRuntime
+) -> None:
+    owner = register(client, "room-owner@example.com", "DM")
+    create_campaign(client)
+    agent_runtime.tool_receipts = (
+        {
+            "tool": "mcp_sagasmith_dnd_character_check",
+            "structured_content": {
+                "result": {"resolution_id": "resolution-1", "total": 17}
+            },
+        },
+    )
+    dnd_runtime.resolution_presentations["resolution-1"] = {
+        "schema": "sagasmith.resolution-presentation/v1",
+        "system_id": "dnd5e",
+        "thread_id": "resolution-1",
+        "event_sequence": 1,
+        "operation": "character.ability",
+        "status": "settled",
+        "audience": {"scope": "public", "actor_refs": [], "disclosure": "public"},
+        "actor_refs": [],
+        "rolls": [
+            {
+                "roll_id": "resolution-1:roll:1",
+                "expression": "d20",
+                "dice": [17],
+                "kept": [17],
+                "modifier": 0,
+                "total": 17,
+            }
+        ],
+        "outcome": {"success": True},
+        "pending_choice": None,
+        "campaign_revision": 7,
+        "random_stream_receipt": {"draw_count": 1},
+    }
+
+    def output(context: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "schema": "sagasmith.room-turn/v1",
+            "run_id": context["run_id"],
+            "messages": [
+                {
+                    "output_id": "public-main",
+                    "audience": {"kind": "public"},
+                    "blocks": [
+                        {
+                            "type": "narration",
+                            "block_id": "n1",
+                            "text": "门后的脚步声停了。",
+                        },
+                        {
+                            "type": "performance",
+                            "block_id": "p1",
+                            "speaker": {
+                                "kind": "published_actor",
+                                "label": "守门人",
+                                "actor_ref": "secret-npc-id",
+                            },
+                            "beats": [
+                                {"type": "action", "text": "他把灯抬高了一些。"},
+                                {"type": "speech", "text": "报上姓名。"},
+                            ],
+                            "provenance": {"kind": "agent_ruling"},
+                        },
+                        {
+                            "type": "resolution_ref",
+                            "block_id": "r1",
+                            "resolution_id": "resolution-1",
+                        },
+                        {"type": "prompt", "block_id": "q1", "text": "你怎么回应？"},
+                    ],
+                }
+            ],
+            "suggestions": [{"id": "s1", "text": "我出示通行文书。"}],
+        }
+
+    agent_runtime.structured_output_factory = output
+    response = client.post(
+        "/api/campaigns/campaign-1/room/messages",
+        headers={"Idempotency-Key": "structured-room-turn-1"},
+        json={"content": "我敲门。", "mode": "action"},
+    )
+    assert response.status_code == 200, response.text
+    message = response.json()["agent_message"]
+    assert message["message_type"] == "presentation"
+    assert "secret-npc-id" not in str(message["structured_payload"])
+    performance = message["structured_payload"]["blocks"][1]
+    assert performance["speaker"]["publication_ref"].startswith("actor-pub-")
+    assert message["structured_payload"]["blocks"][2]["verified"] is True
+    assert message["structured_payload"]["suggestions"][0]["text"] == "我出示通行文书。"
+    assert "target_user_id" not in message["structured_payload"]["suggestions"][0]
+
+    player = add_player(client, "room-structured-player@example.com", "Player")
+    timeline = client.get("/api/campaigns/campaign-1/room/messages").json()
+    public_agent = next(item for item in timeline if item["sender_type"] == "agent")
+    assert public_agent["structured_payload"]["suggestions"] == []
+    assert player["id"] != owner["id"]
+
+
+def test_public_room_turn_cannot_reference_dm_only_resolution(
+    client: TestClient, agent_runtime: FakeAgentRuntime, dnd_runtime: FakeDndRuntime
+) -> None:
+    register(client, "room-owner@example.com", "DM")
+    create_campaign(client)
+    player = add_player(client, "hidden-roll-player@example.com", "Player")
+    login(client, "room-owner@example.com")
+    resolution_id = "dm-hidden-resolution"
+    dnd_runtime.resolution_presentations[resolution_id] = {
+        "schema": "sagasmith.resolution-presentation/v1",
+        "system_id": "dnd5e",
+        "thread_id": resolution_id,
+        "event_sequence": 1,
+        "operation": "dice.roll",
+        "status": "settled",
+        "audience": {"scope": "dm", "actor_refs": [], "disclosure": "hidden"},
+        "actor_refs": [],
+        "rolls": [{"roll_id": "secret-roll", "dice": [19], "total": 19}],
+        "outcome": {"total": 19},
+        "pending_choice": None,
+        "campaign_revision": 7,
+    }
+    dnd_runtime.resolution_denied_principals.add(f"user:{player['id']}")
+
+    def output(context: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "schema": "sagasmith.room-turn/v1",
+            "run_id": context["run_id"],
+            "messages": [
+                {
+                    "output_id": "unsafe-public-roll",
+                    "audience": {"kind": "public"},
+                    "blocks": [
+                        {
+                            "type": "resolution_ref",
+                            "block_id": "r1",
+                            "resolution_id": resolution_id,
+                        }
+                    ],
+                }
+            ],
+        }
+
+    agent_runtime.structured_output_factory = output
+    response = client.post(
+        "/api/campaigns/campaign-1/room/messages",
+        headers={"Idempotency-Key": "reject-hidden-roll-publication"},
+        json={"content": "我环顾四周。", "mode": "action"},
+    )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Agent returned an invalid structured room response"
+    timeline = client.get("/api/campaigns/campaign-1/room/messages").json()
+    assert all(
+        resolution_id not in str(message.get("structured_payload") or {})
+        for message in timeline
+    )
+
+
+def test_suggestion_cannot_reference_hidden_or_stale_pending_choice(
+    client: TestClient, agent_runtime: FakeAgentRuntime
+) -> None:
+    register(client, "room-owner@example.com", "DM")
+    create_campaign(client)
+
+    def output(context: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "schema": "sagasmith.room-turn/v1",
+            "run_id": context["run_id"],
+            "messages": [
+                {
+                    "output_id": "ordinary-output",
+                    "audience": {"kind": "public"},
+                    "blocks": [
+                        {"type": "prompt", "block_id": "p1", "text": "你要怎么做？"}
+                    ],
+                }
+            ],
+            "suggestions": [
+                {
+                    "id": "hidden-choice",
+                    "text": "使用那个隐藏选项",
+                    "pending_choice_id": "dm-only-choice",
+                }
+            ],
+        }
+
+    agent_runtime.structured_output_factory = output
+    response = client.post(
+        "/api/campaigns/campaign-1/room/messages",
+        headers={"Idempotency-Key": "reject-hidden-suggestion"},
+        json={"content": "我等待。", "mode": "action"},
+    )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Agent returned an invalid structured room response"
+
+
+def test_structured_room_turn_rejects_agent_ruling_for_human_pc(
+    client: TestClient, agent_runtime: FakeAgentRuntime
+) -> None:
+    owner = register(client, "room-owner@example.com", "DM")
+    create_campaign(client)
+    bound = client.put(
+        "/api/campaigns/campaign-1/actors/actor-1/binding",
+        json={"user_id": owner["id"], "can_control": True, "can_view_private": True},
+    )
+    assert bound.status_code == 200, bound.text
+
+    def output(context: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "schema": "sagasmith.room-turn/v1",
+            "run_id": context["run_id"],
+            "messages": [
+                {
+                    "output_id": "invalid-pc",
+                    "audience": {"kind": "public"},
+                    "blocks": [
+                        {
+                            "type": "performance",
+                            "block_id": "p1",
+                            "speaker": {
+                                "kind": "published_actor",
+                                "label": "Aria",
+                                "actor_ref": "actor-1",
+                            },
+                            "beats": [{"type": "speech", "text": "我投降。"}],
+                            "provenance": {"kind": "agent_ruling"},
+                        }
+                    ],
+                }
+            ],
+        }
+
+    agent_runtime.structured_output_factory = output
+    response = client.post(
+        "/api/campaigns/campaign-1/room/messages",
+        headers={"Idempotency-Key": "invalid-pc-ruling-1"},
+        json={"content": "我观察敌人。", "mode": "action"},
+    )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Agent returned an invalid structured room response"
+
+
+def test_structured_room_turn_accepts_pc_performance_from_exact_trigger_intent(
+    client: TestClient, agent_runtime: FakeAgentRuntime
+) -> None:
+    owner = register(client, "room-owner@example.com", "DM")
+    create_campaign(client)
+    assert client.put(
+        "/api/campaigns/campaign-1/actors/actor-1/binding",
+        json={"user_id": owner["id"], "can_control": True, "can_view_private": True},
+    ).status_code == 200
+
+    def output(context: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "schema": "sagasmith.room-turn/v1",
+            "run_id": context["run_id"],
+            "messages": [
+                {
+                    "output_id": "pc-intent",
+                    "audience": {"kind": "public"},
+                    "blocks": [
+                        {
+                            "type": "performance",
+                            "block_id": "p1",
+                            "speaker": {
+                                "kind": "published_actor",
+                                "label": "Aria",
+                                "actor_ref": "actor-1",
+                            },
+                            "beats": [{"type": "action", "text": "她抬手敲了三下门。"}],
+                            "provenance": {
+                                "kind": "player_intent",
+                                "source_message_id": context["trigger_message_id"],
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+
+    agent_runtime.structured_output_factory = output
+    response = client.post(
+        "/api/campaigns/campaign-1/room/messages",
+        headers={"Idempotency-Key": "valid-pc-intent-1"},
+        json={"content": "我抬手敲三下门。", "mode": "action"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["agent_message"]["content"] == "Aria：她抬手敲了三下门。"

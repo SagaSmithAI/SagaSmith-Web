@@ -53,11 +53,17 @@ def test_supervisor_authenticates_and_routes_by_conversation() -> None:
             json={
                 "messages": [{"role": "user", "content": "hello"}],
                 "principal_id": "user:test-user",
+                "response_contract": {
+                    "name": "submit_result",
+                    "description": "Submit.",
+                    "parameters": {"type": "object"},
+                },
             },
         )
         assert response.status_code == 200
         assert manager.calls[0][0] == "campaign:test-user:conversation"
         assert manager.calls[0][1]["stream"] is False
+        assert manager.calls[0][1]["response_contract"]["name"] == "submit_result"
     assert manager.closed is True
 
 
@@ -106,6 +112,8 @@ def test_conversation_principal_binding_requires_canonical_key() -> None:
 def test_worker_manager_isolates_and_reuses_conversation_processes(
     monkeypatch, tmp_path: Path
 ) -> None:
+    client_timeouts: list[Any] = []
+
     class FakeProcess:
         def __init__(self) -> None:
             self.returncode = None
@@ -129,8 +137,8 @@ def test_worker_manager_isolates_and_reuses_conversation_processes(
             return {"id": "completion", "choices": []}
 
     class FakeClient:
-        def __init__(self, **_kwargs: Any) -> None:
-            pass
+        def __init__(self, **kwargs: Any) -> None:
+            client_timeouts.append(kwargs.get("timeout"))
 
         async def __aenter__(self):
             return self
@@ -160,6 +168,7 @@ def test_worker_manager_isolates_and_reuses_conversation_processes(
         workspace_root=str(tmp_path / "workspaces"),
         worker_api_key="secret",
         idle_seconds=3600,
+        completion_timeout_seconds=777,
     )
     (tmp_path / "config.json").write_text("{}", encoding="utf-8")
 
@@ -182,6 +191,7 @@ def test_worker_manager_isolates_and_reuses_conversation_processes(
 
     asyncio.run(scenario())
     assert all(process.terminated for process in processes)
+    assert any(getattr(timeout, "read", None) == 777 for timeout in client_timeouts)
 
 
 def test_worker_runtime_config_uses_exact_trusted_host_cidrs(monkeypatch, tmp_path: Path) -> None:

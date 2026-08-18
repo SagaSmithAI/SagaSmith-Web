@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: "3.12"
           enable-cache: true
-      - run: uv sync --all-extras
+      - run: uv sync --frozen --all-extras
       - run: uv run ruff check .
       - run: uv run pytest --cov=sagasmith_service --cov-report=term-missing
       - run: node --check src/sagasmith_service/web/app.js
@@ -31,3 +31,39 @@ jobs:
           OPENAI_API_KEY: ci-only
           SAGASMITH_AGENT_INTERNAL_KEY: ci-only
       - run: docker build .
+
+  container-e2e:
+    runs-on: ubuntu-latest
+    needs: python
+    env:
+      POSTGRES_PASSWORD: e2e-postgres
+      MINIO_ROOT_PASSWORD: e2e-minio-secret
+      OPENAI_API_KEY: e2e-only-key
+      SAGASMITH_AGENT_INTERNAL_KEY: e2e-internal-agent-key
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --frozen --all-extras
+      - run: mkdir -p secrets && cp tests/e2e/agent-config.json secrets/agent-config.json
+      - name: Build and start the complete pinned stack
+        run: >-
+          docker compose -p sagasmith-service-e2e
+          -f compose.yaml -f compose.e2e.yaml
+          up -d --build --wait --wait-timeout 300
+      - name: Run D&D and CoC hosted acceptance
+        run: uv run python scripts/container_e2e.py
+      - name: Collect container diagnostics
+        if: failure()
+        run: >-
+          docker compose -p sagasmith-service-e2e
+          -f compose.yaml -f compose.e2e.yaml
+          logs --no-color --tail 500
+      - name: Stop acceptance stack
+        if: always()
+        run: >-
+          docker compose -p sagasmith-service-e2e
+          -f compose.yaml -f compose.e2e.yaml
+          down --volumes --remove-orphans

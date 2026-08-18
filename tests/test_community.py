@@ -30,6 +30,7 @@ def publish(
     title: str,
     private_pack_id: str | None = None,
     payload: dict | None = None,
+    system_id: str = "dnd5e",
 ) -> tuple[dict, dict]:
     artifact = client.post(
         "/api/community/artifacts",
@@ -38,13 +39,13 @@ def publish(
             "artifact_type": artifact_type,
             "title": title,
             "summary": f"Public {title}",
-            "system_id": "dnd5e",
+            "system_id": system_id,
             "visibility": "public",
             "license_code": "CC-BY-4.0",
             "rights_attested": True,
             "source_kind": "original",
             "provenance": {"author_statement": "Original work"},
-            "tags": [artifact_type, "dnd"],
+            "tags": [artifact_type, system_id],
         },
     )
     assert artifact.status_code == 201, artifact.text

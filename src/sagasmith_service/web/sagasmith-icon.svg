@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="SagaSmith">
+  <rect width="512" height="512" rx="96" fill="#0c0d0d"/>
+  <rect x="72" y="72" width="368" height="368" rx="46" fill="none" stroke="#d9ad5b" stroke-width="18"/>
+  <path d="M336 161c-22-19-49-29-81-29-55 0-96 30-96 76 0 43 31 61 91 75 35 8 48 17 48 34 0 18-17 29-44 29-32 0-60-12-84-34l-32 39c30 29 69 44 114 44 60 0 102-31 102-81 0-43-28-63-89-78-38-9-51-17-51-32 0-16 16-26 41-26 25 0 48 9 68 25z" fill="#eee9dc"/>
+</svg>

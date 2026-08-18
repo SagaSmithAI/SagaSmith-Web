@@ -8,7 +8,7 @@
 | room + Agent | shared ordered timeline; audience filtering; authenticated sender scope; per-principal session; chat without Agent; action quota settlement; retry same payload; payload mismatch conflict |
 | synchronized panels | SSE message and `state.changed`; Character/Play/Combat/Module projection refresh; player intents; DM phase/combat commands; stream reconnect recovery |
 | live-room UI | private character-card scope; character/spells/inventory/party drawer; inspected versus acting actor; Grid-only map; token hover-safe fields; target/destination action context; expanded Grid preserves the single composer |
-| dynamic tools | real host lookup; Lobby/Play/Combat list changes; `tools/list_changed`; next legal native call |
+| dynamic tools | real host lookup for D&D and CoC; system-directed server selection; Lobby/Play/Combat list changes; `tools/list_changed`; next legal native call |
 | phases | Lobby -> Play -> Combat -> Play; grid and Agent spatial modes; chase/combat exclusivity |
 | continuity | restart/resume; snapshot/branch restore; undo/redo; exposure immediately recoverable |
 | Pack | current `.sagasmith-pack` only; ZIP safety, byte/uncompressed limits, checksum, ownership isolation, MCP validation/import/activation, immutable version |
@@ -22,12 +22,13 @@
 | security | principal spoof attempt, IDOR, CSRF, rate limits, malicious archive, path traversal, secret scan |
 
 Unit/API coverage in this repository is the fast gate. The dynamic-tool, phase, restore and native
-call rows require the real hosted Agent plus D&D MCP and cannot be replaced with fabricated tool
+call rows require the real hosted Agent plus both system MCPs and cannot be replaced with fabricated tool
 results.
 
 The container acceptance provider is deterministic but the host is real: it opens exposure as a
-player, searches and selects `character_query`, observes `tools/list_changed`, and calls the newly
-registered native tool. The same run imports and activates a structurally valid, synthetic,
+authenticated principal, selects only the MCP matching the campaign `system_id`, searches and
+selects `character_query`, observes `tools/list_changed`, and calls the newly registered native
+tool in both D&D and CoC. The same run imports and activates a structurally valid, synthetic,
 Agent-finalized D&D module Pack through MinIO and the public MCP facade.
 
 With an isolated D&D MCP running, execute

@@ -8,6 +8,8 @@ services:
       SAGASMITH_SESSION_SECRET: e2e-session-secret-that-is-longer-than-thirty-two-bytes
       SAGASMITH_PUBLIC_ORIGIN: http://127.0.0.1:${SAGASMITH_E2E_API_PORT:-18088}
       SAGASMITH_DND_MCP_URL: http://dnd-mcp:8767/mcp
+      SAGASMITH_COC_MCP_URL: http://coc-mcp:8768/mcp
+      SAGASMITH_SERVICE_INTERNAL_URL: http://api:8080
       SAGASMITH_AGENT_API_URL: http://agent:8910
       SAGASMITH_AGENT_API_KEY: e2e-internal-agent-key
       SAGASMITH_SECURE_COOKIES: "false"
@@ -57,7 +59,7 @@ services:
       - ./tests/e2e/agent-config.json:/config/agent-config.json:ro
 
   mock-llm:
-    image: python:3.12-alpine
+    image: python:3.12-alpine@sha256:d09d15e60962ca365d1cd544a48773bac9d33f2fb1b00f2aa0deec78ade7dc31
     command: ["python", "/app/mock_openai.py"]
     volumes:
       - ./tests/e2e/mock_openai.py:/app/mock_openai.py:ro

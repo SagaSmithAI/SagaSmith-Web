@@ -19,6 +19,12 @@ class FakeDndRuntime:
         self.module_revision = 1
         self.final_pack_id = ""
         self.final_pack_version = ""
+        self.resolution_presentations: dict[str, dict[str, Any]] = {}
+        self.resolution_denied_principals: set[str] = set()
+
+    async def probe(self) -> None:
+        if getattr(self, "fail_probe", False):
+            raise RuntimeError("runtime unavailable")
 
     async def get_campaign(self, **arguments: Any) -> dict[str, Any]:
         self.calls.append(("campaign_get", arguments))
@@ -89,6 +95,19 @@ class FakeDndRuntime:
                 "skills": {},
                 "inventory": {"encumbrance": {}},
             },
+        }
+
+    async def get_resolution_presentation(self, **arguments: Any) -> dict[str, Any]:
+        self.calls.append(("resolution_presentation", arguments))
+        if arguments["principal_id"] in self.resolution_denied_principals:
+            raise RuntimeError("resolution presentation is not visible")
+        value = self.resolution_presentations.get(arguments["resolution_id"])
+        if value is None:
+            raise RuntimeError("resolution presentation not found")
+        return {
+            **value,
+            "campaign_id": arguments["campaign_id"],
+            "resolution_id": arguments["resolution_id"],
         }
 
     async def set_game_phase(self, **arguments: Any) -> dict[str, Any]:
@@ -236,17 +255,45 @@ class FakeAgentRuntime:
         self.calls: list[dict[str, Any]] = []
         self.fail = False
         self.content = "你进入了烛堡。"
+        self.structured_output: dict[str, Any] | None = None
+        self.structured_output_factory = None
+        self.tool_receipts: tuple[dict[str, Any], ...] = ()
+
+    async def probe(self) -> None:
+        if getattr(self, "fail_probe", False):
+            raise RuntimeError("agent unavailable")
 
     async def complete(self, **arguments: Any) -> AgentResult:
         self.calls.append(arguments)
         if self.fail:
             raise RuntimeError("agent unavailable")
+        structured_output = self.structured_output
+        context = arguments.get("context") or {}
+        if self.structured_output_factory is not None:
+            structured_output = self.structured_output_factory(context)
+        if structured_output is None and context.get("response_contract"):
+            structured_output = {
+                "schema": "sagasmith.room-turn/v1",
+                "run_id": context["run_id"],
+                "messages": [
+                    {
+                        "output_id": "main",
+                        "audience": {"kind": "public", "actor_refs": []},
+                        "blocks": [
+                            {"type": "narration", "block_id": "n1", "text": self.content}
+                        ],
+                    }
+                ],
+                "suggestions": [],
+            }
         return AgentResult(
             content=self.content,
             request_id="agent-request-1",
             model="test-model",
             prompt_tokens=120,
             completion_tokens=30,
+            structured_output=structured_output,
+            tool_receipts=self.tool_receipts,
         )
 
 

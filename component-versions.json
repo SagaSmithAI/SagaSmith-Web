@@ -1,7 +1,32 @@
 {
   "schema": "sagasmith.component-lock/v1",
-  "audited_at": "2026-08-16T10:00:00+08:00",
-  "product_scope": "hosted-dnd",
+  "audited_at": "2026-08-18T00:00:00+08:00",
+  "product_scope": "hosted-dnd-coc",
+  "runtime_locks": {
+    "service_api": "uv.lock",
+    "agent_supervisor": "infrastructure/agent-supervisor-requirements.txt",
+    "uv_version": "0.11.25",
+    "container_images": {
+      "python_3_12_slim": "sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a",
+      "python_3_12_alpine": "sha256:d09d15e60962ca365d1cd544a48773bac9d33f2fb1b00f2aa0deec78ade7dc31",
+      "postgres_17_alpine": "sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73",
+      "redis_7_4_alpine": "sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2",
+      "caddy_2_10_alpine": "sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d",
+      "minio_2025_04_22": "sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e"
+    }
+  },
+  "required_contracts": {
+    "agent": ["sessionScoped", "tools/list_changed", "structured_output", "tool_receipts"],
+    "mcp_core_tools": [
+      "exposure",
+      "server_capabilities",
+      "storage_status",
+      "campaign_query",
+      "game_phase",
+      "skill_query",
+      "resolution_presentation"
+    ]
+  },
   "components": [
     {
       "repository": ".github",
@@ -24,24 +49,24 @@
       "branch": "main",
       "revision": "bd95caae9ad19d23e48cf86e7bd3e9cec65d9338",
       "remote": "https://github.com/SagaSmithAI/Sagasmith-coc.git",
-      "usage": "audited-local-system",
-      "enforced": false
+      "usage": "build",
+      "enforced": true
     },
     {
       "repository": "SagaSmith-coc-mcp",
       "branch": "main",
       "revision": "908fefa505ceacdc603e20eb20cf053e1d77b187",
       "remote": "https://github.com/SagaSmithAI/SagaSmith-coc-mcp.git",
-      "usage": "audited-local-authority",
-      "enforced": false
+      "usage": "build",
+      "enforced": true
     },
     {
       "repository": "SagaSmith-coc-skills",
       "branch": "master",
       "revision": "8f547f371c47a6ef2f70b2174174e104d650a7c7",
       "remote": "https://github.com/SagaSmithAI/SagaSmith-coc-skills.git",
-      "usage": "audited-local-skills",
-      "enforced": false
+      "usage": "build",
+      "enforced": true
     },
     {
       "repository": "sagasmith-coc-ui",

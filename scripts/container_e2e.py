@@ -383,6 +383,38 @@ def run(base_url: str) -> None:
     if not ledger or Decimal(ledger[0]["quantity"]) != actual_tokens or actual_tokens <= 0:
         raise RuntimeError(f"Agent usage was not settled: {ledger}")
 
+    coc_campaign = expect(
+        owner.post(
+            "/api/campaigns",
+            headers={"Idempotency-Key": f"coc-campaign-{run_id}"},
+            json={
+                "name": f"CoC Container E2E {run_id}",
+                "system_id": "coc7e",
+                "edition": "7e",
+            },
+        ),
+        201,
+    )
+    coc_campaign_id = coc_campaign["id"]
+    coc_conversation = expect(
+        owner.post(
+            f"/api/campaigns/{coc_campaign_id}/agent/conversations",
+            json={"title": "CoC container acceptance"},
+        ),
+        201,
+    )
+    coc_run = expect(
+        owner.post(
+            f"/api/campaigns/{coc_campaign_id}/agent/conversations/"
+            f"{coc_conversation['id']}/messages",
+            headers={"Idempotency-Key": f"coc-agent-{run_id}"},
+            json={"content": "Query the investigator list through the CoC runtime."},
+        ),
+        200,
+    )
+    if "dynamic MCP call completed" not in (coc_run["assistant_content"] or ""):
+        raise RuntimeError("hosted Agent did not complete a native CoC MCP call")
+
     module_project = expect(
         owner.post(
             "/api/modules",
@@ -670,6 +702,7 @@ def run(base_url: str) -> None:
                 "owner_user_id": owner_user["id"],
                 "player_user_id": player_user["id"],
                 "campaign_id": campaign_id,
+                "coc_campaign_id": coc_campaign_id,
                 "phase": runtime.get("result", runtime).get("effective_game_phase"),
                 "agent_tokens": run["prompt_tokens"] + run["completion_tokens"],
                 "pack_distribution": uploaded["distribution"],

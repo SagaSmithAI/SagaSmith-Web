@@ -94,6 +94,24 @@ def test_dm_identity_invitation_memory_agent_and_revocation(
     )
     assert stale.status_code == 409
 
+    selected_host = client.put(
+        f"/api/campaigns/{campaign.json()['id']}/room/host",
+        json={"identity_assignment_id": invitation.json()["id"]},
+    )
+    assert selected_host.status_code == 200, selected_host.text
+    assert selected_host.json()["host_identity_assignment_id"] == invitation.json()["id"]
+    hosted_turn = client.post(
+        f"/api/campaigns/{campaign.json()['id']}/room/messages",
+        headers={"Idempotency-Key": "identity-hosted-room-turn"},
+        json={"content": "We offer the guard our sealed letter.", "mode": "action"},
+    )
+    assert hosted_turn.status_code == 200, hosted_turn.text
+    assert hosted_turn.json()["agent_message"]["sender_display_name"] == identity.json()["name"]
+    hosted_call = agent_runtime.calls[-1]
+    assert hosted_call["context"]["principal_id"] == f"agent:{identity.json()['id']}"
+    assert hosted_call["context"]["campaign_role"] == "dm"
+    assert hosted_call["session_id"].startswith(f"{campaign.json()['id']}:agent:")
+
     conversation = client.post(
         f"/api/campaigns/{campaign.json()['id']}/agent/conversations",
         json={
@@ -130,6 +148,65 @@ def test_dm_identity_invitation_memory_agent_and_revocation(
     )
     assert denied.status_code == 404
     assert owner["id"] != identity_owner["id"]
+
+
+def test_keeper_identity_uses_coc_campaign_runtime(
+    client: TestClient,
+    dnd_runtime: FakeDndRuntime,
+    agent_runtime: FakeAgentRuntime,
+) -> None:
+    client.app.state.settings.bootstrap_admin_email = "admin@forge.example.com"
+    register(client, "admin@forge.example.com", "Keeper Moderator")
+    register(client, "keeper-owner@example.com", "Keeper Owner")
+    _soul, soul_release = publish(
+        client,
+        agent_runtime,
+        artifact_type="soul",
+        slug="keeper-soul",
+        title="Keeper Soul",
+        payload={"voice": "measured cosmic horror"},
+        system_id="coc7e",
+    )
+    login(client, "keeper-owner@example.com")
+    identity = client.post(
+        "/api/identities",
+        json={
+            "handle": "lantern-keeper",
+            "name": "Lantern Keeper",
+            "identity_kind": "keeper",
+            "system_id": "coc7e",
+            "visibility": "public",
+            "availability": "available",
+            "active_soul_release_id": soul_release["id"],
+        },
+    )
+    assert identity.status_code == 201, identity.text
+
+    client.app.state.coc_runtime = dnd_runtime
+    client.app.state.game_runtimes["coc7e"] = dnd_runtime
+    register(client, "coc-table@example.com", "CoC Table")
+    campaign = client.post(
+        "/api/campaigns",
+        headers={"Idempotency-Key": "keeper-campaign-create"},
+        json={"name": "Arkham Table", "system_id": "coc7e"},
+    )
+    assert campaign.status_code == 201, campaign.text
+    invitation = client.post(
+        f"/api/identities/campaigns/{campaign.json()['id']}/invitations",
+        headers={"Idempotency-Key": "invite-lantern-keeper"},
+        json={"identity_id": identity.json()["id"]},
+    )
+    assert invitation.status_code == 201, invitation.text
+
+    login(client, "keeper-owner@example.com")
+    accepted = client.post(
+        f"/api/identities/assignments/{invitation.json()['id']}/decision",
+        json={"decision": "accepted"},
+    )
+    assert accepted.status_code == 200, accepted.text
+    grant = [call for call in dnd_runtime.calls if call[0] == "campaign_access"][-1]
+    assert grant[1]["principal_id"] == f"agent:{identity.json()['id']}"
+    assert grant[1]["role"] == "dm"
 
 
 def test_moderation_suspends_identity_and_revokes_mcp_grant(

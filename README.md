@@ -3,7 +3,7 @@
 Private hosted SagaSmith product. The public SagaSmith repositories remain complete local and
 self-hosted applications; this repository adds the hosted account, quota, campaign-lobby,
 orchestration, unified Web, billing, and operations layers without becoming an authority for D&D
-game state.
+or CoC game state.
 
 The same deployment includes **SagaSmith Forge**, the account-scoped creation and sharing layer for
 Rule/Module Packs, character blueprints, Souls, Skills, assets, and hosted DM/Keeper Identities.
@@ -15,7 +15,7 @@ moderation primitives while keeping each artifact type's installation semantics 
 The first production slice proves the complete trust chain:
 
 1. two users register and sign in;
-2. one creates a D&D campaign and becomes owner/DM in the authoritative MCP;
+2. one creates D&D and CoC campaigns and becomes owner/DM in each authoritative MCP;
 3. the second applies and is approved as a player;
 4. a PC is bound to that player through MCP authority;
 5. an Agent request reserves quota, records actual usage, and releases the remainder;
@@ -35,8 +35,12 @@ The first production slice proves the complete trust chain:
 
 ```powershell
 Copy-Item .env.example .env
-docker compose up --build
+docker compose -f compose.yaml -f compose.workspace.yaml up --build
 ```
+
+The workspace override builds the coordinated sibling worktrees. A production/release deployment
+uses `compose.yaml` alone, whose public inputs are immutable revisions from
+`component-versions.json`.
 
 API health through Caddy: `http://127.0.0.1/api/health`
 
@@ -48,11 +52,16 @@ uv run pytest
 uv run ruff check .
 ```
 
+The API image uses this repository's `uv.lock`. The combined hosted Agent supervisor uses the
+Service-owned, hash-locked `infrastructure/agent-supervisor-requirements.txt`, generated from both
+Service and Agent constraints. This is an integrated deployment lock, not a third reusable package.
+
 The real container acceptance suite is intentionally separate from unit tests. It boots
-PostgreSQL, Redis, MinIO, the public D&D MCP server, real Nanobot workers, the persistent Module
+PostgreSQL, Redis, MinIO, both public system MCP servers, real Nanobot workers, the persistent Module
 Studio worker and a deterministic
 OpenAI-compatible test provider, then verifies account/lobby, authenticated Agent identity,
-dynamic native-tool refresh and execution, exact quota settlement, finalized Pack upload/import/
+system-directed dynamic native-tool refresh and execution for D&D and CoC, exact quota settlement,
+finalized Pack upload/import/
 activation, membership revocation and audit:
 
 ```powershell

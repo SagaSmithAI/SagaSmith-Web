@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +44,64 @@ def test_compose_pins_every_enforced_component_revision() -> None:
             assert f"#{component['revision']}" in compose
 
 
+def test_service_release_manifest_pins_every_runtime_layer() -> None:
+    lock = json.loads((ROOT / "component-versions.json").read_text(encoding="utf-8"))
+    runtime_locks = lock["runtime_locks"]
+    assert runtime_locks["service_api"] == "uv.lock"
+    assert runtime_locks["agent_supervisor"] == (
+        "infrastructure/agent-supervisor-requirements.txt"
+    )
+    assert runtime_locks["uv_version"] == "0.11.25"
+    deployment_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (
+            ROOT / "Dockerfile",
+            ROOT / "compose.yaml",
+            ROOT / "compose.e2e.yaml",
+            ROOT / "infrastructure" / "Dockerfile.agent-supervisor",
+            ROOT / "infrastructure" / "Dockerfile.dnd-mcp",
+            ROOT / "infrastructure" / "Dockerfile.coc-mcp",
+        )
+    )
+    for digest in runtime_locks["container_images"].values():
+        assert digest in deployment_text
+
+
+def test_agent_supervisor_has_one_hash_locked_dependency_solution() -> None:
+    requirements = (
+        ROOT / "infrastructure" / "agent-supervisor-requirements.txt"
+    ).read_text(encoding="utf-8")
+    packages = re.findall(r"^([a-z0-9][a-z0-9._-]*)==", requirements, re.MULTILINE)
+    assert packages
+    assert len(packages) == len(set(packages))
+    for required in ("fastapi", "httpx", "mcp", "pydantic"):
+        assert required in packages
+    dockerfile = (ROOT / "infrastructure" / "Dockerfile.agent-supervisor").read_text(
+        encoding="utf-8"
+    )
+    assert "--require-hashes -r /tmp/requirements.txt" in dockerfile
+    assert "uv export" not in dockerfile
+
+
+def test_hosted_contract_requires_dynamic_scoped_structured_tools() -> None:
+    lock = json.loads((ROOT / "component-versions.json").read_text(encoding="utf-8"))
+    assert lock["required_contracts"]["agent"] == [
+        "sessionScoped",
+        "tools/list_changed",
+        "structured_output",
+        "tool_receipts",
+    ]
+    assert lock["required_contracts"]["mcp_core_tools"] == [
+        "exposure",
+        "server_capabilities",
+        "storage_status",
+        "campaign_query",
+        "game_phase",
+        "skill_query",
+        "resolution_presentation",
+    ]
+
+
 def test_hosted_agent_uses_current_session_scoped_native_tool_contract() -> None:
     paths = (
         ROOT / "config" / "agent-config.example.json",
@@ -50,14 +109,27 @@ def test_hosted_agent_uses_current_session_scoped_native_tool_contract() -> None
     )
     for path in paths:
         config = json.loads(path.read_text(encoding="utf-8"))
-        server = config["tools"]["mcpServers"]["sagasmith_dnd"]
-        assert server["injectPrincipal"] is True
-        assert server["sessionScoped"] is True
-        assert server["exposeResourcesAndPrompts"] is True
-        assert server["toolTimeout"] == 900
-        assert server["enabledTools"] == ["*"]
+        for server_name in ("sagasmith_dnd", "sagasmith_coc"):
+            server = config["tools"]["mcpServers"][server_name]
+            assert server["injectPrincipal"] is True
+            assert server["sessionScoped"] is True
+            assert server["exposeResourcesAndPrompts"] is True
+            assert server["toolTimeout"] == 900
+            assert server["enabledTools"] == ["*"]
         skills = config["agents"]["defaults"]["externalSkillsDirs"]
         assert skills == [
-            "/opt/sagasmith/skills/dnd",
+            "/opt/sagasmith/skills/hosted",
+            "/opt/sagasmith/skills/dnd/full/skills",
+            "/opt/sagasmith/skills/coc/full/skills",
             "/opt/sagasmith/skills/modulegen",
         ]
+
+
+def test_supervisor_image_preserves_shared_skill_references() -> None:
+    dockerfile = (
+        ROOT / "infrastructure" / "Dockerfile.agent-supervisor"
+    ).read_text(encoding="utf-8")
+    assert "COPY --from=dnd_skills ./full /opt/sagasmith/skills/dnd/full" in dockerfile
+    assert "COPY --from=coc_skills ./full /opt/sagasmith/skills/coc/full" in dockerfile
+    assert "/opt/sagasmith/skills/dnd/full/references/mcp-contract.md" in dockerfile
+    assert "/opt/sagasmith/skills/coc/full/references/mcp-contract.md" in dockerfile

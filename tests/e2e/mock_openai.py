@@ -47,6 +47,7 @@ class Handler(BaseHTTPRequestHandler):
         )
         authenticated = bool(context)
         campaign_match = re.search(r"^campaign_id=(.+)$", context, re.MULTILINE)
+        system_match = re.search(r"^system_id=(.+)$", context, re.MULTILINE)
         principal_match = re.search(r"^principal_id=(.+)$", context, re.MULTILINE)
         module_result = None
         if "Task: Design a playable outline" in context:
@@ -195,9 +196,15 @@ class Handler(BaseHTTPRequestHandler):
             for message in messages
             if isinstance(message, dict) and message.get("role") == "tool"
         ]
-        exposure_name = next((name for name in tool_names if name.endswith("_exposure")), "")
+        selected_tools = tool_names
+        if system_match:
+            marker = "coc" if system_match.group(1) == "coc7e" else "dnd"
+            selected_tools = {name for name in tool_names if marker in name.casefold()}
+        exposure_name = next(
+            (name for name in selected_tools if name.endswith("_exposure")), ""
+        )
         character_query_name = next(
-            (name for name in tool_names if name.endswith("_character_query")), ""
+            (name for name in selected_tools if name.endswith("_character_query")), ""
         )
         if authenticated and campaign_match and principal_match and not tool_messages:
             self._tool_call(
@@ -215,13 +222,22 @@ class Handler(BaseHTTPRequestHandler):
                 str(message.get("name", "")).endswith("_character_query")
                 for message in tool_messages
             ):
+                is_coc = bool(system_match and system_match.group(1) == "coc7e")
                 self._tool_call(
                     character_query_name,
-                    {
-                        "view": "list",
-                        "payload": {"campaign_id": campaign_match.group(1)},
-                        "principal_id": principal_match.group(1),
-                    },
+                    (
+                        {
+                            "action": "list",
+                            "campaign_id": campaign_match.group(1),
+                            "principal_id": principal_match.group(1),
+                        }
+                        if is_coc
+                        else {
+                            "view": "list",
+                            "payload": {"campaign_id": campaign_match.group(1)},
+                            "principal_id": principal_match.group(1),
+                        }
+                    ),
                     "character-query",
                 )
                 return

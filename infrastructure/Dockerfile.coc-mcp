@@ -5,15 +5,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libmagic1 poppler-utils tesseract-ocr && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY --from=core . ./sagasmith-core
-COPY --from=dnd . ./sagasmith-dnd
-COPY --from=dnd_mcp . ./SagaSmith-dnd-mcp
-COPY --from=dnd_skills . ./SagaSmith-dnd-skills
+COPY --from=coc . ./sagasmith-coc
+COPY --from=coc_mcp . ./SagaSmith-coc-mcp
+COPY --from=coc_skills . ./SagaSmith-coc-skills
 COPY --from=module_gen_skills . ./SagaSmith-module-gen-skills
 RUN pip install --no-cache-dir uv==0.11.25 && \
-    cd /build/SagaSmith-dnd-mcp && uv sync --frozen --no-dev
-RUN useradd -m -u 10001 sagasmith && mkdir -p /state /srv/sagasmith/exchange && \
+    cd /build/SagaSmith-coc-mcp && uv sync --frozen --no-dev
+RUN useradd -m -u 10003 sagasmith && mkdir -p /state /srv/sagasmith/exchange && \
     chown -R sagasmith:sagasmith /state /srv/sagasmith
 USER sagasmith
-ENV PATH="/build/SagaSmith-dnd-mcp/.venv/bin:$PATH"
-EXPOSE 8767
-CMD ["sagasmith-dnd-mcp"]
+ENV PATH="/build/SagaSmith-coc-mcp/.venv/bin:$PATH"
+EXPOSE 8768
+CMD ["sagasmith-coc-mcp"]

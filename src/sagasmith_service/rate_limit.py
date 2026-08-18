@@ -15,6 +15,8 @@ class RateLimiterUnavailableError(RuntimeError):
 
 
 class RateLimiter(Protocol):
+    async def probe(self) -> None: ...
+
     async def hit(self, key: str, *, limit: int, window_seconds: int) -> int | None: ...
 
 
@@ -30,6 +32,9 @@ class MemoryRateLimiter:
     def __init__(self) -> None:
         self._windows: dict[str, _Window] = {}
         self._lock = asyncio.Lock()
+
+    async def probe(self) -> None:
+        return None
 
     async def hit(self, key: str, *, limit: int, window_seconds: int) -> int | None:
         now = time.monotonic()
@@ -47,6 +52,12 @@ class MemoryRateLimiter:
 class RedisRateLimiter:
     def __init__(self, url: str) -> None:
         self.client = Redis.from_url(url, decode_responses=True)
+
+    async def probe(self) -> None:
+        try:
+            await self.client.ping()
+        except RedisError as exc:
+            raise RateLimiterUnavailableError("rate limiter is unavailable") from exc
 
     async def hit(self, key: str, *, limit: int, window_seconds: int) -> int | None:
         try:

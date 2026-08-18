@@ -26,7 +26,7 @@ if ($resolvedDestination -eq [System.IO.Path]::GetFullPath($repo)) {
 }
 New-Item -ItemType Directory -Force -Path $resolvedDestination | Out-Null
 
-$writers = @("api", "module-worker", "agent", "dnd-mcp", "minio")
+$writers = @("api", "module-worker", "agent", "dnd-mcp", "coc-mcp", "minio")
 $stopped = $false
 Push-Location $repo
 try {
@@ -45,7 +45,7 @@ try {
     Invoke-CheckedNative -Executable "docker" -Arguments @(
         $composeArgs + @("exec", "-T", "postgres", "rm", "-f", "/tmp/control.dump")
     )
-    $volumes = @("object-data", "dnd-state", "agent-workspace")
+    $volumes = @("object-data", "dnd-state", "coc-state", "agent-workspace")
     foreach ($volume in $volumes) {
         $source = "${ProjectName}_$volume"
         Invoke-CheckedNative -Executable "docker" -Arguments @(
@@ -84,7 +84,7 @@ try {
     if ($stopped) {
         Invoke-CheckedNative -Executable "docker" -Arguments @(
             $composeArgs + @(
-                "up", "-d", "--wait", "minio", "dnd-mcp", "agent", "module-worker", "api"
+                "up", "-d", "--wait", "minio", "dnd-mcp", "coc-mcp", "agent", "module-worker", "api"
             )
         )
     }

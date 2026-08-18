@@ -611,6 +611,7 @@ async def agent_review_release(
             content=prompt,
             context={
                 "campaign_id": "community",
+                "system_id": artifact.system_id,
                 "principal_id": user.principal_id,
                 "campaign_role": "author",
             },

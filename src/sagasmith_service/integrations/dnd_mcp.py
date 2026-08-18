@@ -10,6 +10,8 @@ from mcp.client.streamable_http import streamable_http_client
 
 
 class DndRuntime(Protocol):
+    async def probe(self) -> None: ...
+
     async def get_campaign(self, *, campaign_id: str, principal_id: str) -> dict[str, Any]: ...
 
     async def create_campaign(
@@ -110,6 +112,10 @@ class DndRuntime(Protocol):
         self, *, campaign_id: str, character_id: str, principal_id: str
     ) -> dict[str, Any]: ...
 
+    async def get_resolution_presentation(
+        self, *, campaign_id: str, resolution_id: str, principal_id: str
+    ) -> dict[str, Any]: ...
+
     async def set_game_phase(
         self,
         *,
@@ -183,6 +189,39 @@ class StreamableHttpDndRuntime:
     def __init__(self, url: str, *, bearer_token: str | None = None) -> None:
         self.url = url
         self.bearer_token = bearer_token
+
+    async def probe(self) -> None:
+        """Verify the MCP endpoint and the hosted contract without mutating state."""
+        headers = (
+            {"Authorization": f"Bearer {self.bearer_token}"}
+            if self.bearer_token
+            else {}
+        )
+        required = {
+            "exposure",
+            "server_capabilities",
+            "storage_status",
+            "campaign_query",
+            "game_phase",
+            "skill_query",
+            "resolution_presentation",
+        }
+        try:
+            async with AsyncExitStack() as stack:
+                client = await stack.enter_async_context(
+                    httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(10, connect=5))
+                )
+                read, write, _ = await stack.enter_async_context(
+                    streamable_http_client(self.url, http_client=client)
+                )
+                session = await stack.enter_async_context(ClientSession(read, write))
+                await session.initialize()
+                available = {tool.name for tool in (await session.list_tools()).tools}
+        except Exception as exc:
+            raise RuntimeError("D&D MCP readiness probe failed") from exc
+        missing = sorted(required - available)
+        if missing:
+            raise RuntimeError(f"D&D MCP is missing required tools: {', '.join(missing)}")
 
     async def _call(
         self,
@@ -495,6 +534,26 @@ class StreamableHttpDndRuntime:
         ):
             raise RuntimeError("D&D MCP returned a character outside the campaign")
         return character
+
+    async def get_resolution_presentation(self, **arguments: Any) -> dict[str, Any]:
+        receipt = await self._call(
+            "resolution_presentation",
+            {
+                "campaign_id": arguments["campaign_id"],
+                "resolution_id": arguments["resolution_id"],
+                "principal_id": arguments["principal_id"],
+            },
+            exposure_principal=arguments["principal_id"],
+            campaign_id=arguments["campaign_id"],
+        )
+        value: Any = receipt
+        for _ in range(3):
+            if not isinstance(value, dict) or "result" not in value:
+                break
+            value = value["result"]
+        if not isinstance(value, dict):
+            raise RuntimeError("D&D MCP returned no resolution presentation")
+        return value
 
     async def set_game_phase(self, **arguments: Any) -> dict[str, Any]:
         return await self._call(

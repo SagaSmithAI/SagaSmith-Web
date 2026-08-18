@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from sqlalchemy import func, or_, select
@@ -32,6 +32,17 @@ from sagasmith_service.schemas import (
 )
 
 router = APIRouter(prefix="/api/identities", tags=["identities"])
+
+
+def _campaign_runtime(request: Request, session: DbSession, campaign_id: str) -> Any:
+    campaign = session.get(CampaignProjection, campaign_id)
+    if campaign is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "campaign not found")
+    runtimes = getattr(request.app.state, "game_runtimes", {})
+    runtime = runtimes.get(campaign.system_id) if isinstance(runtimes, dict) else None
+    if runtime is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "unsupported game system")
+    return runtime
 
 
 def _identity_view(session: DbSession, item: AgentIdentity) -> AgentIdentityView:
@@ -229,10 +240,11 @@ def invite_identity(
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT, "identity system is incompatible"
         )
-    if campaign.system_id != "dnd5e" or identity.identity_kind != "dm":
+    expected_identity_kind = "dm" if campaign.system_id == "dnd5e" else "keeper"
+    if identity.identity_kind != expected_identity_kind:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "the current hosted runtime accepts D&D DM identities only",
+            "identity kind is incompatible with the campaign host role",
         )
     payer_id = payload.quota_payer_user_id or user.id
     if payer_id not in {user.id, identity.owner_user_id}:
@@ -334,7 +346,9 @@ async def decide_assignment(
         if inviter is None:
             raise HTTPException(status.HTTP_409_CONFLICT, "campaign owner no longer exists")
         try:
-            receipt = await request.app.state.dnd_runtime.grant_campaign_access(
+            receipt = await _campaign_runtime(
+                request, session, item.campaign_id
+            ).grant_campaign_access(
                 campaign_id=item.campaign_id,
                 principal_id=identity.principal_id,
                 role="dm",
@@ -378,7 +392,9 @@ async def revoke_assignment(
         caller = session.get(User, campaign.owner_user_id) or user
     if item.status == "accepted":
         try:
-            receipt = await request.app.state.dnd_runtime.revoke_campaign_access(
+            receipt = await _campaign_runtime(
+                request, session, item.campaign_id
+            ).revoke_campaign_access(
                 campaign_id=item.campaign_id,
                 principal_id=identity.principal_id,
                 by_principal_id=caller.principal_id,

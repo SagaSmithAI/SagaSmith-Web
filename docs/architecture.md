@@ -1,4 +1,4 @@
-# Hosted D&D architecture
+# Hosted D&D and CoC architecture
 
 ## Product boundary
 
@@ -6,7 +6,7 @@
 remain complete local/self-hosted products. Dependency direction is one way:
 
 ```text
-Browser -> Service API/BFF -> hosted Agent worker -> public D&D MCP facade
+Browser -> Service API/BFF -> hosted Agent worker -> matching D&D or CoC MCP facade
                            -> PostgreSQL (cloud workflow/projections/usage)
                            -> private S3/MinIO (Pack archives)
 
@@ -14,7 +14,8 @@ Browser -> Forge catalog -> Artifact + immutable Release + discussion/moderation
                          -> Soul -> hosted Identity -> campaign assignment
 
 D&D MCP -> sagasmith-dnd -> sagasmith-core
-Agent   -> D&D Skills and module-generation Skills
+CoC MCP -> sagasmith-coc -> sagasmith-core
+Agent   -> D&D/CoC Skills and module-generation Skills
 ```
 
 ## Module Studio
@@ -38,7 +39,7 @@ approved evidence review and a fresh explicit Agent confirmation. Compiled artif
 installed directly into owned/DM campaigns or submitted to Forge moderation. Published community
 installs import the same MCP artifact and never reconstruct rule or module state in Service.
 
-The Service never opens the D&D MCP database. Campaign state, phase, random streams, revisions,
+The Service never opens either system MCP database. Campaign state, phase, random streams, revisions,
 idempotency, snapshots, branches, undo/redo, actor scope, settlement, and Pack activation remain
 MCP-owned. Service records a receipt and a disposable projection after a successful public tool
 call.
@@ -117,10 +118,10 @@ exception is granted.
 |---|---|---|
 | users, sessions, quotas, invitations, applications | Service PostgreSQL | PostgreSQL backup |
 | campaign/member/actor display projection | Service cache | MCP reconciliation |
-| campaign world and mechanic state | D&D MCP | D&D state backup/snapshot |
+| campaign world and mechanic state | D&D/CoC MCP | per-system state backup/snapshot |
 | room message/event/read cursor and Agent run/usage receipt | Service + Agent workspace | both backups |
 | private Pack archive | private object storage | versioned object backup |
-| imported/activated Pack state | D&D MCP | MCP backup + immutable archive |
+| imported/activated Pack state | system MCP | MCP backup + immutable archive |
 | public artifact/release metadata, discussions, reports | Service PostgreSQL | PostgreSQL backup |
 | Soul and Identity public profile | Service PostgreSQL | PostgreSQL backup |
 | Identity campaign assignment and curated memory | Service PostgreSQL + MCP access grant | PostgreSQL + MCP backup |

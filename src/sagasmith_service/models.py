@@ -258,6 +258,9 @@ class CampaignRoom(TimestampMixin, Base):
         ForeignKey("campaign_projections.id", ondelete="CASCADE"), unique=True, index=True
     )
     status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    host_identity_assignment_id: Mapped[str | None] = mapped_column(
+        ForeignKey("identity_campaign_assignments.id", ondelete="SET NULL"), index=True
+    )
     next_message_sequence: Mapped[int] = mapped_column(default=1)
     next_event_sequence: Mapped[int] = mapped_column(default=1)
 

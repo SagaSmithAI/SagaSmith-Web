@@ -9,7 +9,9 @@
     "defaults": {
       "modelPreset": "hosted",
       "externalSkillsDirs": [
-        "/opt/sagasmith/skills/dnd",
+        "/opt/sagasmith/skills/hosted",
+        "/opt/sagasmith/skills/dnd/full/skills",
+        "/opt/sagasmith/skills/coc/full/skills",
         "/opt/sagasmith/skills/modulegen"
       ]
     }
@@ -22,6 +24,15 @@
       "sagasmith_dnd": {
         "type": "streamableHttp",
         "url": "http://dnd-mcp:8767/mcp",
+        "injectPrincipal": true,
+        "sessionScoped": true,
+        "toolTimeout": 900,
+        "exposeResourcesAndPrompts": true,
+        "enabledTools": ["*"]
+      },
+      "sagasmith_coc": {
+        "type": "streamableHttp",
+        "url": "http://coc-mcp:8768/mcp",
         "injectPrincipal": true,
         "sessionScoped": true,
         "toolTimeout": 900,

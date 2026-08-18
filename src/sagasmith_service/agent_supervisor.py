@@ -23,6 +23,7 @@ class CompletionRequest(BaseModel):
     messages: list[dict[str, Any]]
     principal_id: str
     stream: bool = False
+    response_contract: dict[str, Any] | None = None
 
 
 @dataclass
@@ -70,6 +71,7 @@ class WorkerManager:
         worker_api_key: str,
         first_port: int = 19000,
         idle_seconds: int = 1800,
+        completion_timeout_seconds: int = 900,
     ) -> None:
         self.config_path = str(Path(config_path).resolve())
         self.workspace_root = Path(workspace_root).resolve()
@@ -77,6 +79,7 @@ class WorkerManager:
         self.worker_api_key = worker_api_key
         self.first_port = first_port
         self.idle_seconds = idle_seconds
+        self.completion_timeout_seconds = max(30, int(completion_timeout_seconds))
         self.workers: dict[str, Worker] = {}
         self.lock = asyncio.Lock()
         self.cleanup_task: asyncio.Task[None] | None = None
@@ -134,6 +137,11 @@ class WorkerManager:
         workspace.mkdir(parents=True, exist_ok=True)
         with Path(self.config_path).open(encoding="utf-8") as source:
             runtime_config = json.load(source)
+        defaults = runtime_config.setdefault("agents", {}).setdefault("defaults", {})
+        skill_dirs = [str(item) for item in defaults.get("externalSkillsDirs") or []]
+        defaults["externalSkillsDirs"] = list(
+            dict.fromkeys(["/opt/sagasmith/skills/hosted", *skill_dirs])
+        )
         tools = runtime_config.setdefault("tools", {})
         configured = [str(item) for item in tools.get("ssrfWhitelist") or []]
         trusted = trusted_host_cidrs(os.environ.get("SAGASMITH_AGENT_TRUSTED_MCP_HOSTS", ""))
@@ -193,7 +201,7 @@ class WorkerManager:
         # instead of coupling Service to a duplicated model name.
         payload.pop("model", None)
         headers = {"Authorization": f"Bearer {self.worker_api_key}"}
-        timeout = httpx.Timeout(240, connect=5)
+        timeout = httpx.Timeout(self.completion_timeout_seconds, connect=5)
         async with httpx.AsyncClient(headers=headers, timeout=timeout) as client:
             response = await client.post(
                 f"http://127.0.0.1:{worker.port}/v1/chat/completions",
@@ -254,6 +262,9 @@ def main() -> None:
         worker_api_key=internal_key,
         first_port=int(os.environ.get("SAGASMITH_AGENT_FIRST_PORT", "19000")),
         idle_seconds=int(os.environ.get("SAGASMITH_AGENT_IDLE_SECONDS", "1800")),
+        completion_timeout_seconds=int(
+            os.environ.get("SAGASMITH_AGENT_COMPLETION_TIMEOUT_SECONDS", "900")
+        ),
     )
     uvicorn.run(
         create_supervisor_app(manager, internal_key),

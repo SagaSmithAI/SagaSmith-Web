@@ -24,6 +24,10 @@ class LocalPrivateStorage:
         self.root.mkdir(parents=True, exist_ok=True)
         self.exchange_root.mkdir(parents=True, exist_ok=True)
 
+    def probe(self) -> None:
+        if not self.root.is_dir() or not self.exchange_root.is_dir():
+            raise PrivateStorageError("private storage is unavailable")
+
     def put(
         self,
         key: str,
@@ -120,6 +124,12 @@ class S3PrivateStorage:
             self.client.head_bucket(Bucket=bucket)
         except Exception:
             self.client.create_bucket(Bucket=bucket)
+
+    def probe(self) -> None:
+        try:
+            self.client.head_bucket(Bucket=self.bucket)
+        except Exception as exc:
+            raise PrivateStorageError("private storage is unavailable") from exc
 
     def put(
         self,

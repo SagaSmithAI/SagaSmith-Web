@@ -15,6 +15,8 @@ class AgentResult:
     model: str | None
     prompt_tokens: int
     completion_tokens: int
+    structured_output: dict[str, Any] | None = None
+    tool_receipts: tuple[dict[str, Any], ...] = ()
 
     @property
     def total_tokens(self) -> int:
@@ -22,6 +24,8 @@ class AgentResult:
 
 
 class AgentRuntime(Protocol):
+    async def probe(self) -> None: ...
+
     async def complete(
         self,
         *,
@@ -37,6 +41,15 @@ class HttpAgentRuntime:
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
 
+    async def probe(self) -> None:
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10, connect=5)) as client:
+                response = await client.get(f"{self.base_url}/health", headers=headers)
+            response.raise_for_status()
+        except Exception as exc:
+            raise RuntimeError("Agent readiness probe failed") from exc
+
     async def complete(
         self,
         *,
@@ -48,9 +61,12 @@ class HttpAgentRuntime:
         context_lines = [
             "[SagaSmith Service authenticated context]",
             f"campaign_id={context['campaign_id']}",
+            f"system_id={context.get('system_id', 'system-neutral')}",
             f"principal_id={context['principal_id']}",
             f"campaign_role={context['campaign_role']}",
             "Use these identifiers as authoritative call arguments; MCP validates every write.",
+            "For dnd5e or coc7e, use only the MCP server matching system_id for campaign "
+            "state and mechanics.",
         ]
         if context.get("room_id"):
             context_lines.extend(
@@ -86,6 +102,22 @@ class HttpAgentRuntime:
                     json.dumps(context.get("campaign_memory") or [], ensure_ascii=False),
                 ]
             )
+        response_contract = context.get("response_contract")
+        if response_contract:
+            context_lines.extend(
+                [
+                    "[Required hosted room response]",
+                    f"run_id={context['run_id']}",
+                    f"trigger_message_id={context['trigger_message_id']}",
+                    "Load and follow the room-host Skill before composing the presentation.",
+                    "End this turn by calling the provided submit_room_turn tool exactly once. ",
+                    "The tool arguments are the only player-visible final response. Do not ",
+                    "repeat them as prose and do not expose private reasoning or tool arguments.",
+                    "Use report_room_activity for finite-code progress transitions while working. ",
+                    "Never publish public resolving_roll or settling_save activity; hidden rolls ",
+                    "must produce no player-visible activity at all.",
+                ]
+            )
         context_lines.extend(["[Player message]", content])
         authenticated_context = "\n".join(context_lines)
         async with httpx.AsyncClient(
@@ -98,6 +130,7 @@ class HttpAgentRuntime:
                     "messages": [{"role": "user", "content": authenticated_context}],
                     "principal_id": context["principal_id"],
                     "stream": False,
+                    "response_contract": response_contract,
                 },
             )
         if response.status_code >= 400:
@@ -114,4 +147,14 @@ class HttpAgentRuntime:
             model=payload.get("model"),
             prompt_tokens=int(usage.get("prompt_tokens") or 0),
             completion_tokens=int(usage.get("completion_tokens") or 0),
+            structured_output=(
+                dict(payload["structured_output"])
+                if isinstance(payload.get("structured_output"), dict)
+                else None
+            ),
+            tool_receipts=tuple(
+                dict(item)
+                for item in (payload.get("tool_receipts") or [])
+                if isinstance(item, dict)
+            ),
         )

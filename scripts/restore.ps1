@@ -43,7 +43,7 @@ try {
     Invoke-CheckedNative -Executable "docker" -Arguments @(
         $composeArgs + @("up", "-d", "--wait", "postgres")
     )
-    $volumes = @("object-data", "dnd-state", "agent-workspace")
+    $volumes = @("object-data", "dnd-state", "coc-state", "agent-workspace")
     foreach ($volume in $volumes) {
         $target = "${ProjectName}_$volume"
         Invoke-CheckedNative -Executable "docker" -Arguments @(
@@ -69,7 +69,7 @@ try {
     )
     Invoke-CheckedNative -Executable "docker" -Arguments @(
         $composeArgs + @(
-            "up", "-d", "--wait", "minio", "dnd-mcp", "agent", "module-worker", "api"
+            "up", "-d", "--wait", "minio", "dnd-mcp", "coc-mcp", "agent", "module-worker", "api"
         )
     )
     Write-Host "Isolated restore completed for project $ProjectName. Proxy was not started."

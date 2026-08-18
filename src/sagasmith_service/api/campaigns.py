@@ -6,7 +6,6 @@ from fastapi import APIRouter, Header, HTTPException, Request, status
 from sqlalchemy import select
 
 from sagasmith_service.api.dependencies import CurrentUser, DbSession
-from sagasmith_service.integrations.dnd_mcp import DndRuntime
 from sagasmith_service.models import (
     ActorBindingProjection,
     AgentConversation,
@@ -31,8 +30,23 @@ from sagasmith_service.schemas import (
 )
 
 
-def _runtime(request: Request) -> DndRuntime:
-    return request.app.state.dnd_runtime
+def _runtime(
+    request: Request,
+    session: DbSession,
+    *,
+    campaign_id: str | None = None,
+    system_id: str | None = None,
+) -> Any:
+    if campaign_id is not None:
+        campaign = session.get(CampaignProjection, campaign_id)
+        if campaign is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "campaign not found")
+        system_id = campaign.system_id
+    runtimes = getattr(request.app.state, "game_runtimes", {})
+    runtime = runtimes.get(system_id) if isinstance(runtimes, dict) else None
+    if runtime is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "unsupported game system")
+    return runtime
 
 
 def _campaign_id(receipt: dict[str, Any]) -> str:
@@ -42,7 +56,7 @@ def _campaign_id(receipt: dict[str, Any]) -> str:
             value = candidate.get("id") or candidate.get("campaign_id")
             if value:
                 return str(value)
-    raise RuntimeError("D&D MCP campaign receipt has no campaign id")
+    raise RuntimeError("game MCP campaign receipt has no campaign id")
 
 
 def _membership(session: DbSession, campaign_id: str, user_id: str) -> CampaignMembershipProjection:
@@ -79,7 +93,7 @@ async def create_campaign(
     if existing is not None:
         return CampaignView.model_validate(existing)
     try:
-        receipt = await _runtime(request).create_campaign(
+        receipt = await _runtime(request, session, system_id=payload.system_id).create_campaign(
             name=payload.name,
             description=payload.description,
             edition=payload.edition,
@@ -97,6 +111,7 @@ async def create_campaign(
         name=payload.name,
         owner_user_id=user.id,
         visibility=payload.visibility,
+        system_id=payload.system_id,
         mcp_receipt=stored_receipt,
     )
     session.add(campaign)
@@ -147,7 +162,7 @@ async def campaign_runtime(
 ) -> dict[str, Any]:
     _membership(session, campaign_id, user.id)
     try:
-        return await _runtime(request).get_campaign(
+        return await _runtime(request, session, campaign_id=campaign_id).get_campaign(
             campaign_id=campaign_id, principal_id=user.principal_id
         )
     except RuntimeError as exc:
@@ -206,7 +221,8 @@ async def change_member_role(
         raise HTTPException(status.HTTP_409_CONFLICT, "campaign member no longer exists")
     if target.role != payload.role:
         try:
-            receipt = await _runtime(request).grant_campaign_access(
+            runtime = _runtime(request, session, campaign_id=campaign_id)
+            receipt = await runtime.grant_campaign_access(
                 campaign_id=campaign_id,
                 principal_id=target_user.principal_id,
                 role=payload.role,
@@ -269,7 +285,7 @@ async def revoke_member(
     if target_user is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "campaign member no longer exists")
     try:
-        receipt = await _runtime(request).revoke_campaign_access(
+        receipt = await _runtime(request, session, campaign_id=campaign_id).revoke_campaign_access(
             campaign_id=campaign_id,
             principal_id=target_user.principal_id,
             by_principal_id=user.principal_id,
@@ -423,7 +439,8 @@ async def decide_join_request(
         if applicant is None:
             raise HTTPException(status.HTTP_409_CONFLICT, "applicant no longer exists")
         try:
-            receipt = await _runtime(request).grant_campaign_access(
+            runtime = _runtime(request, session, campaign_id=campaign_id)
+            receipt = await runtime.grant_campaign_access(
                 campaign_id=campaign_id,
                 principal_id=applicant.principal_id,
                 role="player",
@@ -481,7 +498,7 @@ async def bind_actor(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "user not found")
     _membership(session, campaign_id, target.id)
     try:
-        receipt = await _runtime(request).grant_actor_access(
+        receipt = await _runtime(request, session, campaign_id=campaign_id).grant_actor_access(
             campaign_id=campaign_id,
             actor_id=actor_id,
             principal_id=target.principal_id,

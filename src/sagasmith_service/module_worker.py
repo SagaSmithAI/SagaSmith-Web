@@ -300,6 +300,7 @@ class ModuleJobProcessor:
             content=prompt,
             context={
                 "campaign_id": campaign_id,
+                "system_id": "dnd5e",
                 "principal_id": principal_id,
                 "campaign_role": "owner",
             },

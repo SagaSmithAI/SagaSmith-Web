@@ -16,6 +16,7 @@ from sagasmith_service.models import (
     ArtifactRelease,
     AuditEvent,
     CampaignMembershipProjection,
+    CampaignProjection,
     IdentityCampaignAssignment,
     IdentityMemoryEntry,
     now_utc,
@@ -140,6 +141,9 @@ async def send_message(
     idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=8, max_length=160)],
 ) -> AgentRunView:
     membership = _membership(session, campaign_id, user.id)
+    campaign = session.get(CampaignProjection, campaign_id)
+    if campaign is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "campaign not found")
     conversation = session.scalar(
         select(AgentConversation).where(
             AgentConversation.id == conversation_id,
@@ -245,6 +249,7 @@ async def send_message(
             content=payload.content,
             context={
                 "campaign_id": campaign_id,
+                "system_id": campaign.system_id,
                 "principal_id": principal_id,
                 "campaign_role": campaign_role,
                 **identity_context,

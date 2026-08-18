@@ -5,7 +5,13 @@ import json
 from pathlib import Path
 from typing import Any
 
-REQUIRED_FILES = {"control.dump", "object-data.tgz", "dnd-state.tgz", "agent-workspace.tgz"}
+REQUIRED_FILES = {
+    "control.dump",
+    "object-data.tgz",
+    "dnd-state.tgz",
+    "coc-state.tgz",
+    "agent-workspace.tgz",
+}
 
 
 def verify_backup(path: Path) -> dict[str, Any]:

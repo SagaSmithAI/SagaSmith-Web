@@ -11,9 +11,21 @@ uv run python scripts/audit_components.py --scope build --strict --json
 docker compose config
 ```
 
+During coordinated local development, use
+`docker compose -f compose.yaml -f compose.workspace.yaml up --build` so the image consumes the
+current sibling worktrees. This override is not a release input and must not be used to replace the
+immutable production component lock.
+
 Do not replace the pinned defaults with moving branches in a production release. Environment
 overrides are intended for an explicit candidate revision during review, after which the accepted
 SHA becomes the new lock.
+
+The Agent supervisor intentionally has one Service-owned integrated dependency lock at
+`infrastructure/agent-supervisor-requirements.txt`. Agent's standalone `uv.lock` remains
+authoritative for standalone Nanobot installations, while the hosted image must reconcile Agent
+`[api]` and Service constraints as one environment. Regenerate it with
+`uv run python scripts/lock_agent_supervisor.py` whenever either `pyproject.toml` changes; do not
+install two independently pinned locks into one Python environment.
 
 ## Single-server installation
 
@@ -36,7 +48,9 @@ Only ports 80/443 are public. Service starts with `alembic upgrade head`. For a 
 ## Health and observability
 
 - `/api/health`: process liveness.
-- `/api/ready`: PostgreSQL readiness.
+- `/api/ready`: readiness for PostgreSQL, both MCP runtimes, Agent, rate limiter,
+  and private object storage. Any missing dependency returns HTTP 503 with a
+  per-component status map.
 - `/metrics`: Prometheus counters and latency histograms; firewall it in production.
 - `module-worker:9101/metrics`: Module task outcomes and expired-lease recovery counters on the
   private network.
@@ -63,7 +77,7 @@ handled as DM-private campaign data, not community content.
 
 `powershell -NoProfile -File scripts/backup.ps1` creates a timestamped folder containing a
 PostgreSQL custom dump and compressed copies
-of private object storage, D&D state and Agent workspaces, plus SHA-256 checksums. Copy the completed
+of private object storage, D&D/CoC state and Agent workspaces, plus SHA-256 checksums. Copy the completed
 folder to encrypted off-host storage. Redis is a queue/cache and is not a recovery authority.
 The script stops all application writers for a consistent cut, records the Service commit and dirty
 state, verifies the finished manifest, checks every native Docker/Git exit code, and only then
@@ -80,9 +94,9 @@ year. Object versioning is additional protection, not a substitute for a separat
 
 1. Provision a clean isolated host with the exact tagged open-source and Service releases.
 2. Verify every file against `manifest.json` before extracting.
-3. Restore object, D&D-state and Agent-workspace volumes while their services are stopped.
+3. Restore object, D&D-state, CoC-state and Agent-workspace volumes while their services are stopped.
 4. Start PostgreSQL, restore `control.dump` with `pg_restore --clean --if-exists`, then run migrations.
-5. Start D&D MCP and reconcile campaign/member/actor/Pack projections from public reads.
+5. Start both system MCPs and reconcile campaign/member/actor/Pack projections from audience-safe reads.
 6. Start one isolated Agent worker, resume a test conversation, refresh native tools, and execute the
    next legal Lobby call.
 7. Resume a queued Module task, verify its current MCP draft revision, compile it and install the

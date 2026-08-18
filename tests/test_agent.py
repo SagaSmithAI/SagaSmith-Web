@@ -40,6 +40,7 @@ def test_agent_call_has_authenticated_scope_and_settles_usage(
     call = agent_runtime.calls[0]
     assert call["context"] == {
         "campaign_id": "campaign-1",
+        "system_id": "dnd5e",
         "principal_id": f"user:{user['id']}",
         "campaign_role": "owner",
     }

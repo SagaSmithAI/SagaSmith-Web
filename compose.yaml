@@ -9,11 +9,14 @@ services:
     command: ["sagasmith-service"]
     environment:
       SAGASMITH_EXCHANGE_DIR: /srv/sagasmith/exchange
+      SAGASMITH_SERVICE_INTERNAL_URL: http://api:8080
+      SAGASMITH_DND_MCP_URL: ${SAGASMITH_DND_MCP_URL:-http://dnd-mcp:8767/mcp}
+      SAGASMITH_COC_MCP_URL: ${SAGASMITH_COC_MCP_URL:-http://coc-mcp:8768/mcp}
     expose: ["8080"]
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=2)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/ready', timeout=5)"]
       interval: 5s
-      timeout: 3s
+      timeout: 10s
       retries: 24
     volumes:
       - exchange-data:/srv/sagasmith/exchange
@@ -25,6 +28,8 @@ services:
       minio:
         condition: service_healthy
       dnd-mcp:
+        condition: service_healthy
+      coc-mcp:
         condition: service_healthy
       agent:
         condition: service_healthy
@@ -86,6 +91,36 @@ services:
       retries: 24
     restart: unless-stopped
 
+  coc-mcp:
+    build:
+      context: .
+      dockerfile: infrastructure/Dockerfile.coc-mcp
+      additional_contexts:
+        core: ${SAGASMITH_CORE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-core.git#7b36d3da232cd05ad0e36bde891f8bc2f532bf6f}
+        coc: ${SAGASMITH_COC_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-coc.git#bd95caae9ad19d23e48cf86e7bd3e9cec65d9338}
+        coc_mcp: ${SAGASMITH_COC_MCP_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-coc-mcp.git#908fefa505ceacdc603e20eb20cf053e1d77b187}
+        coc_skills: ${SAGASMITH_COC_SKILLS_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-coc-skills.git#8f547f371c47a6ef2f70b2174174e104d650a7c7}
+        module_gen_skills: ${SAGASMITH_MODULE_GEN_SKILLS_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-module-gen-skills.git#6a6261f52a88dab7bb360df6dbfcd1443b500bbd}
+    environment:
+      SAGASMITH_COC_MCP_TRANSPORT: streamable-http
+      SAGASMITH_COC_MCP_HTTP_HOST: 0.0.0.0
+      SAGASMITH_COC_MCP_HTTP_PORT: 8768
+      SAGASMITH_COC_MCP_HOME: /state
+      SAGASMITH_COC_MCP_DENSE_ENABLED: "0"
+      SAGASMITH_COC_SKILLS_DIR: /build/SagaSmith-coc-skills
+      SAGASMITH_MODULEGEN_SKILLS_DIR: /build/SagaSmith-module-gen-skills
+      SAGASMITH_COC_MCP_MODULE_IMPORT_ROOTS: /srv/sagasmith/exchange
+    volumes:
+      - coc-state:/state
+      - exchange-data:/srv/sagasmith/exchange
+    expose: ["8768"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8768), 2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+    restart: unless-stopped
+
   agent:
     build:
       context: .
@@ -93,19 +128,22 @@ services:
       additional_contexts:
         agent_source: ${SAGASMITH_AGENT_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-agent.git#873c71c9c132d3af238249c7fd5a165513e058a8}
         dnd_skills: ${SAGASMITH_DND_SKILLS_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-dnd-skills.git#a45a3b37147478f38493ccf07545920aa6a6c07a}
+        coc_skills: ${SAGASMITH_COC_SKILLS_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-coc-skills.git#8f547f371c47a6ef2f70b2174174e104d650a7c7}
         module_gen_skills: ${SAGASMITH_MODULE_GEN_SKILLS_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-module-gen-skills.git#6a6261f52a88dab7bb360df6dbfcd1443b500bbd}
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY}
       SAGASMITH_AGENT_INTERNAL_KEY: ${SAGASMITH_AGENT_INTERNAL_KEY:?set SAGASMITH_AGENT_INTERNAL_KEY}
       SAGASMITH_AGENT_CONFIG: /config/agent-config.json
       SAGASMITH_AGENT_WORKSPACES: /workspaces
-      SAGASMITH_AGENT_TRUSTED_MCP_HOSTS: dnd-mcp
+      SAGASMITH_AGENT_TRUSTED_MCP_HOSTS: dnd-mcp,coc-mcp
     volumes:
       - ./secrets/agent-config.json:/config/agent-config.json:ro
       - agent-workspace:/workspaces
     expose: ["8910"]
     depends_on:
       dnd-mcp:
+        condition: service_healthy
+      coc-mcp:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8910/health', timeout=2)"]
@@ -115,7 +153,7 @@ services:
     restart: unless-stopped
 
   proxy:
-    image: caddy:2.10-alpine
+    image: caddy:2.10-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
     environment:
       SAGASMITH_SITE_ADDRESS: ${SAGASMITH_SITE_ADDRESS:-:80}
     volumes:
@@ -130,7 +168,7 @@ services:
     restart: unless-stopped
 
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
     environment:
       POSTGRES_DB: sagasmith_service
       POSTGRES_USER: sagasmith
@@ -145,7 +183,7 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:7.4-alpine
+    image: redis:7.4-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis-data:/data
@@ -157,7 +195,7 @@ services:
     restart: unless-stopped
 
   minio:
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: sagasmith
@@ -177,6 +215,7 @@ volumes:
   object-data:
   exchange-data:
   dnd-state:
+  coc-state:
   agent-workspace:
   caddy-data:
   caddy-config:

@@ -30,12 +30,14 @@ class Settings(BaseSettings):
     )
     public_origin: str = "http://127.0.0.1:8080"
     dnd_mcp_url: str = "http://127.0.0.1:8767/mcp"
+    coc_mcp_url: str = "http://127.0.0.1:8768/mcp"
     session_ttl_seconds: int = 60 * 60 * 24 * 30
     secure_cookies: bool = False
     signup_token_quota: int = 1_000_000
     agent_reservation_tokens: int = 32_768
     agent_api_url: str = "http://127.0.0.1:8910"
     agent_api_key: SecretStr = SecretStr("")
+    service_internal_url: str = "http://127.0.0.1:8080"
     agent_completion_timeout_seconds: int = Field(default=900, ge=30, le=3600)
     private_storage_dir: str = "./data/private"
     exchange_dir: str = "./data/exchange"

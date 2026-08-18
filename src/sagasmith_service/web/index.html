@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>SagaSmith</title><link rel="stylesheet" href="/styles.css">
+  <title>SagaSmith</title><meta name="theme-color" content="#0c0d0d"><link rel="manifest" href="/manifest.webmanifest"><link rel="stylesheet" href="/styles.css">
 </head>
 <body>
   <header><div class="brand"><span>SS</span><strong>SagaSmith</strong></div><div id="identity"></div></header>
@@ -39,10 +39,10 @@
         <section id="campaigns-view" class="view"><div class="view-head"><div><p class="eyebrow">CAMPAIGNS</p><h2>我的战役</h2></div><button id="new-campaign" class="primary">新建战役</button></div>
           <form id="invite-accept-form" class="card horizontal-form"><label>加入战役邀请<input name="token" minlength="32" placeholder="粘贴邀请代码"></label><button>接受邀请</button></form>
           <div id="campaign-list" class="grid"></div>
-          <form id="campaign-form" class="card modal" hidden><h3>建立 D&amp;D 战役</h3><label>名称<input name="name" required maxlength="160"></label><label>版本<select name="edition"><option value="2024">2024</option><option value="2014">2014</option></select></label><label>升级<select name="advancement_mode"><option value="milestone">里程碑</option><option value="xp">经验值</option></select></label><div class="actions"><button type="button" data-close>取消</button><button class="primary">创建</button></div></form>
+          <form id="campaign-form" class="card modal" hidden><h3>建立战役</h3><label>名称<input name="name" required maxlength="160"></label><label>系统<select name="system_id"><option value="dnd5e">D&amp;D 5E</option><option value="coc7e">Call of Cthulhu 7E</option></select></label><label>规则版本（D&amp;D）<select name="edition"><option value="2024">2024</option><option value="2014">2014</option></select></label><label>升级（D&amp;D）<select name="advancement_mode"><option value="milestone">里程碑</option><option value="xp">经验值</option></select></label><div class="actions"><button type="button" data-close>取消</button><button class="primary">创建</button></div></form>
           <section id="campaign-room" hidden>
             <button id="back-campaigns" class="link">← 返回战役</button>
-            <div class="room-head"><div><p class="eyebrow">D&amp;D 5E · LIVE ROOM</p><h2 id="room-title"></h2></div><div class="room-presence"><span id="room-sync" class="sync-dot">连接中</span><span id="room-phase" class="phase">—</span></div></div>
+            <div class="room-head"><div><p id="room-system" class="eyebrow">LIVE ROOM</p><h2 id="room-title"></h2></div><div class="room-head-actions"><nav class="room-mode-switch" aria-label="桌面布局"><button type="button" data-room-mode="table" class="active">Table</button><button type="button" data-room-mode="player">Player</button><button type="button" data-room-mode="director">Director</button></nav><div class="room-presence"><span id="room-sync" class="sync-dot" aria-live="polite">连接中</span><span id="room-phase" class="phase">—</span></div></div></div>
             <div class="room-grid">
               <aside id="character-sidebar" class="character-sidebar card">
                 <nav class="character-rail" aria-label="角色与队伍">
@@ -62,7 +62,9 @@
               </aside>
               <div class="card chat">
                 <div id="active-host" class="host-strip muted">共享战役时间线 · 每次行动按发送者权限结算</div>
-                <div id="messages" class="messages"></div>
+                <div class="reading-tools" aria-label="阅读与辅助"><button type="button" data-composer-prompt="请查询与当前行动有关的规则，并给出来源。">规则查询</button><button type="button" data-composer-prompt="请用 Tutor 模式解释我此刻有哪些合法选择，不要替我决定。">Tutor</button><button type="button" data-composer-prompt="请给主持人一个不泄露隐藏信息的裁定检查清单。" data-dm-help>DM Help</button></div>
+                <div id="messages" class="messages" role="log" aria-live="polite" aria-relevant="additions text" aria-label="战役消息"></div>
+                <button id="new-messages" type="button" class="new-messages" aria-label="跳到最新消息" hidden>New ↓</button>
                 <form id="message-form" class="room-composer">
                   <div id="action-context" class="action-context" hidden></div>
                   <textarea name="content" rows="2" placeholder="说话，或描述角色行动……" required></textarea>

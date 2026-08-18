@@ -39,7 +39,8 @@ class AuthResult(ApiModel):
 class CampaignCreateRequest(ApiModel):
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(default="", max_length=4000)
-    edition: Literal["2014", "2024"] = "2024"
+    system_id: Literal["dnd5e", "coc7e"] = "dnd5e"
+    edition: Literal["2014", "2024", "7e"] = "2024"
     locale: str = Field(default="zh-CN", min_length=2, max_length=20)
     advancement_mode: Literal["milestone", "xp"] = "milestone"
     visibility: Literal["private", "unlisted"] = "private"
@@ -128,8 +129,13 @@ class CampaignRoomView(ApiModel):
     id: str
     campaign_id: str
     status: str
+    host_identity_assignment_id: str | None
     next_message_sequence: int
     next_event_sequence: int
+
+
+class CampaignRoomHostUpdate(ApiModel):
+    identity_assignment_id: str | None = Field(default=None, max_length=64)
 
 
 class CampaignMessageCreate(ApiModel):

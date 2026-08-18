@@ -1,0 +1,47 @@
+services:
+  api:
+    environment:
+      # Local regression accounts exercise every content-library campaign through
+      # the real quota path without a production billing limit becoming a false
+      # long-run failure. The application default remains unchanged.
+      SAGASMITH_SIGNUP_TOKEN_QUOTA: "1000000000"
+
+  dnd-mcp:
+    environment:
+      SAGASMITH_DND_MCP_MODULE_IMPORT_ROOTS: /srv/sagasmith/content-library/packages
+    volumes:
+      - ../SagaSmith-dnd-content-library/content-library/packages:/srv/sagasmith/content-library/packages:ro
+    build:
+      additional_contexts:
+        core: ../sagasmith-core
+        dnd: ../sagasmith-dnd
+        dnd_mcp: ../SagaSmith-dnd-mcp
+        dnd_skills: ../SagaSmith-dnd-skills
+        module_gen_skills: ../SagaSmith-module-gen-skills
+
+  coc-mcp:
+    environment:
+      SAGASMITH_COC_MCP_MODULE_IMPORT_ROOTS: /srv/sagasmith/content-library/packages
+    volumes:
+      - ../SagaSmith-dnd-content-library/content-library/packages:/srv/sagasmith/content-library/packages:ro
+    build:
+      additional_contexts:
+        core: ../sagasmith-core
+        coc: ../sagasmith-coc
+        coc_mcp: ../SagaSmith-coc-mcp
+        coc_skills: ../SagaSmith-coc-skills
+        module_gen_skills: ../SagaSmith-module-gen-skills
+
+  agent:
+    environment:
+      SAGASMITH_AGENT_COMPLETION_TIMEOUT_SECONDS: "900"
+      NANOBOT_TOOL_AUDIT_PATH: /artifacts/tool-audit.jsonl
+      NANOBOT_TOOL_AUDIT_PROCESS_ID: service-agent
+    volumes:
+      - ../.runs/service-agent:/artifacts
+    build:
+      additional_contexts:
+        agent_source: ../SagaSmith-agent
+        dnd_skills: ../SagaSmith-dnd-skills
+        coc_skills: ../SagaSmith-coc-skills
+        module_gen_skills: ../SagaSmith-module-gen-skills
