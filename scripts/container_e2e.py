@@ -144,7 +144,7 @@ def pack_archive(pack_id: str, version: str) -> bytes:
                     "page_end": 1,
                     "headings": ["Arrival"],
                     "keywords": ["gate"],
-                    "metadata": {"visibility": "keeper"},
+                    "metadata": {"visibility": "restricted"},
                     "source_refs": [source_ref],
                 }
             ],
