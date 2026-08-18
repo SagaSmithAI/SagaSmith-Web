@@ -5,15 +5,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libmagic1 poppler-utils tesseract-ocr && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY --from=core . ./sagasmith-core
-COPY --from=dnd . ./sagasmith-dnd
-COPY --from=dnd_mcp . ./SagaSmith-dnd-mcp
-COPY --from=dnd_skills . ./SagaSmith-dnd-skills
-COPY --from=module_gen_skills . ./SagaSmith-module-gen-skills
+COPY --from=dnd_domain . ./sagasmith-dnd
 RUN pip install --no-cache-dir uv==0.11.25 && \
-    cd /build/SagaSmith-dnd-mcp && uv sync --frozen --no-dev
+    cd /build/sagasmith-dnd && uv sync --frozen --all-packages --no-dev
 RUN useradd -m -u 10001 sagasmith && mkdir -p /state /srv/sagasmith/exchange && \
     chown -R sagasmith:sagasmith /state /srv/sagasmith
 USER sagasmith
-ENV PATH="/build/SagaSmith-dnd-mcp/.venv/bin:$PATH"
+ENV PATH="/build/sagasmith-dnd/.venv/bin:$PATH"
 EXPOSE 8767
 CMD ["sagasmith-dnd-mcp"]

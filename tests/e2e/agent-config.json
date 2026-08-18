@@ -15,8 +15,10 @@
       "externalSkillsDirs": [
         "/opt/sagasmith/skills/hosted",
         "/opt/sagasmith/skills/dnd/full/skills",
+        "/opt/sagasmith/skills/dnd-module-generator",
         "/opt/sagasmith/skills/coc/full/skills",
-        "/opt/sagasmith/skills/modulegen"
+        "/opt/sagasmith/skills/coc-module-generator",
+        "/opt/sagasmith/skills/narrative"
       ]
     }
   },
@@ -37,6 +39,21 @@
       "sagasmith_coc": {
         "type": "streamableHttp",
         "url": "http://coc-mcp:8768/mcp",
+        "injectPrincipal": true,
+        "sessionScoped": true,
+        "toolTimeout": 900,
+        "exposeResourcesAndPrompts": true,
+        "enabledTools": ["*"]
+      },
+      "sagasmith_narrative": {
+        "type": "stdio",
+        "command": "/build/sagasmith-narrative/.venv/bin/python",
+        "args": ["-m", "sagasmith_narrative_mcp.server"],
+        "cwd": "/build/sagasmith-narrative",
+        "env": {
+          "SAGASMITH_NARRATIVE_MCP_HOME": "/workspaces/narrative-state",
+          "SAGASMITH_NARRATIVE_SKILLS_DIR": "/opt/sagasmith/skills/narrative"
+        },
         "injectPrincipal": true,
         "sessionScoped": true,
         "toolTimeout": 900,

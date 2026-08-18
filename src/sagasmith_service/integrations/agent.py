@@ -65,8 +65,8 @@ class HttpAgentRuntime:
             f"principal_id={context['principal_id']}",
             f"campaign_role={context['campaign_role']}",
             "Use these identifiers as authoritative call arguments; MCP validates every write.",
-            "For dnd5e or coc7e, use only the MCP server matching system_id for campaign "
-            "state and mechanics.",
+            "For dnd5e, coc7e, or narrative, use only the MCP server matching system_id "
+            "for campaign state and mechanics.",
         ]
         if context.get("room_id"):
             context_lines.extend(

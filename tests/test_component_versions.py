@@ -12,18 +12,10 @@ def test_component_lock_covers_every_workspace_repository() -> None:
         ".github",
         "SagaSmith-agent",
         "sagasmith-coc",
-        "SagaSmith-coc-mcp",
-        "SagaSmith-coc-skills",
-        "sagasmith-coc-ui",
         "sagasmith-core",
         "sagasmith-dnd",
         "SagaSmith-dnd-content-library",
-        "SagaSmith-dnd-mcp",
-        "SagaSmith-dnd-skills",
-        "sagasmith-dnd-ui",
-        "SagaSmith-module-gen-skills",
-        "SagaSmith-narrative-mcp",
-        "SagaSmith-narrative-skills",
+        "sagasmith-narrative",
         "SagaSmith-service",
         "sagasmith-ui",
         "SagaSmithAI.github.io",
@@ -91,15 +83,20 @@ def test_hosted_contract_requires_dynamic_scoped_structured_tools() -> None:
         "structured_output",
         "tool_receipts",
     ]
-    assert lock["required_contracts"]["mcp_core_tools"] == [
+    assert lock["required_contracts"]["mcp_common_tools"] == [
         "exposure",
         "server_capabilities",
-        "storage_status",
         "campaign_query",
         "game_phase",
         "skill_query",
+    ]
+    assert lock["required_contracts"]["network_mcp_tools"] == [
+        "storage_status",
         "resolution_presentation",
     ]
+    assert lock["required_contracts"]["narrative_transport"] == (
+        "process-local-stdio-only"
+    )
 
 
 def test_hosted_agent_uses_current_session_scoped_native_tool_contract() -> None:
@@ -109,7 +106,7 @@ def test_hosted_agent_uses_current_session_scoped_native_tool_contract() -> None
     )
     for path in paths:
         config = json.loads(path.read_text(encoding="utf-8"))
-        for server_name in ("sagasmith_dnd", "sagasmith_coc"):
+        for server_name in ("sagasmith_dnd", "sagasmith_coc", "sagasmith_narrative"):
             server = config["tools"]["mcpServers"][server_name]
             assert server["injectPrincipal"] is True
             assert server["sessionScoped"] is True
@@ -120,16 +117,22 @@ def test_hosted_agent_uses_current_session_scoped_native_tool_contract() -> None
         assert skills == [
             "/opt/sagasmith/skills/hosted",
             "/opt/sagasmith/skills/dnd/full/skills",
+            "/opt/sagasmith/skills/dnd-module-generator",
             "/opt/sagasmith/skills/coc/full/skills",
-            "/opt/sagasmith/skills/modulegen",
+            "/opt/sagasmith/skills/coc-module-generator",
+            "/opt/sagasmith/skills/narrative",
         ]
+        narrative = config["tools"]["mcpServers"]["sagasmith_narrative"]
+        assert narrative["type"] == "stdio"
+        assert narrative["command"] == "/build/sagasmith-narrative/.venv/bin/python"
 
 
 def test_supervisor_image_preserves_shared_skill_references() -> None:
     dockerfile = (
         ROOT / "infrastructure" / "Dockerfile.agent-supervisor"
     ).read_text(encoding="utf-8")
-    assert "COPY --from=dnd_skills ./full /opt/sagasmith/skills/dnd/full" in dockerfile
-    assert "COPY --from=coc_skills ./full /opt/sagasmith/skills/coc/full" in dockerfile
+    assert "COPY --from=dnd_domain ./skills/full /opt/sagasmith/skills/dnd/full" in dockerfile
+    assert "COPY --from=coc_domain ./skills/full /opt/sagasmith/skills/coc/full" in dockerfile
     assert "/opt/sagasmith/skills/dnd/full/references/mcp-contract.md" in dockerfile
     assert "/opt/sagasmith/skills/coc/full/references/mcp-contract.md" in dockerfile
+    assert "/opt/sagasmith/skills/narrative/narrative-project-generator/SKILL.md" in dockerfile

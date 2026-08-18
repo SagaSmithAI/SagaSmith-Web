@@ -6,21 +6,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates git bubblewrap openssh-client libmagic1 && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY --from=agent_source . ./SagaSmith-agent
-COPY --from=dnd_skills ./full /opt/sagasmith/skills/dnd/full
-COPY --from=coc_skills ./full /opt/sagasmith/skills/coc/full
-COPY --from=module_gen_skills . /opt/sagasmith/skills/modulegen
+COPY --from=core . ./sagasmith-core
+COPY --from=narrative_domain . ./sagasmith-narrative
+COPY --from=dnd_domain ./skills/full /opt/sagasmith/skills/dnd/full
+COPY --from=dnd_domain ./skills/dnd-module-generator /opt/sagasmith/skills/dnd-module-generator
+COPY --from=coc_domain ./skills/full /opt/sagasmith/skills/coc/full
+COPY --from=coc_domain ./skills/coc-module-generator /opt/sagasmith/skills/coc-module-generator
+COPY --from=narrative_domain ./skills /opt/sagasmith/skills/narrative
 COPY agent-skills /opt/sagasmith/skills/hosted
 RUN test -f /opt/sagasmith/skills/dnd/full/skills/dnd-dm/SKILL.md && \
     test -f /opt/sagasmith/skills/dnd/full/references/mcp-contract.md && \
     test -f /opt/sagasmith/skills/coc/full/skills/coc7-keeper/SKILL.md && \
     test -f /opt/sagasmith/skills/coc/full/references/mcp-contract.md && \
-    test -f /opt/sagasmith/skills/modulegen/SKILL.md && \
+    test -f /opt/sagasmith/skills/dnd-module-generator/SKILL.md && \
+    test -f /opt/sagasmith/skills/coc-module-generator/SKILL.md && \
+    test -f /opt/sagasmith/skills/narrative/narrative-project-generator/SKILL.md && \
     test -f /opt/sagasmith/skills/hosted/room-host/SKILL.md
 RUN mkdir ./SagaSmith-service
 COPY pyproject.toml uv.lock README.md LICENSE ./SagaSmith-service/
 COPY infrastructure/agent-supervisor-requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir uv==0.11.25 && \
-    uv pip install --system --require-hashes -r /tmp/requirements.txt
+    uv pip install --system --require-hashes -r /tmp/requirements.txt && \
+    cd /build/sagasmith-narrative && uv sync --frozen --all-packages --no-dev
 COPY src ./SagaSmith-service/src
 RUN uv pip install --system --no-deps /build/SagaSmith-agent /build/SagaSmith-service
 RUN useradd -m -u 10002 supervisor && mkdir -p /workspaces /config && \

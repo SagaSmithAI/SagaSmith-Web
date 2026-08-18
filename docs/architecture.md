@@ -1,4 +1,4 @@
-# Hosted D&D and CoC architecture
+# Hosted SagaSmith domain architecture
 
 ## Product boundary
 
@@ -6,16 +6,21 @@
 remain complete local/self-hosted products. Dependency direction is one way:
 
 ```text
-Browser -> Service API/BFF -> hosted Agent worker -> matching D&D or CoC MCP facade
+Browser -> Service API/BFF -> hosted Agent worker -> matching domain MCP facade
                            -> PostgreSQL (cloud workflow/projections/usage)
                            -> private S3/MinIO (Pack archives)
 
 Browser -> Forge catalog -> Artifact + immutable Release + discussion/moderation
                          -> Soul -> hosted Identity -> campaign assignment
 
-D&D MCP -> sagasmith-dnd -> sagasmith-core
-CoC MCP -> sagasmith-coc -> sagasmith-core
-Agent   -> D&D/CoC Skills and module-generation Skills
+sagasmith-dnd       -> packages/mcp + packages/domain + Skills + UI
+sagasmith-coc       -> packages/mcp + packages/domain + Skills + UI
+sagasmith-narrative -> packages/mcp + packages/domain + Skills
+all domains         -> sagasmith-core
+
+D&D and CoC MCP run as isolated network services. Narrative advertises
+`shared_network_transport_supported=false`, so each hosted Agent worker starts its own stdio
+Narrative MCP process instead of exposing a compatibility HTTP wrapper.
 ```
 
 ## Module Studio
