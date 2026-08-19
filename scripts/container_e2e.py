@@ -294,7 +294,9 @@ def run(base_url: str) -> None:
     player = httpx.Client(base_url=origin, headers={"Origin": origin}, timeout=240)
     for _ in range(120):
         try:
-            if owner.get("/api/ready", timeout=2).status_code == 200:
+            # Narrative readiness launches a real stdio MCP probe, which can take
+            # a few seconds on cold Windows/Docker Desktop hosts.
+            if owner.get("/api/ready", timeout=10).status_code == 200:
                 break
         except httpx.HTTPError:
             pass
@@ -414,6 +416,38 @@ def run(base_url: str) -> None:
     )
     if "dynamic MCP call completed" not in (coc_run["assistant_content"] or ""):
         raise RuntimeError("hosted Agent did not complete a native CoC MCP call")
+
+    narrative_campaign = expect(
+        owner.post(
+            "/api/campaigns",
+            headers={"Idempotency-Key": f"narrative-campaign-{run_id}"},
+            json={
+                "name": f"Narrative Container E2E {run_id}",
+                "system_id": "narrative",
+                "edition": "system-neutral",
+            },
+        ),
+        201,
+    )
+    narrative_campaign_id = narrative_campaign["id"]
+    narrative_conversation = expect(
+        owner.post(
+            f"/api/campaigns/{narrative_campaign_id}/agent/conversations",
+            json={"title": "Narrative container acceptance"},
+        ),
+        201,
+    )
+    narrative_run = expect(
+        owner.post(
+            f"/api/campaigns/{narrative_campaign_id}/agent/conversations/"
+            f"{narrative_conversation['id']}/messages",
+            headers={"Idempotency-Key": f"narrative-agent-{run_id}"},
+            json={"content": "Query the Narrative actor list through its native runtime."},
+        ),
+        200,
+    )
+    if "dynamic MCP call completed" not in (narrative_run["assistant_content"] or ""):
+        raise RuntimeError("hosted Agent did not complete a native Narrative MCP call")
 
     module_project = expect(
         owner.post(
@@ -695,6 +729,27 @@ def run(base_url: str) -> None:
         raise RuntimeError(f"missing audit actions: {sorted(missing)}")
     if not any(item["request_id"] for item in audit):
         raise RuntimeError("audit events have no request correlation")
+    narrative_audit = next(
+        (
+            item
+            for item in audit
+            if item["action"] == "agent.complete"
+            and item["details"].get("campaign_id") == narrative_campaign_id
+        ),
+        None,
+    )
+    if narrative_audit is None:
+        raise RuntimeError("Narrative Agent completion was not audited")
+    narrative_receipts = narrative_audit["details"].get("auth_context_receipts") or []
+    if not any(
+        receipt.get("actor_principal") == f"user:{owner_user['id']}"
+        and receipt.get("campaign_id") == narrative_campaign_id
+        and narrative_conversation["id"] in receipt.get("conversation_principal", "")
+        and str(receipt.get("tool", "")).endswith("actor_query")
+        and receipt.get("revision") is not None
+        for receipt in narrative_receipts
+    ):
+        raise RuntimeError(f"Narrative auth-context receipt was not retained: {narrative_receipts}")
     print(
         json.dumps(
             {
@@ -703,6 +758,7 @@ def run(base_url: str) -> None:
                 "player_user_id": player_user["id"],
                 "campaign_id": campaign_id,
                 "coc_campaign_id": coc_campaign_id,
+                "narrative_campaign_id": narrative_campaign_id,
                 "phase": runtime.get("result", runtime).get("effective_game_phase"),
                 "agent_tokens": run["prompt_tokens"] + run["completion_tokens"],
                 "pack_distribution": uploaded["distribution"],

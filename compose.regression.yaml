@@ -1,0 +1,9 @@
+services:
+  api:
+    environment:
+      SAGASMITH_AGENT_RATE_LIMIT: "100000"
+      SAGASMITH_PUBLIC_ORIGIN: http://127.0.0.1:8080
+
+  agent:
+    volumes:
+      - ./config/agent-config.regression.json:/config/agent-config.json:ro

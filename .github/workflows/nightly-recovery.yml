@@ -1,0 +1,84 @@
+name: nightly-recovery
+
+on:
+  schedule:
+    - cron: "37 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-recovery
+  cancel-in-progress: false
+
+jobs:
+  backup-restore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      POSTGRES_PASSWORD: recovery-postgres
+      MINIO_ROOT_PASSWORD: recovery-minio-secret
+      OPENAI_API_KEY: recovery-only-key
+      SAGASMITH_AGENT_INTERNAL_KEY: recovery-internal-agent-key
+      SAGASMITH_AUTH_CONTEXT_SECRET: recovery-auth-context-secret-at-least-32-bytes
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --frozen --all-extras
+      - run: mkdir -p secrets && cp tests/e2e/agent-config.json secrets/agent-config.json
+      - name: Start source stack
+        run: >-
+          docker compose -p sagasmith-recovery-source
+          -f compose.yaml -f compose.e2e.yaml
+          up -d --build --wait --wait-timeout 300
+      - name: Seed all hosted domains
+        run: uv run python scripts/container_e2e.py
+      - name: Create and verify application-consistent backup
+        shell: pwsh
+        run: >-
+          ./scripts/backup.ps1
+          -Destination "$env:RUNNER_TEMP/sagasmith-backup"
+          -ProjectName sagasmith-recovery-source
+          -ComposeFiles compose.yaml,compose.e2e.yaml
+      - name: Restore into an isolated project
+        shell: pwsh
+        env:
+          SAGASMITH_E2E_API_PORT: "18089"
+          SAGASMITH_E2E_AGENT_PORT: "18911"
+        run: >-
+          ./scripts/restore.ps1
+          -BackupDirectory "$env:RUNNER_TEMP/sagasmith-backup"
+          -ProjectName sagasmith-recovery-target
+          -ComposeFiles compose.yaml,compose.e2e.yaml
+          -ConfirmRestore RESTORE-sagasmith-recovery-target
+      - name: Exercise restored control and runtime state
+        run: uv run python scripts/restore_smoke.py --base-url http://127.0.0.1:18089
+      - name: Collect source diagnostics
+        if: failure()
+        run: >-
+          docker compose -p sagasmith-recovery-source
+          -f compose.yaml -f compose.e2e.yaml
+          logs --no-color --tail 500
+      - name: Collect restored diagnostics
+        if: failure()
+        env:
+          SAGASMITH_E2E_API_PORT: "18089"
+          SAGASMITH_E2E_AGENT_PORT: "18911"
+        run: >-
+          docker compose -p sagasmith-recovery-target
+          -f compose.yaml -f compose.e2e.yaml
+          logs --no-color --tail 500
+      - name: Remove isolated stacks and volumes
+        if: always()
+        shell: pwsh
+        run: |
+          $env:SAGASMITH_E2E_API_PORT = "18089"
+          $env:SAGASMITH_E2E_AGENT_PORT = "18911"
+          docker compose -p sagasmith-recovery-target -f compose.yaml -f compose.e2e.yaml down --volumes --remove-orphans
+          Remove-Item Env:SAGASMITH_E2E_API_PORT
+          Remove-Item Env:SAGASMITH_E2E_AGENT_PORT
+          docker compose -p sagasmith-recovery-source -f compose.yaml -f compose.e2e.yaml down --volumes --remove-orphans

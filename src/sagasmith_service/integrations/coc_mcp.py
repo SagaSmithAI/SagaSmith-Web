@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import uuid
+from collections.abc import Mapping
 from contextlib import AsyncExitStack
 from typing import Any
 
@@ -8,20 +10,40 @@ import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
+from sagasmith_service.auth_context import (
+    AUTH_CONTEXT_META_KEY,
+    AUTH_CONTEXT_RECEIPT_META_KEY,
+    exposure_revision,
+    sign_auth_context,
+)
+
 
 def _tool_payload(result: Any) -> dict[str, Any]:
     if getattr(result, "isError", False):
         content = getattr(result, "content", [])
         message = getattr(content[0], "text", None) if content else None
         raise RuntimeError(message or "CoC MCP rejected the request")
+    receipt = None
+    for item in getattr(result, "content", []):
+        metadata = getattr(item, "meta", None)
+        if isinstance(metadata, Mapping):
+            candidate = metadata.get(AUTH_CONTEXT_RECEIPT_META_KEY)
+            if isinstance(candidate, Mapping):
+                receipt = dict(candidate)
+                break
     structured = getattr(result, "structuredContent", None)
     if isinstance(structured, dict):
-        return structured
+        payload = dict(structured)
+        if receipt is not None:
+            payload["auth_context_receipt"] = receipt
+        return payload
     for item in getattr(result, "content", []):
         text = getattr(item, "text", None)
         if text:
             parsed = json.loads(text)
             if isinstance(parsed, dict):
+                if receipt is not None:
+                    parsed["auth_context_receipt"] = receipt
                 return parsed
     raise RuntimeError("CoC MCP returned no structured receipt")
 
@@ -29,9 +51,16 @@ def _tool_payload(result: Any) -> dict[str, Any]:
 class StreamableHttpCocRuntime:
     """Narrow hosted adapter over CoC's native dynamic MCP tools."""
 
-    def __init__(self, url: str, *, bearer_token: str | None = None) -> None:
+    def __init__(
+        self,
+        url: str,
+        *,
+        bearer_token: str | None = None,
+        auth_context_secret: str = "",
+    ) -> None:
         self.url = url
         self.bearer_token = bearer_token
+        self.auth_context_secret = auth_context_secret
 
     async def probe(self) -> None:
         """Verify the MCP endpoint and the hosted contract without mutating state."""
@@ -100,39 +129,64 @@ class StreamableHttpCocRuntime:
                 )
                 session = await stack.enter_async_context(ClientSession(read, write))
                 await session.initialize()
+                auth_session_id = f"service:{uuid.uuid4().hex}"
+                conversation_principal = (
+                    f"service:campaign:{campaign_id}" if campaign_id else "service:control-plane"
+                )
+                authorization_epoch = 0
+
+                async def call(tool_name: str, tool_arguments: dict[str, Any]):
+                    nonlocal authorization_epoch
+                    metadata = None
+                    if self.auth_context_secret:
+                        metadata = {
+                            AUTH_CONTEXT_META_KEY: sign_auth_context(
+                                secret=self.auth_context_secret,
+                                actor_principal=principal_id,
+                                conversation_principal=conversation_principal,
+                                session_id=auth_session_id,
+                                campaign_id=campaign_id or "",
+                                authorization_epoch=authorization_epoch,
+                            )
+                        }
+                    result = await session.call_tool(
+                        tool_name,
+                        arguments=tool_arguments,
+                        **({"meta": metadata} if metadata is not None else {}),
+                    )
+                    payload = _tool_payload(result)
+                    authorization_epoch = exposure_revision(payload, authorization_epoch)
+                    return payload
+
                 exposure: dict[str, Any] = {"action": "open", "principal_id": principal_id}
                 if campaign_id is not None:
                     exposure["campaign_id"] = campaign_id
-                _tool_payload(await session.call_tool("exposure", arguments=exposure))
+                await call("exposure", exposure)
                 if name != "exposure":
-                    search = _tool_payload(
-                        await session.call_tool(
-                            "exposure",
-                            arguments={
-                                "action": "search",
-                                "campaign_id": campaign_id,
-                                "principal_id": principal_id,
-                                "query": name,
-                            },
-                        )
+                    search = await call(
+                        "exposure",
+                        {
+                            "action": "search",
+                            "campaign_id": campaign_id,
+                            "principal_id": principal_id,
+                            "query": name,
+                        },
                     )
                     visible = {str(item) for item in search.get("visible_tools", [])}
                     if name not in visible:
-                        _tool_payload(
-                            await session.call_tool(
-                                "exposure",
-                                arguments={
-                                    "action": "set",
-                                    "campaign_id": campaign_id,
-                                    "principal_id": principal_id,
-                                    "add_tool_ids": [name],
-                                },
-                            )
+                        await call(
+                            "exposure",
+                            {
+                                "action": "set",
+                                "campaign_id": campaign_id,
+                                "principal_id": principal_id,
+                                "add_tool_ids": [name],
+                            },
                         )
                     listed = await session.list_tools()
                     if name not in {tool.name for tool in listed.tools}:
                         raise RuntimeError(f"CoC MCP did not expose {name!r}")
-                return _tool_payload(await session.call_tool(name, arguments=arguments))
+                return await call(name, arguments)
         except RuntimeError:
             raise
         except Exception as exc:

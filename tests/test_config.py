@@ -18,6 +18,7 @@ def test_production_accepts_explicit_secure_dependencies() -> None:
         public_origin="https://play.example.com",
         session_secret="production-session-secret-at-least-32-characters",
         agent_api_key="internal-agent-key-that-is-at-least-32-bytes",
+        auth_context_secret="production-auth-context-secret-at-least-32-bytes",
         storage_backend="s3",
         object_access_key="private-access",
         object_secret_key="private-secret-that-is-at-least-32-bytes",

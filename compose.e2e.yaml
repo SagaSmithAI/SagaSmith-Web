@@ -55,6 +55,9 @@ services:
     environment:
       OPENAI_API_KEY: e2e-only-key
       SAGASMITH_AGENT_INTERNAL_KEY: e2e-internal-agent-key
+      SAGASMITH_AGENT_IDLE_SECONDS: "5"
+    ports:
+      - "127.0.0.1:${SAGASMITH_E2E_AGENT_PORT:-18910}:8910"
     volumes:
       - ./tests/e2e/agent-config.json:/config/agent-config.json:ro
 

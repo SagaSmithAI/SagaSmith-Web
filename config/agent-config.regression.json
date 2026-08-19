@@ -1,13 +1,15 @@
 {
   "providers": {
-    "openai": {
-      "apiKey": "e2e-only-key",
-      "apiBase": "http://mock-llm:18080/v1",
-      "apiType": "chat_completions"
-    }
+    "openai_codex": {}
   },
   "modelPresets": {
-    "hosted": { "provider": "openai", "model": "sagasmith-e2e" }
+    "hosted": {
+      "provider": "openai_codex",
+      "model": "gpt-5.6-luna",
+      "reasoningEffort": "medium",
+      "maxTokens": 16384,
+      "contextWindowTokens": 1050000
+    }
   },
   "agents": {
     "defaults": {
@@ -23,7 +25,7 @@
     }
   },
   "api": {
-    "apiKey": "e2e-internal-agent-key"
+    "apiKey": "${SAGASMITH_AGENT_INTERNAL_KEY}"
   },
   "tools": {
     "distribution": "hosted",
@@ -32,7 +34,7 @@
         "type": "streamableHttp",
         "url": "http://dnd-mcp:8767/mcp",
         "injectPrincipal": true,
-        "authContextSecret": "e2e-auth-context-secret-at-least-32-bytes",
+        "authContextSecret": "${SAGASMITH_AUTH_CONTEXT_SECRET}",
         "sessionScoped": true,
         "toolTimeout": 900,
         "exposeResourcesAndPrompts": true,
@@ -42,7 +44,7 @@
         "type": "streamableHttp",
         "url": "http://coc-mcp:8768/mcp",
         "injectPrincipal": true,
-        "authContextSecret": "e2e-auth-context-secret-at-least-32-bytes",
+        "authContextSecret": "${SAGASMITH_AUTH_CONTEXT_SECRET}",
         "sessionScoped": true,
         "toolTimeout": 900,
         "exposeResourcesAndPrompts": true,
@@ -56,10 +58,10 @@
         "env": {
           "SAGASMITH_NARRATIVE_MCP_HOME": "/workspaces/narrative-state",
           "SAGASMITH_NARRATIVE_SKILLS_DIR": "/opt/sagasmith/skills/narrative",
-          "SAGASMITH_AUTH_CONTEXT_SECRET": "e2e-auth-context-secret-at-least-32-bytes"
+          "SAGASMITH_AUTH_CONTEXT_SECRET": "${SAGASMITH_AUTH_CONTEXT_SECRET}"
         },
         "injectPrincipal": true,
-        "authContextSecret": "e2e-auth-context-secret-at-least-32-bytes",
+        "authContextSecret": "${SAGASMITH_AUTH_CONTEXT_SECRET}",
         "sessionScoped": true,
         "toolTimeout": 900,
         "exposeResourcesAndPrompts": true,

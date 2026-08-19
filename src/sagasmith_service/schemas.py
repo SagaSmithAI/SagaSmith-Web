@@ -39,8 +39,8 @@ class AuthResult(ApiModel):
 class CampaignCreateRequest(ApiModel):
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(default="", max_length=4000)
-    system_id: Literal["dnd5e", "coc7e"] = "dnd5e"
-    edition: Literal["2014", "2024", "7e"] = "2024"
+    system_id: Literal["dnd5e", "coc7e", "narrative"] = "dnd5e"
+    edition: Literal["2014", "2024", "7e", "system-neutral"] = "2024"
     locale: str = Field(default="zh-CN", min_length=2, max_length=20)
     advancement_mode: Literal["milestone", "xp"] = "milestone"
     visibility: Literal["private", "unlisted"] = "private"

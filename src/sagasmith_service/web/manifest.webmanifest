@@ -5,7 +5,7 @@
   "display": "standalone",
   "background_color": "#0c0d0d",
   "theme_color": "#0c0d0d",
-  "description": "Audience-safe tabletop campaign room for D&D and Call of Cthulhu.",
+  "description": "Audience-safe tabletop campaign room for D&D, Call of Cthulhu, and Narrative.",
   "icons": [
     {
       "src": "/sagasmith-icon.svg",

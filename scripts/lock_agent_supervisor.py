@@ -26,6 +26,8 @@ def main() -> None:
             str(agent_project),
             "--extra",
             "api",
+            "--extra",
+            "hosted",
             "--python-version",
             "3.12",
             "--universal",

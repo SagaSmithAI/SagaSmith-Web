@@ -123,6 +123,26 @@ def test_campaign_creation_is_idempotent(client: TestClient, dnd_runtime: FakeDn
     assert len([call for call in dnd_runtime.calls if call[0] == "campaign_create"]) == 1
 
 
+def test_narrative_campaign_uses_registered_runtime(
+    client: TestClient, dnd_runtime: FakeDndRuntime
+) -> None:
+    owner = register(client, "narrative-owner@example.com", "Narrative Owner")
+    response = client.post(
+        "/api/campaigns",
+        headers={"Idempotency-Key": "narrative-campaign-runtime"},
+        json={
+            "name": "Narrative Campaign",
+            "system_id": "narrative",
+            "edition": "system-neutral",
+        },
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["system_id"] == "narrative"
+    call = next(item for item in dnd_runtime.calls if item[0] == "campaign_create")
+    assert call[1]["principal_id"] == f"user:{owner['id']}"
+    assert call[1]["edition"] == "system-neutral"
+
+
 def test_member_revoke_uses_authority_and_closes_cloud_access(
     client: TestClient, dnd_runtime: FakeDndRuntime
 ) -> None:

@@ -34,6 +34,7 @@ def test_readiness_metrics_and_request_id(dnd_runtime, agent_runtime, tmp_path) 
             dnd_runtime,
             agent_runtime,
             coc_runtime=dnd_runtime,
+            narrative_runtime=dnd_runtime,
         )
     )
     ready = client.get("/api/ready", headers={"X-Request-ID": "test-request-123"})
@@ -42,6 +43,7 @@ def test_readiness_metrics_and_request_id(dnd_runtime, agent_runtime, tmp_path) 
         "database",
         "dnd_mcp",
         "coc_mcp",
+        "narrative_mcp",
         "agent",
         "rate_limiter",
         "private_storage",
@@ -69,6 +71,7 @@ def test_readiness_rejects_an_unavailable_required_component(
             dnd_runtime,
             agent_runtime,
             coc_runtime=dnd_runtime,
+            narrative_runtime=dnd_runtime,
         )
     )
 

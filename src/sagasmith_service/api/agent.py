@@ -301,6 +301,11 @@ async def send_message(
                 "tokens": actual,
                 "quota_user_id": quota_user_id,
                 "identity_assignment_id": conversation.identity_assignment_id,
+                "auth_context_receipts": [
+                    dict(receipt["auth_context_receipt"])
+                    for receipt in result.tool_receipts
+                    if isinstance(receipt.get("auth_context_receipt"), dict)
+                ],
             },
         )
     )

@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from sagasmith_service.api.rooms import _activity_token
-from sagasmith_service.models import AgentRun, CampaignRoomEvent
+from sagasmith_service.models import AgentRun, AuditEvent, CampaignRoomEvent
 
 PASSWORD = "correct horse battery staple"
 
@@ -418,6 +418,18 @@ def test_structured_room_turn_projects_actor_identity_and_personal_suggestions(
     agent_runtime.tool_receipts = (
         {
             "tool": "mcp_sagasmith_dnd_character_check",
+            "auth_context_receipt": {
+                "schema": "sagasmith.auth-context/v1",
+                "actor_principal": f"user:{owner['id']}",
+                "conversation_principal": "session:campaign-1:room:owner",
+                "tenant_id": "",
+                "campaign_id": "campaign-1",
+                "session_id": "campaign-1:room:owner",
+                "tool": "character_check",
+                "authorization_epoch": 3,
+                "revision": 7,
+                "nonce": "room-receipt-nonce",
+            },
             "structured_content": {
                 "result": {"resolution_id": "resolution-1", "total": 17}
             },
@@ -509,6 +521,20 @@ def test_structured_room_turn_projects_actor_identity_and_personal_suggestions(
     public_agent = next(item for item in timeline if item["sender_type"] == "agent")
     assert public_agent["structured_payload"]["suggestions"] == []
     assert player["id"] != owner["id"]
+    with client.app.state.session_factory() as session:
+        audit = session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.action == "campaign.room.agent.complete",
+                AuditEvent.subject_id == response.json()["message"]["id"],
+            )
+        )
+        assert audit is not None
+        assert audit.details["auth_context_receipts"][0]["actor_principal"] == (
+            f"user:{owner['id']}"
+        )
+        assert audit.details["auth_context_receipts"][0]["conversation_principal"] == (
+            "session:campaign-1:room:owner"
+        )
 
 
 def test_public_room_turn_cannot_reference_dm_only_resolution(

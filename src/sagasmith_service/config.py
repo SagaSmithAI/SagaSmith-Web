@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     agent_reservation_tokens: int = 32_768
     agent_api_url: str = "http://127.0.0.1:8910"
     agent_api_key: SecretStr = SecretStr("")
+    auth_context_secret: SecretStr = SecretStr("development-auth-context-secret-change-me")
     service_internal_url: str = "http://127.0.0.1:8080"
     agent_completion_timeout_seconds: int = Field(default=900, ge=30, le=3600)
     private_storage_dir: str = "./data/private"
@@ -83,6 +84,11 @@ class Settings(BaseSettings):
         agent_key = self.agent_api_key.get_secret_value()
         if len(agent_key) < 32 or is_placeholder(agent_key):
             failures.append("SAGASMITH_AGENT_API_KEY must be a non-placeholder 32-byte secret")
+        auth_context_secret = self.auth_context_secret.get_secret_value()
+        if len(auth_context_secret) < 32 or is_placeholder(auth_context_secret):
+            failures.append(
+                "SAGASMITH_AUTH_CONTEXT_SECRET must be a non-placeholder 32-byte secret"
+            )
         if self.storage_backend != "s3":
             failures.append("SAGASMITH_STORAGE_BACKEND must be s3")
         object_secret = self.object_secret_key.get_secret_value()

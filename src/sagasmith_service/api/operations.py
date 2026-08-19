@@ -23,6 +23,7 @@ async def readiness(request: Request, response: Response) -> dict[str, object]:
     probes = {
         "dnd_mcp": request.app.state.dnd_runtime.probe(),
         "coc_mcp": request.app.state.coc_runtime.probe(),
+        "narrative_mcp": request.app.state.narrative_runtime.probe(),
         "agent": request.app.state.agent_runtime.probe(),
         "rate_limiter": request.app.state.rate_limiter.probe(),
     }

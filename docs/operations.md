@@ -41,14 +41,15 @@ commit SHAs for production; never deploy moving branch references. Remote Git co
 avoid sending unrelated local worktrees, virtual environments or private content to Docker.
 
 The private stack contains Caddy, Service API/Web, persistent Module worker, PostgreSQL, Redis,
-MinIO, D&D MCP and Agent.
+MinIO, D&D MCP, CoC MCP and the Agent Supervisor. Narrative remains process-local to each Hosted
+Worker and is probed through the Supervisor rather than exposed as a network service.
 Only ports 80/443 are public. Service starts with `alembic upgrade head`. For a real hostname set
 `SAGASMITH_SITE_ADDRESS` to the hostname and `SAGASMITH_SECURE_COOKIES=true`.
 
 ## Health and observability
 
 - `/api/health`: process liveness.
-- `/api/ready`: readiness for PostgreSQL, both MCP runtimes, Agent, rate limiter,
+- `/api/ready`: readiness for PostgreSQL, D&D, CoC and Narrative runtimes, Agent, rate limiter,
   and private object storage. Any missing dependency returns HTTP 503 with a
   per-component status map.
 - `/metrics`: Prometheus counters and latency histograms; firewall it in production.
@@ -59,6 +60,26 @@ Only ports 80/443 are public. Service starts with `alembic upgrade head`. For a 
   moderation queue age, copyright-report age, disk/object capacity and backup age.
 - Also alert on queued Module tasks older than five minutes, repeated lease recovery, terminal
   task failures, project budget exhaustion and Agent/MCP idempotency conflicts.
+
+The optional production observation profile is pinned separately from the application stack:
+
+```powershell
+docker compose -f compose.yaml -f compose.observability.yaml --profile observability up -d
+```
+
+It adds Prometheus, Grafana, Loki, Tempo, an OTLP Collector and Alloy log shipping. All dashboards
+and ingestion ports bind to loopback by default; set `GRAFANA_ADMIN_PASSWORD` before any real
+deployment and place authentication/TLS in front of them before changing those bindings. The
+profile retains 30 days of local metrics, logs and traces. Alloy mounts the Docker socket read-only,
+discovers only the Compose project named by `SAGASMITH_OBSERVABILITY_PROJECT` (default
+`sagasmith-service`), and labels every stream by Compose project and service. Set that variable to
+the value passed with `docker compose -p` when overriding the project name. This requires a Linux
+Docker Engine or Docker Desktop's Linux VM; use an equivalent scoped log source with another
+container runtime.
+
+NATS/JetStream is deliberately absent: no current SagaSmith component consumes it, and adding a
+second unused queue would create split authority with PostgreSQL task leases and Redis rate/session
+coordination. Introduce it only with a concrete durable event contract and migration plan.
 
 ## Forge moderation
 
@@ -89,6 +110,15 @@ procedure.
 
 Recommended policy: daily backups retained 30 days, weekly retained 12 weeks, monthly retained one
 year. Object versioning is additional protection, not a substitute for a separate backup.
+
+`.github/workflows/nightly-recovery.yml` now seeds all three hosted domains, creates and verifies an
+application-consistent backup, restores it under a distinct Compose project and host ports, and
+exercises the restored control database, object storage and domain state. Both projects and their
+volumes are removed in the unconditional cleanup step.
+
+The normal container acceptance also stops Redis and requires protected requests to fail closed,
+restarts D&D/CoC MCP while a Worker has a live session, restarts the Agent before resuming a
+Narrative conversation, and waits for every idle Worker to disappear with no `/proc` orphan.
 
 ## Restore drill
 

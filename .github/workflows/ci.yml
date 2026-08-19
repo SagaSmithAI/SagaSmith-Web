@@ -30,6 +30,16 @@ jobs:
           MINIO_ROOT_PASSWORD: ci-only
           OPENAI_API_KEY: ci-only
           SAGASMITH_AGENT_INTERNAL_KEY: ci-only
+          SAGASMITH_AUTH_CONTEXT_SECRET: ci-auth-context-secret-at-least-32-bytes
+      - run: >-
+          docker compose -f compose.yaml -f compose.observability.yaml
+          --profile observability config --quiet
+        env:
+          POSTGRES_PASSWORD: ci-only
+          MINIO_ROOT_PASSWORD: ci-only
+          OPENAI_API_KEY: ci-only
+          SAGASMITH_AGENT_INTERNAL_KEY: ci-only
+          SAGASMITH_AUTH_CONTEXT_SECRET: ci-auth-context-secret-at-least-32-bytes
       - run: docker build .
 
   container-e2e:
@@ -40,6 +50,7 @@ jobs:
       MINIO_ROOT_PASSWORD: e2e-minio-secret
       OPENAI_API_KEY: e2e-only-key
       SAGASMITH_AGENT_INTERNAL_KEY: e2e-internal-agent-key
+      SAGASMITH_AUTH_CONTEXT_SECRET: e2e-auth-context-secret-at-least-32-bytes
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -53,8 +64,10 @@ jobs:
           docker compose -p sagasmith-service-e2e
           -f compose.yaml -f compose.e2e.yaml
           up -d --build --wait --wait-timeout 300
-      - name: Run D&D and CoC hosted acceptance
+      - name: Run D&D, CoC, and Narrative hosted acceptance
         run: uv run python scripts/container_e2e.py
+      - name: Run Redis, MCP restart, and Worker lifecycle acceptance
+        run: uv run python scripts/container_fault_e2e.py
       - name: Collect container diagnostics
         if: failure()
         run: >-
