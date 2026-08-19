@@ -305,6 +305,73 @@ def test_worker_manager_isolates_and_reuses_conversation_processes(
     assert any(getattr(timeout, "read", None) == 777 for timeout in client_timeouts)
 
 
+def test_worker_manager_does_not_reuse_port_until_idle_worker_exits(
+    monkeypatch, tmp_path: Path
+) -> None:
+    stop_started = asyncio.Event()
+    allow_stop = asyncio.Event()
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.returncode = None
+
+        def terminate(self) -> None:
+            stop_started.set()
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            await allow_stop.wait()
+            self.returncode = 0
+            return 0
+
+    class FakeResponse:
+        status_code = 200
+
+    class FakeClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def get(self, _url: str) -> FakeResponse:
+            return FakeResponse()
+
+    async def fake_spawn(*_args: Any) -> FakeProcess:
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
+    monkeypatch.setattr("sagasmith_service.agent_supervisor.httpx.AsyncClient", FakeClient)
+    manager = WorkerManager(
+        config_path=str(tmp_path / "config.json"),
+        workspace_root=str(tmp_path / "workspaces"),
+        worker_api_key="secret",
+        idle_seconds=0,
+    )
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+
+    async def scenario() -> None:
+        old_worker = await manager.get("campaign-a:user-a:conversation-a")
+        old_worker.last_used = -1
+        cleanup = asyncio.create_task(manager._retire_expired_workers())
+        await stop_started.wait()
+
+        new_worker = await manager.get("campaign-b:user-b:conversation-b")
+        assert old_worker.port == 19000
+        assert new_worker.port == 19001
+
+        allow_stop.set()
+        await cleanup
+        await manager.close()
+
+    asyncio.run(scenario())
+
+
 def test_worker_runtime_config_uses_exact_trusted_host_cidrs(monkeypatch, tmp_path: Path) -> None:
     def fake_getaddrinfo(host: str, *_args):
         assert host == "dnd-mcp"
