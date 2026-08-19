@@ -26,6 +26,19 @@ moderation primitives while keeping each artifact type's installation semantics 
 Former standalone MCP, Skills, UI, and generic Module Generator repositories
 are archived and are not release inputs or compatibility fallbacks.
 
+## Verified integration baseline
+
+The 2026-08-20 baseline rebuilds the hosted stack from the reviewed revisions in
+`component-versions.json`. Service signs short-lived `sagasmith.auth-context/v1`
+principal context, the Agent forwards session identity to dynamic native tools,
+and each domain MCP revalidates campaign, role, actor, phase, and revision at the
+call boundary. Isolated D&D and CoC reference campaigns completed concurrently
+without a reported regression gap; the D&D path recorded a legal ending.
+
+The content runner preserves build revisions, per-campaign logs, gaps, discovered
+modules, and explicit exclusions as machine-readable evidence. This reference
+pass does not claim complete playthrough coverage for every Pack or branch.
+
 ## Current target
 
 The first production slice proves the complete trust chain:
