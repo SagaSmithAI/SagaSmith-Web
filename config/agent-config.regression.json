@@ -1,0 +1,72 @@
+{
+  "providers": {
+    "openai_codex": {}
+  },
+  "modelPresets": {
+    "hosted": {
+      "provider": "openai_codex",
+      "model": "gpt-5.6-luna",
+      "reasoningEffort": "medium",
+      "maxTokens": 16384,
+      "contextWindowTokens": 1050000
+    }
+  },
+  "agents": {
+    "defaults": {
+      "modelPreset": "hosted",
+      "externalSkillsDirs": [
+        "/opt/sagasmith/skills/hosted",
+        "/opt/sagasmith/skills/dnd/full/skills",
+        "/opt/sagasmith/skills/dnd-module-generator",
+        "/opt/sagasmith/skills/coc/full/skills",
+        "/opt/sagasmith/skills/coc-module-generator",
+        "/opt/sagasmith/skills/narrative"
+      ]
+    }
+  },
+  "api": {
+    "apiKey": "${SAGASMITH_AGENT_INTERNAL_KEY}"
+  },
+  "tools": {
+    "distribution": "hosted",
+    "mcpServers": {
+      "sagasmith_dnd": {
+        "type": "streamableHttp",
+        "url": "http://dnd-mcp:8767/mcp",
+        "injectPrincipal": true,
+        "authContextSecret": "${SAGASMITH_AUTH_CONTEXT_SECRET}",
+        "sessionScoped": true,
+        "toolTimeout": 900,
+        "exposeResourcesAndPrompts": true,
+        "enabledTools": ["*"]
+      },
+      "sagasmith_coc": {
+        "type": "streamableHttp",
+        "url": "http://coc-mcp:8768/mcp",
+        "injectPrincipal": true,
+        "authContextSecret": "${SAGASMITH_AUTH_CONTEXT_SECRET}",
+        "sessionScoped": true,
+        "toolTimeout": 900,
+        "exposeResourcesAndPrompts": true,
+        "enabledTools": ["*"]
+      },
+      "sagasmith_narrative": {
+        "type": "stdio",
+        "command": "/build/sagasmith-narrative/.venv/bin/python",
+        "args": ["-m", "sagasmith_narrative_mcp.server"],
+        "cwd": "/build/sagasmith-narrative",
+        "env": {
+          "SAGASMITH_NARRATIVE_MCP_HOME": "/workspaces/narrative-state",
+          "SAGASMITH_NARRATIVE_SKILLS_DIR": "/opt/sagasmith/skills/narrative",
+          "SAGASMITH_AUTH_CONTEXT_SECRET": "${SAGASMITH_AUTH_CONTEXT_SECRET}"
+        },
+        "injectPrincipal": true,
+        "authContextSecret": "${SAGASMITH_AUTH_CONTEXT_SECRET}",
+        "sessionScoped": true,
+        "toolTimeout": 900,
+        "exposeResourcesAndPrompts": true,
+        "enabledTools": ["*"]
+      }
+    }
+  }
+}
