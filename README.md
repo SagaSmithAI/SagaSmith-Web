@@ -13,6 +13,19 @@ Rule/Module Packs, character blueprints, Souls, Skills, assets, and hosted DM/Ke
 Forge shares catalog, immutable release, license, provenance, discussion, favorite, report, and
 moderation primitives while keeping each artifact type's installation semantics explicit.
 
+## Current source inputs
+
+| Layer | Current repository |
+|---|---|
+| Agent host | [`SagaSmith-agent`](https://github.com/SagaSmithAI/SagaSmith-agent) |
+| Neutral runtime | [`sagasmith-core`](https://github.com/SagaSmithAI/sagasmith-core) |
+| D&D Domain / MCP / Skills / UI | [`sagasmith-dnd`](https://github.com/SagaSmithAI/sagasmith-dnd) |
+| CoC Domain / MCP / Skills / UI | [`sagasmith-coc`](https://github.com/SagaSmithAI/sagasmith-coc) |
+| Narrative Domain / MCP / Skills | [`sagasmith-narrative`](https://github.com/SagaSmithAI/sagasmith-narrative) |
+
+Former standalone MCP, Skills, UI, and generic Module Generator repositories
+are archived and are not release inputs or compatibility fallbacks.
+
 ## Current target
 
 The first production slice proves the complete trust chain:

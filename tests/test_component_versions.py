@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_component_lock_covers_every_workspace_repository() -> None:
+def test_component_lock_covers_every_current_repository() -> None:
     lock = json.loads((ROOT / "component-versions.json").read_text(encoding="utf-8"))
     locked = {component["repository"] for component in lock["components"]}
     expected = {
@@ -17,7 +17,6 @@ def test_component_lock_covers_every_workspace_repository() -> None:
         "SagaSmith-dnd-content-library",
         "sagasmith-narrative",
         "SagaSmith-service",
-        "sagasmith-ui",
         "SagaSmithAI.github.io",
     }
 

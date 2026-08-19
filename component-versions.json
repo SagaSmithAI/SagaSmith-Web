@@ -30,16 +30,16 @@
   "components": [
     {
       "repository": ".github",
-      "branch": "feat/domain-monorepos",
-      "revision": "1263ab324d70e9450127493a6295264f2bb2347a",
+      "branch": "main",
+      "revision": "9dd693d3786c019c91d21abad3c7a2a921ab9570",
       "remote": "https://github.com/SagaSmithAI/.github.git",
       "usage": "organization-contract",
       "enforced": false
     },
     {
       "repository": "SagaSmith-agent",
-      "branch": "feat/domain-monorepos",
-      "revision": "9154d0a35f8bf20612828bc7359de307ea3f068a",
+      "branch": "main",
+      "revision": "91064d335a0da62ba8f93632b2e4f116d0be0e07",
       "remote": "https://github.com/SagaSmithAI/SagaSmith-agent.git",
       "usage": "build",
       "enforced": true
@@ -54,24 +54,24 @@
     },
     {
       "repository": "sagasmith-dnd",
-      "branch": "feat/domain-monorepo",
-      "revision": "33b13e17b4facbee8ebaa59915c3e4bd6fe41dd7",
+      "branch": "main",
+      "revision": "51ac998bf4a261151da7e47a5b50dfb1340f15d7",
       "remote": "https://github.com/SagaSmithAI/sagasmith-dnd.git",
       "usage": "build-domain-plane",
       "enforced": true
     },
     {
       "repository": "sagasmith-coc",
-      "branch": "feat/domain-monorepo",
-      "revision": "eb2af2d6e2eb99df18625f8b5f041ab1fef57351",
+      "branch": "main",
+      "revision": "ae6a12392a2ad2e9fec3ca2cf97884b39067241f",
       "remote": "https://github.com/SagaSmithAI/sagasmith-coc.git",
       "usage": "build-domain-plane",
       "enforced": true
     },
     {
       "repository": "sagasmith-narrative",
-      "branch": "feat/domain-monorepo",
-      "revision": "62a9adc1bdb9090376e2ee4f3e70edc343f2d948",
+      "branch": "main",
+      "revision": "29e9dcd7c8f24ad49d79e0311fca44b7a3b393af",
       "remote": "https://github.com/SagaSmithAI/sagasmith-narrative.git",
       "usage": "build-agent-stdio-domain",
       "enforced": true
@@ -86,19 +86,11 @@
     },
     {
       "repository": "SagaSmith-service",
-      "branch": "feat/domain-monorepos",
+      "branch": "main",
       "revision": "self",
-      "base_revision": "cf6e8158856e1b5a7d594fb23ad1e3c5874a1ab2",
+      "base_revision": "093ab8df7e652eda1400b4089602a6fc2fdfdebe",
       "remote": "https://github.com/SagaSmithAI/SagaSmith-service.git",
       "usage": "control-plane-workspace",
-      "enforced": false
-    },
-    {
-      "repository": "sagasmith-ui",
-      "branch": "main",
-      "revision": "85fe4c9cce3e3465663bc79333df2d9fa0a7c107",
-      "remote": "https://github.com/SagaSmithAI/sagasmith-ui.git",
-      "usage": "legacy-ui-awaiting-archive",
       "enforced": false
     },
     {

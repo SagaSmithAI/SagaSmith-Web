@@ -3,6 +3,19 @@
 This is the closed-source hosted SagaSmith product. The sibling open-source repositories remain
 complete local/self-hosted products and must never depend on this repository.
 
+## Current source topology
+
+- `sagasmith-dnd`, `sagasmith-coc`, and `sagasmith-narrative` are the only current
+  domain source inputs. Their repository-local `packages/mcp`, `skills`, and UI
+  paths replace the former standalone component repositories.
+- `sagasmith-core` remains an independent neutral dependency and `SagaSmith-agent`
+  remains the host/orchestration dependency.
+- Former standalone MCP, Skills, UI, and generic Module Generator repositories
+  are archived read-only. Never pin, clone, build, or document them as a fallback.
+- `component-versions.json` and `compose.yaml` must agree on every enforced source
+  revision. Remove archived components from the current lock instead of carrying
+  them as legacy entries.
+
 ## Authority boundaries
 
 - This service owns accounts, sessions, plans, quota reservations, usage, billing, invitations,
