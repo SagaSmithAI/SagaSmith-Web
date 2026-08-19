@@ -91,6 +91,7 @@ class WorkerManager:
         self.completion_timeout_seconds = max(30, int(completion_timeout_seconds))
         self.narrative_control = narrative_control
         self.workers: dict[str, Worker] = {}
+        self.retiring_ports: set[int] = set()
         self.lock = asyncio.Lock()
         self.cleanup_task: asyncio.Task[None] | None = None
         self._narrative_probe_lock = asyncio.Lock()
@@ -128,22 +129,33 @@ class WorkerManager:
         try:
             while True:
                 await asyncio.sleep(min(60, max(5, self.idle_seconds // 2)))
-                cutoff = time.monotonic() - self.idle_seconds
-                async with self.lock:
-                    expired = [
-                        item
-                        for item in self.workers.values()
-                        if item.active_requests == 0 and item.last_used < cutoff
-                    ]
-                    for worker in expired:
-                        self.workers.pop(worker.key, None)
-                for worker in expired:
-                    await self._stop(worker)
+                await self._retire_expired_workers()
         except asyncio.CancelledError:
             return
 
+    async def _retire_expired_workers(self) -> None:
+        cutoff = time.monotonic() - self.idle_seconds
+        async with self.lock:
+            expired = [
+                item
+                for item in self.workers.values()
+                if item.active_requests == 0 and item.last_used < cutoff
+            ]
+            for worker in expired:
+                self.workers.pop(worker.key, None)
+                self.retiring_ports.add(worker.port)
+        for worker in expired:
+            try:
+                await self._stop(worker)
+            finally:
+                async with self.lock:
+                    self.retiring_ports.discard(worker.port)
+
     async def _spawn(self, key: str) -> Worker:
-        used_ports = {worker.port for worker in self.workers.values()}
+        used_ports = {
+            *(worker.port for worker in self.workers.values()),
+            *self.retiring_ports,
+        }
         port = next(
             value
             for value in range(self.first_port, self.first_port + 1000)

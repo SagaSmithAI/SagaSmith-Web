@@ -1,6 +1,6 @@
 {
   "schema": "sagasmith.component-lock/v1",
-  "audited_at": "2026-08-20T04:22:00+08:00",
+  "audited_at": "2026-08-20T04:37:54+08:00",
   "product_scope": "hosted-dnd-coc-narrative",
   "runtime_locks": {
     "service_api": "uv.lock",
@@ -31,7 +31,7 @@
     {
       "repository": ".github",
       "branch": "main",
-      "revision": "1107fbd8fe8f1b7fb260efaba1bcb919fba5b740",
+      "revision": "b55c0528f94b8f1d068d2f3bcbad98be7ea2c1a7",
       "remote": "https://github.com/SagaSmithAI/.github.git",
       "usage": "organization-contract",
       "enforced": false
