@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import json
+import uuid
+from collections.abc import Mapping
 from contextlib import AsyncExitStack
 from typing import Any, Protocol
 
 import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
+
+from sagasmith_service.auth_context import (
+    AUTH_CONTEXT_META_KEY,
+    AUTH_CONTEXT_RECEIPT_META_KEY,
+    exposure_revision,
+    sign_auth_context,
+)
 
 
 class DndRuntime(Protocol):
@@ -159,15 +168,28 @@ def _tool_payload(result: Any) -> dict[str, Any]:
         if content and getattr(content[0], "text", None):
             message = content[0].text
         raise RuntimeError(message)
+    receipt = None
+    for item in getattr(result, "content", []):
+        metadata = getattr(item, "meta", None)
+        if isinstance(metadata, Mapping):
+            candidate = metadata.get(AUTH_CONTEXT_RECEIPT_META_KEY)
+            if isinstance(candidate, Mapping):
+                receipt = dict(candidate)
+                break
     structured = getattr(result, "structuredContent", None)
     if isinstance(structured, dict):
-        return structured
+        payload = dict(structured)
+        if receipt is not None:
+            payload["auth_context_receipt"] = receipt
+        return payload
     for item in getattr(result, "content", []):
         text = getattr(item, "text", None)
         if not text:
             continue
         parsed = json.loads(text)
         if isinstance(parsed, dict):
+            if receipt is not None:
+                parsed["auth_context_receipt"] = receipt
             return parsed
     raise RuntimeError("D&D MCP returned no structured receipt")
 
@@ -186,9 +208,16 @@ def _runtime_error(error: BaseException) -> RuntimeError:
 class StreamableHttpDndRuntime:
     """Thin client for public D&D MCP tools; it never reaches into MCP storage."""
 
-    def __init__(self, url: str, *, bearer_token: str | None = None) -> None:
+    def __init__(
+        self,
+        url: str,
+        *,
+        bearer_token: str | None = None,
+        auth_context_secret: str = "",
+    ) -> None:
         self.url = url
         self.bearer_token = bearer_token
+        self.auth_context_secret = auth_context_secret
 
     async def probe(self) -> None:
         """Verify the MCP endpoint and the hosted contract without mutating state."""
@@ -244,23 +273,50 @@ class StreamableHttpDndRuntime:
                 )
                 session = await stack.enter_async_context(ClientSession(read, write))
                 await session.initialize()
+                auth_session_id = f"service:{uuid.uuid4().hex}"
+                conversation_principal = (
+                    f"service:campaign:{campaign_id}" if campaign_id else "service:control-plane"
+                )
+                authorization_epoch = 0
+
+                async def call(tool_name: str, tool_arguments: dict[str, Any]):
+                    nonlocal authorization_epoch
+                    metadata = None
+                    if self.auth_context_secret:
+                        metadata = {
+                            AUTH_CONTEXT_META_KEY: sign_auth_context(
+                                secret=self.auth_context_secret,
+                                actor_principal=exposure_principal,
+                                conversation_principal=conversation_principal,
+                                session_id=auth_session_id,
+                                campaign_id=campaign_id or "",
+                                authorization_epoch=authorization_epoch,
+                            )
+                        }
+                    result = await session.call_tool(
+                        tool_name,
+                        arguments=tool_arguments,
+                        **({"meta": metadata} if metadata is not None else {}),
+                    )
+                    payload = _tool_payload(result)
+                    authorization_epoch = exposure_revision(payload, authorization_epoch)
+                    return payload
+
                 exposure_args: dict[str, Any] = {
                     "action": "open",
                     "principal_id": exposure_principal,
                 }
                 if campaign_id is not None:
                     exposure_args["campaign_id"] = campaign_id
-                _tool_payload(await session.call_tool("exposure", arguments=exposure_args))
-                search = _tool_payload(
-                    await session.call_tool(
-                        "exposure",
-                        arguments={
-                            "action": "search",
-                            "campaign_id": campaign_id,
-                            "principal_id": exposure_principal,
-                            "query": name,
-                        },
-                    )
+                await call("exposure", exposure_args)
+                search = await call(
+                    "exposure",
+                    {
+                        "action": "search",
+                        "campaign_id": campaign_id,
+                        "principal_id": exposure_principal,
+                        "query": name,
+                    },
                 )
                 matched_tools = {
                     str(item.get("tool_id") or "") for item in search.get("matches", [])
@@ -271,21 +327,19 @@ class StreamableHttpDndRuntime:
                         f"D&D MCP does not expose {name!r} in the current context: {search}"
                     )
                 if name not in visible_tools:
-                    _tool_payload(
-                        await session.call_tool(
-                            "exposure",
-                            arguments={
-                                "action": "set",
-                                "campaign_id": campaign_id,
-                                "principal_id": exposure_principal,
-                                "add_tool_ids": [name],
-                            },
-                        )
+                    await call(
+                        "exposure",
+                        {
+                            "action": "set",
+                            "campaign_id": campaign_id,
+                            "principal_id": exposure_principal,
+                            "add_tool_ids": [name],
+                        },
                     )
                 listed = await session.list_tools()
                 if name not in {tool.name for tool in listed.tools}:
                     raise RuntimeError(f"D&D MCP did not publish {name!r} after exposure update")
-                return _tool_payload(await session.call_tool(name, arguments=arguments))
+                return await call(name, arguments)
         except Exception as exc:
             raise _runtime_error(exc) from exc
 

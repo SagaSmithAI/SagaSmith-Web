@@ -12,11 +12,12 @@ services:
       SAGASMITH_SERVICE_INTERNAL_URL: http://api:8080
       SAGASMITH_DND_MCP_URL: ${SAGASMITH_DND_MCP_URL:-http://dnd-mcp:8767/mcp}
       SAGASMITH_COC_MCP_URL: ${SAGASMITH_COC_MCP_URL:-http://coc-mcp:8768/mcp}
+      SAGASMITH_AUTH_CONTEXT_SECRET: ${SAGASMITH_AUTH_CONTEXT_SECRET:?set SAGASMITH_AUTH_CONTEXT_SECRET}
     expose: ["8080"]
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/ready', timeout=5)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/ready', timeout=15)"]
       interval: 5s
-      timeout: 10s
+      timeout: 20s
       retries: 24
     volumes:
       - exchange-data:/srv/sagasmith/exchange
@@ -44,6 +45,7 @@ services:
     entrypoint: []
     environment:
       SAGASMITH_EXCHANGE_DIR: /srv/sagasmith/exchange
+      SAGASMITH_AUTH_CONTEXT_SECRET: ${SAGASMITH_AUTH_CONTEXT_SECRET:?set SAGASMITH_AUTH_CONTEXT_SECRET}
     expose: ["9101"]
     volumes:
       - exchange-data:/srv/sagasmith/exchange
@@ -77,6 +79,7 @@ services:
       SAGASMITH_MODULEGEN_SKILLS_DIR: /build/sagasmith-dnd/skills/dnd-module-generator
       SAGASMITH_DND_MCP_RULE_IMPORT_ROOTS: /srv/sagasmith/exchange
       SAGASMITH_DND_MCP_MODULE_IMPORT_ROOTS: /srv/sagasmith/exchange
+      SAGASMITH_AUTH_CONTEXT_SECRET: ${SAGASMITH_AUTH_CONTEXT_SECRET:?set SAGASMITH_AUTH_CONTEXT_SECRET}
     volumes:
       - dnd-state:/state
       - exchange-data:/srv/sagasmith/exchange
@@ -104,6 +107,7 @@ services:
       SAGASMITH_COC_SKILLS_DIR: /build/sagasmith-coc/skills
       SAGASMITH_MODULEGEN_SKILLS_DIR: /build/sagasmith-coc/skills/coc-module-generator
       SAGASMITH_COC_MCP_MODULE_IMPORT_ROOTS: /srv/sagasmith/exchange
+      SAGASMITH_AUTH_CONTEXT_SECRET: ${SAGASMITH_AUTH_CONTEXT_SECRET:?set SAGASMITH_AUTH_CONTEXT_SECRET}
     volumes:
       - coc-state:/state
       - exchange-data:/srv/sagasmith/exchange
@@ -131,6 +135,7 @@ services:
       SAGASMITH_AGENT_CONFIG: /config/agent-config.json
       SAGASMITH_AGENT_WORKSPACES: /workspaces
       SAGASMITH_AGENT_TRUSTED_MCP_HOSTS: dnd-mcp,coc-mcp
+      SAGASMITH_AUTH_CONTEXT_SECRET: ${SAGASMITH_AUTH_CONTEXT_SECRET:?set SAGASMITH_AUTH_CONTEXT_SECRET}
     volumes:
       - ./secrets/agent-config.json:/config/agent-config.json:ro
       - agent-workspace:/workspaces

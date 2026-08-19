@@ -319,7 +319,14 @@ def client(
         exchange_dir=str(tmp_path / "exchange"),
         public_origin="http://testserver",
     )
-    app = create_app(settings, make_engine("sqlite://"), dnd_runtime, agent_runtime)
+    app = create_app(
+        settings,
+        make_engine("sqlite://"),
+        dnd_runtime,
+        agent_runtime,
+        coc_runtime=dnd_runtime,
+        narrative_runtime=dnd_runtime,
+    )
     with TestClient(app) as value:
         value.headers["Origin"] = "http://testserver"
         yield value

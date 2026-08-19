@@ -27,7 +27,7 @@ def main() -> None:
     with httpx.Client(base_url=origin, headers={"Origin": origin}, timeout=120) as client:
         for _ in range(120):
             try:
-                if client.get("/api/ready", timeout=2).status_code == 200:
+                if client.get("/api/ready", timeout=10).status_code == 200:
                     break
             except httpx.HTTPError:
                 pass
@@ -62,7 +62,8 @@ def main() -> None:
             raise RuntimeError("restored audit trail is incomplete")
         runtime = require(client.get(f"/api/campaigns/{campaigns[0]['id']}/runtime"))
         import_campaign = None
-        for campaign in campaigns:
+        dnd_campaigns = [item for item in campaigns if item.get("system_id") == "dnd5e"]
+        for campaign in dnd_campaigns:
             imported = require(client.get(f"/api/packs/campaigns/{campaign['id']}"))
             if not any(item.get("private_pack_id") == packs[0]["id"] for item in imported):
                 import_campaign = campaign

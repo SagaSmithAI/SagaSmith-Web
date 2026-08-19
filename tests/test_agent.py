@@ -2,6 +2,9 @@ from typing import Any
 
 from conftest import FakeAgentRuntime
 from fastapi.testclient import TestClient
+from sqlalchemy import select
+
+from sagasmith_service.models import AuditEvent
 
 
 def register_and_create_campaign(client: TestClient) -> dict[str, Any]:
@@ -26,6 +29,23 @@ def test_agent_call_has_authenticated_scope_and_settles_usage(
     client: TestClient, agent_runtime: FakeAgentRuntime
 ) -> None:
     user = register_and_create_campaign(client)
+    agent_runtime.tool_receipts = (
+        {
+            "tool": "mcp_sagasmith_dnd_campaign_query",
+            "auth_context_receipt": {
+                "schema": "sagasmith.auth-context/v1",
+                "actor_principal": f"user:{user['id']}",
+                "conversation_principal": "session:campaign-1:user:conversation",
+                "tenant_id": "",
+                "campaign_id": "campaign-1",
+                "session_id": "campaign-1:user:conversation",
+                "tool": "campaign_query",
+                "authorization_epoch": 2,
+                "revision": 4,
+                "nonce": "agent-receipt-nonce",
+            },
+        },
+    )
     conversation = client.post(
         "/api/campaigns/campaign-1/agent/conversations",
         json={"title": "第一幕"},
@@ -48,6 +68,12 @@ def test_agent_call_has_authenticated_scope_and_settles_usage(
     balance = client.get("/api/usage/balance").json()
     assert balance["used"] == "150.000000"
     assert balance["reserved"] == "0.000000"
+    with client.app.state.session_factory() as session:
+        audit = session.scalar(select(AuditEvent).where(AuditEvent.action == "agent.complete"))
+        assert audit is not None
+        assert audit.details["auth_context_receipts"] == [
+            agent_runtime.tool_receipts[0]["auth_context_receipt"]
+        ]
 
     repeated = client.post(
         f"/api/campaigns/campaign-1/agent/conversations/{conversation['id']}/messages",

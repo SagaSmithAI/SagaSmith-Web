@@ -197,14 +197,16 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(message, dict) and message.get("role") == "tool"
         ]
         selected_tools = tool_names
+        system_id = system_match.group(1) if system_match else ""
+        target_tool_id = "actor_query" if system_id == "narrative" else "character_query"
         if system_match:
-            marker = "coc" if system_match.group(1) == "coc7e" else "dnd"
+            marker = {"coc7e": "coc", "narrative": "narrative"}.get(system_id, "dnd")
             selected_tools = {name for name in tool_names if marker in name.casefold()}
         exposure_name = next(
             (name for name in selected_tools if name.endswith("_exposure")), ""
         )
-        character_query_name = next(
-            (name for name in selected_tools if name.endswith("_character_query")), ""
+        query_name = next(
+            (name for name in selected_tools if name.endswith(f"_{target_tool_id}")), ""
         )
         if authenticated and campaign_match and principal_match and not tool_messages:
             self._tool_call(
@@ -217,15 +219,21 @@ class Handler(BaseHTTPRequestHandler):
                 "exposure-open",
             )
             return
-        if authenticated and campaign_match and principal_match and character_query_name:
+        if authenticated and campaign_match and principal_match and query_name:
             if not any(
-                str(message.get("name", "")).endswith("_character_query")
+                str(message.get("name", "")).endswith(f"_{target_tool_id}")
                 for message in tool_messages
             ):
-                is_coc = bool(system_match and system_match.group(1) == "coc7e")
+                is_coc = system_id == "coc7e"
                 self._tool_call(
-                    character_query_name,
+                    query_name,
                     (
+                        {
+                            "campaign_id": campaign_match.group(1),
+                            "principal_id": principal_match.group(1),
+                        }
+                        if system_id == "narrative"
+                        else
                         {
                             "action": "list",
                             "campaign_id": campaign_match.group(1),
@@ -252,7 +260,7 @@ class Handler(BaseHTTPRequestHandler):
                         "action": "search",
                         "campaign_id": campaign_match.group(1),
                         "principal_id": principal_match.group(1),
-                        "query": "character_query",
+                        "query": target_tool_id,
                     },
                     "exposure-search",
                 )
@@ -264,13 +272,14 @@ class Handler(BaseHTTPRequestHandler):
                         "action": "set",
                         "campaign_id": campaign_match.group(1),
                         "principal_id": principal_match.group(1),
-                        "add_tool_ids": ["character_query"],
+                        "add_tool_ids": [target_tool_id],
                     },
                     "exposure-set",
                 )
                 return
         native_call_completed = any(
-            str(message.get("name", "")).endswith("_character_query") for message in tool_messages
+            str(message.get("name", "")).endswith(f"_{target_tool_id}")
+            for message in tool_messages
         )
         content = (
             "SagaSmith container E2E dynamic MCP call completed."

@@ -892,7 +892,10 @@ def _storage(settings: Settings) -> Any:
 async def run_workers(settings: Settings) -> None:
     start_http_server(settings.module_worker_metrics_port)
     factory = make_session_factory(make_engine(settings.database_url))
-    dnd = StreamableHttpDndRuntime(settings.dnd_mcp_url)
+    dnd = StreamableHttpDndRuntime(
+        settings.dnd_mcp_url,
+        auth_context_secret=settings.auth_context_secret.get_secret_value(),
+    )
     agent = HttpAgentRuntime(
         settings.agent_api_url,
         settings.agent_api_key.get_secret_value(),

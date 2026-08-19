@@ -26,11 +26,13 @@
     "apiKey": "e2e-internal-agent-key"
   },
   "tools": {
+    "distribution": "hosted",
     "mcpServers": {
       "sagasmith_dnd": {
         "type": "streamableHttp",
         "url": "http://dnd-mcp:8767/mcp",
         "injectPrincipal": true,
+        "authContextSecret": "e2e-auth-context-secret-at-least-32-bytes",
         "sessionScoped": true,
         "toolTimeout": 900,
         "exposeResourcesAndPrompts": true,
@@ -40,6 +42,7 @@
         "type": "streamableHttp",
         "url": "http://coc-mcp:8768/mcp",
         "injectPrincipal": true,
+        "authContextSecret": "e2e-auth-context-secret-at-least-32-bytes",
         "sessionScoped": true,
         "toolTimeout": 900,
         "exposeResourcesAndPrompts": true,
@@ -52,9 +55,11 @@
         "cwd": "/build/sagasmith-narrative",
         "env": {
           "SAGASMITH_NARRATIVE_MCP_HOME": "/workspaces/narrative-state",
-          "SAGASMITH_NARRATIVE_SKILLS_DIR": "/opt/sagasmith/skills/narrative"
+          "SAGASMITH_NARRATIVE_SKILLS_DIR": "/opt/sagasmith/skills/narrative",
+          "SAGASMITH_AUTH_CONTEXT_SECRET": "e2e-auth-context-secret-at-least-32-bytes"
         },
         "injectPrincipal": true,
+        "authContextSecret": "e2e-auth-context-secret-at-least-32-bytes",
         "sessionScoped": true,
         "toolTimeout": 900,
         "exposeResourcesAndPrompts": true,

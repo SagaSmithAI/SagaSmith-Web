@@ -51,7 +51,8 @@ try {
         Invoke-CheckedNative -Executable "docker" -Arguments @(
             "run", "--rm", "--mount", "source=$source,target=/source,readonly",
             "--mount", "type=bind,source=$resolvedDestination,target=/backup",
-            "alpine:3.22", "tar", "czf", "/backup/$volume.tgz", "-C", "/source", "."
+            "alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce",
+            "tar", "czf", "/backup/$volume.tgz", "-C", "/source", "."
         )
     }
     $release = (Invoke-CheckedNative -Executable "git" -Arguments @("rev-parse", "HEAD")).Trim()

@@ -4,6 +4,7 @@ import socket
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from sagasmith_service.agent_supervisor import (
@@ -19,6 +20,7 @@ class FakeManager:
         self.started = False
         self.closed = False
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.narrative_calls: list[tuple[str, dict[str, Any]]] = []
         self.fail = False
 
     async def start(self) -> None:
@@ -32,6 +34,60 @@ class FakeManager:
             raise RuntimeError("worker failed")
         self.calls.append((key, payload))
         return {"id": "completion-1", "choices": []}
+
+    async def probe_narrative(self) -> None:
+        if self.fail:
+            raise RuntimeError("narrative failed")
+
+    async def execute_narrative(
+        self, operation: str, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        if self.fail:
+            raise RuntimeError("narrative failed")
+        self.narrative_calls.append((operation, arguments))
+        return {"id": "narrative-campaign"}
+
+    def worker_status(self) -> dict[str, Any]:
+        return {
+            "active_workers": 1,
+            "tracked_pids": [101],
+            "orphan_pids": [],
+        }
+
+
+class FakeNarrativeControl:
+    def __init__(self) -> None:
+        self.probes = 0
+        self.fail = False
+
+    async def probe(self) -> None:
+        self.probes += 1
+        if self.fail:
+            raise RuntimeError("narrative unavailable")
+
+
+def test_worker_manager_coalesces_successful_narrative_readiness_probes(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        narrative = FakeNarrativeControl()
+        manager = WorkerManager(
+            config_path=str(tmp_path / "config.json"),
+            workspace_root=str(tmp_path / "workspaces"),
+            worker_api_key="secret",
+            narrative_control=narrative,  # type: ignore[arg-type]
+        )
+
+        await asyncio.gather(*(manager.probe_narrative() for _ in range(5)))
+        await manager.probe_narrative()
+
+        assert narrative.probes == 1
+        narrative.fail = True
+        manager._narrative_probe_success_at = 0
+        with pytest.raises(RuntimeError, match="unavailable"):
+            await manager.probe_narrative()
+
+    asyncio.run(scenario())
 
 
 def test_supervisor_authenticates_and_routes_by_conversation() -> None:
@@ -79,6 +135,59 @@ def test_supervisor_maps_worker_failure() -> None:
             json={"messages": [], "principal_id": "user:test-user"},
         )
     assert response.status_code == 502
+
+
+def test_supervisor_authenticates_narrative_health_and_fixed_operations() -> None:
+    manager = FakeManager()
+    with TestClient(
+        create_supervisor_app(manager, "internal-secret")  # type: ignore[arg-type]
+    ) as client:
+        assert client.get("/health/narrative").status_code == 401
+        assert (
+            client.get(
+                "/health/narrative",
+                headers={"Authorization": "Bearer internal-secret"},
+            ).status_code
+            == 200
+        )
+        response = client.post(
+            "/v1/narrative/operations",
+            headers={"Authorization": "Bearer internal-secret"},
+            json={
+                "operation": "get_campaign",
+                "arguments": {
+                    "campaign_id": "campaign-1",
+                    "principal_id": "user:one",
+                },
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["id"] == "narrative-campaign"
+    assert manager.narrative_calls == [
+        (
+            "get_campaign",
+            {"campaign_id": "campaign-1", "principal_id": "user:one"},
+        )
+    ]
+
+
+def test_supervisor_authenticates_and_reports_worker_lifecycle() -> None:
+    manager = FakeManager()
+    with TestClient(
+        create_supervisor_app(manager, "internal-secret")  # type: ignore[arg-type]
+    ) as client:
+        assert client.get("/health/workers").status_code == 401
+        response = client.get(
+            "/health/workers",
+            headers={"Authorization": "Bearer internal-secret"},
+        )
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "active_workers": 1,
+        "tracked_pids": [101],
+        "orphan_pids": [],
+    }
 
 
 def test_supervisor_rejects_principal_conversation_mismatch() -> None:
@@ -152,6 +261,7 @@ def test_worker_manager_isolates_and_reuses_conversation_processes(
         async def post(self, _url: str, json: dict[str, Any]) -> FakeResponse:
             assert json["stream"] is False
             assert "model" not in json
+            assert sum(worker.active_requests for worker in manager.workers.values()) == 1
             return FakeResponse()
 
     processes: list[FakeProcess] = []
@@ -183,6 +293,7 @@ def test_worker_manager_isolates_and_reuses_conversation_processes(
         assert first == repeated == second
         assert len(processes) == 2
         assert len(manager.workers) == 2
+        assert all(worker.active_requests == 0 for worker in manager.workers.values())
         assert (
             manager.workers["campaign-a:user-a:conversation-a"].port
             != manager.workers["campaign-b:user-b:conversation-b"].port

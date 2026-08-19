@@ -1068,7 +1068,16 @@ async def _run_agent(
             action="campaign.room.agent.complete",
             subject_type="campaign_message",
             subject_id=trigger.id,
-            details={"campaign_id": campaign_id, "tokens": actual, "run_id": run.id},
+            details={
+                "campaign_id": campaign_id,
+                "tokens": actual,
+                "run_id": run.id,
+                "auth_context_receipts": [
+                    dict(receipt["auth_context_receipt"])
+                    for receipt in result.tool_receipts
+                    if isinstance(receipt.get("auth_context_receipt"), dict)
+                ],
+            },
         )
     )
     session.commit()
