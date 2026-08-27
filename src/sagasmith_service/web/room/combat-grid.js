@@ -1,3 +1,4 @@
+import { apiBlobResponse } from "/assets/api/client.js";
 import { $, button, text } from "/assets/components/dom.js";
 import { toast } from "/assets/components/toast.js";
 import {
@@ -19,6 +20,21 @@ import {
 } from "/assets/room/model.js";
 import { appendDetails, num } from "/assets/room/view.js";
 import { state } from "/assets/state/store.js";
+import {
+  MOVEMENT_INTENT_DISCLAIMER,
+  cellKey,
+  clampGridCursor,
+  combatantAtCell,
+  decodePublicTextHeader,
+  mapBounds,
+  moveGridCursor,
+  movementIntentSegment,
+  terrainAt,
+} from "/assets/room/combat-grid-state.js";
+
+const gridTexture = new Image();
+gridTexture.decoding = "async";
+gridTexture.src = "/sagasmith-grid-texture.webp";
 
 export function createCombatGridController({
   sendPanelAction,
@@ -27,6 +43,17 @@ export function createCombatGridController({
   renderActionContext,
   refreshSuggestionValidity,
 }) {
+  let combatSnapshotBlob = null;
+  let combatSnapshotUrl = null;
+  let combatSnapshotCaption = "全队公开战况图。";
+
+  function releaseCombatSnapshot() {
+    if (combatSnapshotUrl) URL.revokeObjectURL(combatSnapshotUrl);
+    combatSnapshotBlob = null;
+    combatSnapshotUrl = null;
+    combatSnapshotCaption = "全队公开战况图。";
+  }
+
   function setGridExpanded(expanded) {
     state.gridExpanded = Boolean(
       expanded && state.panel?.phase === "combat" && combatMode() === "grid",
@@ -36,7 +63,10 @@ export function createCombatGridController({
     if (shell) {
       shell.classList.toggle("expanded", state.gridExpanded);
       const control = shell.querySelector("[data-grid-expand]");
-      if (control) control.textContent = state.gridExpanded ? "收起" : "展开";
+      if (control) {
+        control.textContent = state.gridExpanded ? "收起" : "展开";
+        control.setAttribute("aria-expanded", String(state.gridExpanded));
+      }
     }
     requestAnimationFrame(drawCombatGrid);
   }
@@ -44,8 +74,10 @@ export function createCombatGridController({
   function renderCombatPanel() {
     const root = $("#combat-panel");
     const visible = characters();
+    releaseCombatSnapshot();
     root.replaceChildren();
     if (state.panel?.phase !== "combat") {
+      state.gridCursor = null;
       setGridExpanded(false);
       root.append(text("p", "当前没有进行中的战斗", "muted"));
       if (isDm() && state.panel?.phase === "play") {
@@ -66,6 +98,8 @@ export function createCombatGridController({
     if (combatMode() === "grid" && battleMap()) {
       root.append(buildGridShell());
     } else {
+      state.gridCursor = null;
+      state.gridDestination = null;
       setGridExpanded(false);
       root.append(
         text(
@@ -222,13 +256,76 @@ export function createCombatGridController({
       setGridExpanded(!state.gridExpanded),
     );
     expand.dataset.gridExpand = "true";
-    head.append(expand);
+    expand.setAttribute("aria-expanded", String(state.gridExpanded));
+    const snapshotToggle = button("玩家分享图", () =>
+      loadCombatSnapshot(
+        snapshotPanel,
+        snapshotImage,
+        snapshotToggle,
+        snapshotStatus,
+        snapshotShare,
+        snapshotDownload,
+      ),
+    );
+    snapshotToggle.title = "加载由 D&D MCP 按全队公开视图生成的战况图";
+    const headActions = text("div", "", "grid-head-actions");
+    headActions.append(snapshotToggle, expand);
+    head.append(headActions);
+    const snapshotPanel = text("section", "", "combat-snapshot");
+    snapshotPanel.hidden = true;
+    snapshotPanel.setAttribute("role", "dialog");
+    snapshotPanel.setAttribute("aria-modal", "true");
+    snapshotPanel.setAttribute("aria-label", "全队公开战况图预览");
+    const snapshotImage = document.createElement("img");
+    snapshotImage.alt = "D&D MCP 按全队公开视图生成的战况图";
+    snapshotImage.hidden = true;
+    const snapshotStatus = text(
+      "p",
+      "尚未加载战况图。",
+      "combat-snapshot-status",
+    );
+    snapshotStatus.setAttribute("role", "status");
+    const snapshotShare = button("分享到群聊", shareCombatSnapshot, "primary");
+    const snapshotDownload = button("下载 PNG", downloadCombatSnapshot);
+    snapshotShare.disabled = true;
+    snapshotDownload.disabled = true;
+    const snapshotActions = text("div", "", "combat-snapshot-actions");
+    snapshotActions.append(
+      snapshotShare,
+      snapshotDownload,
+      button("关闭预览", () => {
+        snapshotPanel.hidden = true;
+        snapshotToggle.focus();
+      }),
+    );
+    snapshotPanel.append(
+      snapshotStatus,
+      snapshotImage,
+      text(
+        "p",
+        "此图固定使用全队公开投影，不含 DM 私密字段；战斗状态仍以 MCP 为准。",
+        "small muted combat-snapshot-note",
+      ),
+      snapshotActions,
+    );
+    snapshotPanel.onkeydown = (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      snapshotPanel.hidden = true;
+      snapshotToggle.focus();
+    };
     const wrap = text("div", "", "grid-canvas-wrap");
     const canvas = document.createElement("canvas");
     const tooltip = text("div", "", "grid-tooltip");
+    const status = text("p", "使用方向键移动坐标光标，Enter 选择，Escape 清除。", "grid-status");
+    status.id = "combat-grid-status";
+    status.setAttribute("aria-live", "polite");
     canvas.id = "combat-grid";
     canvas.className = "combat-grid";
-    canvas.setAttribute("aria-label", "战斗网格");
+    canvas.tabIndex = 0;
+    canvas.setAttribute("role", "application");
+    canvas.setAttribute("aria-label", "战斗网格坐标选择器");
+    canvas.setAttribute("aria-describedby", "combat-grid-status combat-grid-legend");
     tooltip.hidden = true;
     wrap.append(canvas, tooltip);
     const initiative = text("div", "", "initiative-strip");
@@ -248,21 +345,142 @@ export function createCombatGridController({
     }
     shell.append(
       head,
+      snapshotPanel,
       wrap,
       initiative,
       text(
         "div",
-        "点击己方角色设为行动者；点击目标或空格建立聊天行动上下文。",
+        `点击己方角色设为行动者；选择目标或空格建立聊天行动上下文。${MOVEMENT_INTENT_DISCLAIMER}`,
         "grid-legend",
       ),
+      status,
     );
+    shell.querySelector(".grid-legend").id = "combat-grid-legend";
     shell.classList.toggle("expanded", state.gridExpanded);
     canvas.onpointermove = (event) => gridPointerMove(event, canvas, tooltip);
+    canvas.onpointerdown = (event) => {
+      const cell = gridCell(event, canvas);
+      if (cell) {
+        state.gridCursor = cell;
+        updateGridStatus(cell, status);
+        drawCombatGrid();
+      }
+    };
     canvas.onpointerleave = () => {
       tooltip.hidden = true;
     };
-    canvas.onclick = (event) => gridClick(event, canvas);
+    canvas.onclick = (event) => gridClick(event, canvas, status);
+    canvas.onfocus = () => {
+      const bounds = mapBounds(battleMap());
+      state.gridCursor = clampGridCursor(
+        state.gridCursor || state.gridDestination || actingActorPosition() || { x: 0, y: 0 },
+        bounds,
+      );
+      updateGridStatus(state.gridCursor, status);
+      drawCombatGrid();
+    };
+    canvas.onkeydown = (event) => gridKeyDown(event, canvas, status);
     return shell;
+  }
+
+  async function loadCombatSnapshot(panel, image, control, status, share, download) {
+    if (combatSnapshotBlob && combatSnapshotUrl) {
+      panel.hidden = false;
+      image.src = combatSnapshotUrl;
+      image.hidden = false;
+      status.textContent = "全队公开战况图已载入。";
+      share.disabled = false;
+      download.disabled = false;
+      panel.querySelector("button")?.focus();
+      return;
+    }
+    panel.hidden = false;
+    panel.setAttribute("aria-busy", "true");
+    image.hidden = true;
+    status.textContent = "正在从 D&D MCP 生成全队公开战况图…";
+    share.disabled = true;
+    download.disabled = true;
+    control.disabled = true;
+    control.textContent = "正在生成…";
+    try {
+      const { blob, headers } = await apiBlobResponse(
+        `/api/campaigns/${state.campaign.id}/room/combat/render`,
+      );
+      if (blob.type !== "image/png") throw new Error("战况图格式无效");
+      releaseCombatSnapshot();
+      combatSnapshotBlob = blob;
+      combatSnapshotUrl = URL.createObjectURL(blob);
+      image.alt = decodePublicTextHeader(
+        headers.get("X-SagaSmith-Combat-Alt"),
+        "D&D MCP 按全队公开视图生成的战况图",
+      );
+      combatSnapshotCaption = decodePublicTextHeader(
+        headers.get("X-SagaSmith-Combat-Caption"),
+        combatSnapshotCaption,
+      );
+      image.src = combatSnapshotUrl;
+      await image.decode();
+      image.hidden = false;
+      status.textContent = "全队公开战况图已载入，可分享或下载。";
+      share.disabled = false;
+      download.disabled = false;
+      panel.querySelector("button")?.focus();
+      if (!window.matchMedia("(max-width: 600px)").matches) {
+        panel.scrollIntoView({
+          block: "nearest",
+          behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+            ? "auto"
+            : "smooth",
+        });
+      }
+    } catch (error) {
+      releaseCombatSnapshot();
+      image.removeAttribute("src");
+      image.hidden = true;
+      status.textContent = `战况图加载失败：${error.message}`;
+      toast(`战况图加载失败：${error.message}`);
+    } finally {
+      panel.setAttribute("aria-busy", "false");
+      control.disabled = false;
+      control.textContent = "玩家分享图";
+    }
+  }
+
+  function downloadCombatSnapshot() {
+    if (!combatSnapshotBlob || !combatSnapshotUrl) return toast("请先加载玩家分享图");
+    const link = document.createElement("a");
+    link.href = combatSnapshotUrl;
+    link.download = "sagasmith-party-combat.png";
+    link.click();
+    toast("战况图已下载");
+  }
+
+  async function shareCombatSnapshot() {
+    if (!combatSnapshotBlob) return toast("请先加载玩家分享图");
+    if (typeof File === "undefined") {
+      downloadCombatSnapshot();
+      return;
+    }
+    const file = new File([combatSnapshotBlob], "sagasmith-party-combat.png", {
+      type: "image/png",
+    });
+    const shareData = {
+      files: [file],
+      title: battleMap()?.name || activeCombat().name || "SagaSmith 战况图",
+      text: `${combatSnapshotCaption}\n战斗状态与移动判定以 SagaSmith MCP 为准。`,
+    };
+    if (!navigator.share || (navigator.canShare && !navigator.canShare(shareData))) {
+      downloadCombatSnapshot();
+      return;
+    }
+    try {
+      await navigator.share(shareData);
+    } catch (error) {
+      if (error?.name !== "AbortError") {
+        toast("当前浏览器无法分享，已改为下载 PNG");
+        downloadCombatSnapshot();
+      }
+    }
   }
 
   async function focusCombatant(id) {
@@ -278,22 +496,11 @@ export function createCombatGridController({
     drawCombatGrid();
   }
 
-  function mapBounds(map) {
-    const bounds = map?.bounds || {};
-    return {
-      width: Number(
-        bounds.width_cells || bounds.width || bounds.columns || map?.width_cells || map?.width || 20,
-      ),
-      height: Number(
-        bounds.height_cells || bounds.height || bounds.rows || map?.height_cells || map?.height || 14,
-      ),
-    };
-  }
-
-  function cellKey(cell) {
-    if (typeof cell === "string") return cell;
-    if (Array.isArray(cell)) return `${cell[0]},${cell[1]}`;
-    return `${cell?.x},${cell?.y}`;
+  function actingActorPosition() {
+    const actor = combatants().find(
+      (item) => combatantId(item) === state.actingActorId,
+    );
+    return actor?.position || actor?.coordinates || null;
   }
 
   function gridMetrics(canvas) {
@@ -317,6 +524,28 @@ export function createCombatGridController({
     return { bounds, dpr, cell, offsetX, offsetY };
   }
 
+  function drawGridTexture(context, metrics) {
+    if (!gridTexture.complete || !gridTexture.naturalWidth || !gridTexture.naturalHeight) return;
+    const width = metrics.bounds.width * metrics.cell;
+    const height = metrics.bounds.height * metrics.cell;
+    const scale = Math.max(width / gridTexture.naturalWidth, height / gridTexture.naturalHeight);
+    const drawnWidth = gridTexture.naturalWidth * scale;
+    const drawnHeight = gridTexture.naturalHeight * scale;
+    context.save();
+    context.beginPath();
+    context.rect(metrics.offsetX, metrics.offsetY, width, height);
+    context.clip();
+    context.globalAlpha = 0.14;
+    context.drawImage(
+      gridTexture,
+      metrics.offsetX + (width - drawnWidth) / 2,
+      metrics.offsetY + (height - drawnHeight) / 2,
+      drawnWidth,
+      drawnHeight,
+    );
+    context.restore();
+  }
+
   function drawCombatGrid() {
     const canvas = $("#combat-grid");
     if (!canvas || combatMode() !== "grid") return;
@@ -331,6 +560,7 @@ export function createCombatGridController({
     context.clearRect(0, 0, canvas.width, canvas.height);
     context.fillStyle = "#0b0f0d";
     context.fillRect(0, 0, canvas.width, canvas.height);
+    drawGridTexture(context, metrics);
     for (let y = 0; y < metrics.bounds.height; y++) {
       for (let x = 0; x < metrics.bounds.width; x++) {
         const key = `${x},${y}`;
@@ -382,6 +612,42 @@ export function createCombatGridController({
         metrics.cell,
       );
     }
+    const intent = movementIntentSegment(
+      combatants(),
+      state.actingActorId,
+      state.gridDestination,
+    );
+    if (intent) {
+      context.save();
+      context.strokeStyle = "#f2c76f";
+      context.lineWidth = Math.max(2, metrics.dpr * 1.5);
+      context.setLineDash([Math.max(5, metrics.cell * 0.22), Math.max(4, metrics.cell * 0.14)]);
+      context.beginPath();
+      context.moveTo(
+        metrics.offsetX + (intent.from.x + 0.5) * metrics.cell,
+        metrics.offsetY + (intent.from.y + 0.5) * metrics.cell,
+      );
+      context.lineTo(
+        metrics.offsetX + (intent.to.x + 0.5) * metrics.cell,
+        metrics.offsetY + (intent.to.y + 0.5) * metrics.cell,
+      );
+      context.stroke();
+      context.restore();
+    }
+    if (state.gridCursor) {
+      const cursor = clampGridCursor(state.gridCursor, metrics.bounds);
+      context.save();
+      context.strokeStyle = "#f5efe0";
+      context.lineWidth = Math.max(2, metrics.dpr * 1.25);
+      context.setLineDash([Math.max(3, metrics.cell * 0.14), Math.max(2, metrics.cell * 0.08)]);
+      context.strokeRect(
+        metrics.offsetX + cursor.x * metrics.cell + metrics.dpr,
+        metrics.offsetY + cursor.y * metrics.cell + metrics.dpr,
+        metrics.cell - metrics.dpr * 2,
+        metrics.cell - metrics.dpr * 2,
+      );
+      context.restore();
+    }
     const current = currentCombatantId();
     for (const item of combatants()) {
       const position = item.position || item.coordinates;
@@ -403,6 +669,22 @@ export function createCombatGridController({
       context.lineWidth = selected ? 4 : current === id ? 3 : 1;
       context.strokeStyle = selected ? "#e37765" : current === id ? "#d9ad5b" : "#d9ddd8";
       context.stroke();
+      if (current === id) {
+        context.save();
+        context.beginPath();
+        context.arc(centerX, centerY, radius + Math.max(4, metrics.cell * 0.1), 0, Math.PI * 2);
+        context.strokeStyle = "#f2c76f";
+        context.lineWidth = Math.max(2, metrics.dpr);
+        context.stroke();
+        context.fillStyle = "#f2c76f";
+        context.beginPath();
+        context.moveTo(centerX, centerY - radius - Math.max(8, metrics.cell * 0.18));
+        context.lineTo(centerX - Math.max(4, metrics.cell * 0.08), centerY - radius - 3);
+        context.lineTo(centerX + Math.max(4, metrics.cell * 0.08), centerY - radius - 3);
+        context.closePath();
+        context.fill();
+        context.restore();
+      }
       context.fillStyle = "#fff";
       context.font = `600 ${Math.max(8, Math.min(13, metrics.cell * 0.24))}px system-ui`;
       context.textAlign = "center";
@@ -445,11 +727,15 @@ export function createCombatGridController({
       : null;
   }
 
-  function combatantAt(cell) {
-    return combatants().find((item) => {
-      const position = item.position || item.coordinates;
-      return position && Number(position.x) === cell?.x && Number(position.y) === cell?.y;
-    });
+  function updateGridStatus(cell, status) {
+    if (!cell || !status) return;
+    const item = combatantAtCell(combatants(), cell);
+    const parts = [`坐标 ${cell.x}, ${cell.y}`, terrainAt(battleMap(), cell)];
+    if (item) parts.push(`占用者 ${combatantName(combatantId(item))}`);
+    if (state.gridDestination?.x === cell.x && state.gridDestination?.y === cell.y) {
+      parts.push(MOVEMENT_INTENT_DISCLAIMER);
+    }
+    status.textContent = parts.join("；");
   }
 
   function gridPointerMove(event, canvas, tooltip) {
@@ -458,17 +744,8 @@ export function createCombatGridController({
       tooltip.hidden = true;
       return;
     }
-    const item = combatantAt(cell);
-    const map = battleMap();
-    const terrain = (map.blocked_cells || map.blocked || []).some(
-      (candidate) => cellKey(candidate) === cellKey(cell),
-    )
-      ? "不可通行"
-      : (map.difficult_terrain || map.difficult_cells || []).some(
-            (candidate) => cellKey(candidate) === cellKey(cell),
-          )
-        ? "困难地形"
-        : "普通地形";
+    const item = combatantAtCell(combatants(), cell);
+    const terrain = terrainAt(battleMap(), cell);
     tooltip.replaceChildren(
       text(
         "strong",
@@ -499,17 +776,16 @@ export function createCombatGridController({
     }
     const wrap = canvas.parentElement;
     const rect = wrap.getBoundingClientRect();
-    tooltip.style.left = `${Math.min(event.clientX - rect.left + 12, rect.width - 250)}px`;
-    tooltip.style.top = `${Math.min(event.clientY - rect.top + 12, rect.height - 140)}px`;
+    tooltip.style.left = `${Math.max(8, Math.min(event.clientX - rect.left + 12, rect.width - 248))}px`;
+    tooltip.style.top = `${Math.max(8, Math.min(event.clientY - rect.top + 12, rect.height - 138))}px`;
     tooltip.hidden = false;
   }
 
-  async function gridClick(event, canvas) {
-    const cell = gridCell(event, canvas);
-    if (!cell) return;
-    const item = combatantAt(cell);
+  async function selectGridCell(cell, status) {
+    const item = combatantAtCell(combatants(), cell);
     if (item) {
       await focusCombatant(combatantId(item));
+      updateGridStatus(cell, status);
       return;
     }
     if (state.actingActorId) {
@@ -517,11 +793,57 @@ export function createCombatGridController({
       state.selectedTargetId = null;
       renderActionContext();
       drawCombatGrid();
+      updateGridStatus(cell, status);
+    }
+  }
+
+  async function gridClick(event, canvas, status) {
+    const cell = gridCell(event, canvas);
+    if (!cell) return;
+    state.gridCursor = cell;
+    await selectGridCell(cell, status);
+  }
+
+  async function gridKeyDown(event, canvas, status) {
+    const navigationKeys = new Set([
+      "ArrowLeft",
+      "ArrowRight",
+      "ArrowUp",
+      "ArrowDown",
+      "Home",
+      "End",
+    ]);
+    if (navigationKeys.has(event.key)) {
+      event.preventDefault();
+      state.gridCursor = moveGridCursor(
+        state.gridCursor || { x: 0, y: 0 },
+        event.key,
+        mapBounds(battleMap()),
+      );
+      updateGridStatus(state.gridCursor, status);
+      drawCombatGrid();
+      return;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      if (state.gridCursor) await selectGridCell(state.gridCursor, status);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      state.gridDestination = null;
+      state.selectedTargetId = null;
+      renderActionContext();
+      drawCombatGrid();
+      updateGridStatus(state.gridCursor, status);
     }
   }
 
   function initialize() {
     window.addEventListener("resize", () => requestAnimationFrame(drawCombatGrid));
+    gridTexture.addEventListener("load", () => requestAnimationFrame(drawCombatGrid), {
+      once: true,
+    });
   }
 
   return {

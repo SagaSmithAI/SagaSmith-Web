@@ -16,7 +16,7 @@ def test_component_lock_covers_every_current_repository() -> None:
         "sagasmith-dnd",
         "SagaSmith-dnd-content-library",
         "sagasmith-narrative",
-        "SagaSmith-service",
+        "SagaSmith-Web",
         "SagaSmithAI.github.io",
     }
 

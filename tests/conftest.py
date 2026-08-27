@@ -1,3 +1,4 @@
+import hashlib
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,7 @@ from fastapi.testclient import TestClient
 from sagasmith_service.config import Settings
 from sagasmith_service.database import make_engine
 from sagasmith_service.integrations.agent import AgentResult
+from sagasmith_service.integrations.dnd_mcp import DndCombatRender
 from sagasmith_service.main import create_app
 
 
@@ -60,6 +62,20 @@ class FakeDndRuntime:
             "current_module": {"scene": {"id": "scene-1", "title": "Gate"}},
             "combat": None,
         }
+
+    async def render_public_combat(self, **arguments: Any) -> DndCombatRender:
+        self.calls.append(("combat_render_public", arguments))
+        content = b"\x89PNG\r\n\x1a\nparty-public-combat"
+        return DndCombatRender(
+            metadata={
+                "audience_projection": "party_public",
+                "image_checksum": hashlib.sha256(content).hexdigest(),
+                "alt_text": "石厅战斗网格；Aria 当前行动。",
+                "suggested_caption": "Aria 在石厅迎战敌人。",
+            },
+            content=content,
+            media_type="image/png",
+        )
 
     async def get_character_card(self, **arguments: Any) -> dict[str, Any]:
         self.calls.append(("character_card", arguments))

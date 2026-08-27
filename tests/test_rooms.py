@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import hashlib
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -58,6 +60,39 @@ def add_player(client: TestClient, email: str, name: str) -> dict[str, Any]:
     assert approved.status_code == 200
     login(client, email)
     return player
+
+
+def test_combat_render_is_party_public_no_store_and_membership_scoped(
+    client: TestClient, dnd_runtime: FakeDndRuntime
+) -> None:
+    owner = register(client, "room-owner@example.com", "DM")
+    create_campaign(client)
+
+    rendered = client.get("/api/campaigns/campaign-1/room/combat/render")
+
+    expected = b"\x89PNG\r\n\x1a\nparty-public-combat"
+    assert rendered.status_code == 200
+    assert rendered.content == expected
+    assert rendered.headers["content-type"] == "image/png"
+    assert rendered.headers["cache-control"] == "no-store"
+    assert rendered.headers["x-content-type-options"] == "nosniff"
+    assert rendered.headers["etag"] == f'"{hashlib.sha256(expected).hexdigest()}"'
+    assert base64.urlsafe_b64decode(
+        rendered.headers["x-sagasmith-combat-alt"] + "=="
+    ).decode() == "石厅战斗网格；Aria 当前行动。"
+    assert base64.urlsafe_b64decode(
+        rendered.headers["x-sagasmith-combat-caption"] + "=="
+    ).decode() == "Aria 在石厅迎战敌人。"
+    call = next(item for item in dnd_runtime.calls if item[0] == "combat_render_public")
+    assert call[1] == {
+        "campaign_id": "campaign-1",
+        "principal_id": f"user:{owner['id']}",
+    }
+
+    register(client, "room-outsider@example.com", "Outsider")
+    forbidden = client.get("/api/campaigns/campaign-1/room/combat/render")
+    assert forbidden.status_code == 403
+    assert len([item for item in dnd_runtime.calls if item[0] == "combat_render_public"]) == 1
 
 
 def test_room_is_shared_and_agent_receives_sender_visible_timeline(

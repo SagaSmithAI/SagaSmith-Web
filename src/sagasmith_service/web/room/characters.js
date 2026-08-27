@@ -82,7 +82,7 @@ export function createCharacterController({ sendPanelAction, drawCombatGrid }) {
     }
     if (state.gridDestination) {
       chips.push([
-        `移动到：${state.gridDestination.x}, ${state.gridDestination.y}`,
+        `移动意图：${state.gridDestination.x}, ${state.gridDestination.y}（待 MCP 校验）`,
         () => {
           state.gridDestination = null;
           renderActionContext();

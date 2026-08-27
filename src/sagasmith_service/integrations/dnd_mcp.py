@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import json
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import AsyncExitStack
-from typing import Any, Protocol
+from dataclasses import dataclass
+from typing import Any, Protocol, TypeVar
 
 import httpx
 from mcp import ClientSession
@@ -23,6 +27,19 @@ from sagasmith_service.observability import (
     MCP_TRANSPORT_SETUP_SECONDS,
     observe_latency,
 )
+
+_ResultT = TypeVar("_ResultT")
+_MAX_COMBAT_RENDER_BYTES = 10 * 1024 * 1024
+_MAX_COMBAT_RENDER_BASE64_CHARS = 4 * ((_MAX_COMBAT_RENDER_BYTES + 2) // 3)
+_MAX_COMBAT_ALT_CHARS = 240
+_MAX_COMBAT_CAPTION_CHARS = 500
+
+
+@dataclass(frozen=True, slots=True)
+class DndCombatRender:
+    metadata: dict[str, Any]
+    content: bytes
+    media_type: str
 
 
 class DndRuntime(Protocol):
@@ -124,6 +141,10 @@ class DndRuntime(Protocol):
         self, *, campaign_id: str, principal_id: str
     ) -> dict[str, Any]: ...
 
+    async def render_public_combat(
+        self, *, campaign_id: str, principal_id: str
+    ) -> DndCombatRender: ...
+
     async def get_character_card(
         self, *, campaign_id: str, character_id: str, principal_id: str
     ) -> dict[str, Any]: ...
@@ -199,6 +220,52 @@ def _tool_payload(result: Any) -> dict[str, Any]:
                 parsed["auth_context_receipt"] = receipt
             return parsed
     raise RuntimeError("D&D MCP returned no structured receipt")
+
+
+def _combat_render_payload(result: Any) -> DndCombatRender:
+    metadata = _tool_payload(result)
+    images = [
+        item
+        for item in getattr(result, "content", [])
+        if getattr(item, "data", None) is not None and getattr(item, "mimeType", None) is not None
+    ]
+    if len(images) != 1:
+        raise RuntimeError("D&D MCP returned an invalid combat render")
+    image = images[0]
+    media_type = str(image.mimeType).casefold()
+    declared_media_type = str(metadata.get("mime_type") or media_type).casefold()
+    if media_type != "image/png" or declared_media_type != media_type:
+        raise RuntimeError("D&D MCP returned an unsupported combat render")
+    encoded = image.data if isinstance(image.data, str) else str(image.data)
+    if len(encoded) > _MAX_COMBAT_RENDER_BASE64_CHARS:
+        raise RuntimeError("D&D MCP returned an oversized combat render")
+    try:
+        content = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise RuntimeError("D&D MCP returned an invalid combat render") from exc
+    if not content.startswith(b"\x89PNG\r\n\x1a\n") or len(content) > _MAX_COMBAT_RENDER_BYTES:
+        raise RuntimeError("D&D MCP returned an invalid combat render")
+    checksum = hashlib.sha256(content).hexdigest()
+    declared_checksum = str(metadata.get("image_checksum") or "").casefold()
+    if declared_checksum and declared_checksum != checksum:
+        raise RuntimeError("D&D MCP combat render checksum mismatch")
+    metadata["image_checksum"] = checksum
+    if metadata.get("audience_projection") != "party_public":
+        raise RuntimeError("D&D MCP returned a non-public combat render")
+    for field, limit in (
+        ("alt_text", _MAX_COMBAT_ALT_CHARS),
+        ("suggested_caption", _MAX_COMBAT_CAPTION_CHARS),
+    ):
+        value = metadata.get(field)
+        if not isinstance(value, str):
+            metadata.pop(field, None)
+            continue
+        normalized = " ".join(value.split())[:limit].strip()
+        if normalized:
+            metadata[field] = normalized
+        else:
+            metadata.pop(field, None)
+    return DndCombatRender(metadata=metadata, content=content, media_type=media_type)
 
 
 def _runtime_error(error: BaseException) -> RuntimeError:
@@ -297,7 +364,8 @@ class StreamableHttpDndRuntime:
         *,
         exposure_principal: str,
         campaign_id: str | None,
-    ) -> dict[str, Any]:
+        result_parser: Callable[[Any], _ResultT] = _tool_payload,
+    ) -> _ResultT:
         try:
             async with AsyncExitStack() as stack:
                 with observe_latency(
@@ -323,7 +391,11 @@ class StreamableHttpDndRuntime:
                 )
                 authorization_epoch = 0
 
-                async def call(tool_name: str, tool_arguments: dict[str, Any]):
+                async def call(
+                    tool_name: str,
+                    tool_arguments: dict[str, Any],
+                    parser: Callable[[Any], Any] = _tool_payload,
+                ):
                     nonlocal authorization_epoch
                     metadata = None
                     if self.auth_context_secret:
@@ -342,8 +414,13 @@ class StreamableHttpDndRuntime:
                         arguments=tool_arguments,
                         **({"meta": metadata} if metadata is not None else {}),
                     )
-                    payload = _tool_payload(result)
-                    authorization_epoch = exposure_revision(payload, authorization_epoch)
+                    payload = parser(result)
+                    if isinstance(payload, DndCombatRender):
+                        authorization_epoch = exposure_revision(
+                            payload.metadata, authorization_epoch
+                        )
+                    else:
+                        authorization_epoch = exposure_revision(payload, authorization_epoch)
                     return payload
 
                 with observe_latency(
@@ -397,7 +474,7 @@ class StreamableHttpDndRuntime:
                     operation_class="request",
                     transport="streamable_http",
                 ):
-                    return await call(name, arguments)
+                    return await call(name, arguments, result_parser)
         except Exception as exc:
             raise _runtime_error(exc) from exc
 
@@ -627,6 +704,22 @@ class StreamableHttpDndRuntime:
             "current_module": current_module,
             "combat": combat,
         }
+
+    async def render_public_combat(self, **arguments: Any) -> DndCombatRender:
+        campaign_id = arguments["campaign_id"]
+        principal_id = arguments["principal_id"]
+        return await self._call(
+            "combat_query",
+            {
+                "campaign_id": campaign_id,
+                "view": "render",
+                "payload": {"audience_projection": "party_public"},
+                "principal_id": principal_id,
+            },
+            exposure_principal=principal_id,
+            campaign_id=campaign_id,
+            result_parser=_combat_render_payload,
+        )
 
     async def get_character_card(self, **arguments: Any) -> dict[str, Any]:
         campaign_id = arguments["campaign_id"]
