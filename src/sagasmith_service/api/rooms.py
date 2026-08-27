@@ -15,9 +15,16 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
-from sagasmith_service.api.dependencies import CurrentUser, DbSession
+from sagasmith_service.api.dependencies import (
+    AsyncCurrentUser,
+    AsyncDbSession,
+    CurrentUser,
+    DbSession,
+)
 from sagasmith_service.integrations.agent import AgentRuntime
 from sagasmith_service.models import (
     ActorBindingProjection,
@@ -162,12 +169,20 @@ def _room(session: Session, campaign_id: str) -> CampaignRoom:
 def _message_visible(
     message: CampaignMessage, membership: CampaignMembershipProjection, user_id: str
 ) -> bool:
+    return _message_visible_for_role(message, membership.role, user_id)
+
+
+def _message_visible_for_role(
+    message: CampaignMessage,
+    membership_role: str,
+    user_id: str,
+) -> bool:
     if message.audience == "public":
         return True
     if message.sender_user_id == user_id:
         return True
     if message.audience == "dm":
-        return membership.role in {"owner", "dm"}
+        return membership_role in {"owner", "dm"}
     return user_id in set(message.audience_user_ids or [])
 
 
@@ -300,8 +315,9 @@ class _RoomProjectionContext:
         *,
         campaign_id: str,
         trigger: CampaignMessage,
+        campaign: CampaignProjection | None = None,
     ) -> _RoomProjectionContext:
-        campaign = session.get(CampaignProjection, campaign_id)
+        campaign = campaign or session.get(CampaignProjection, campaign_id)
         if campaign is None:
             raise ValueError("campaign projection not found")
         members = session.scalars(
@@ -786,7 +802,7 @@ def _append_message(
 def _recent_context(
     session: Session,
     room: CampaignRoom,
-    membership: CampaignMembershipProjection,
+    membership_role: str,
     user_id: str,
     *,
     limit: int = 40,
@@ -797,7 +813,11 @@ def _recent_context(
         .order_by(CampaignMessage.sequence.desc())
         .limit(limit * 3)
     ).all()
-    visible = [item for item in reversed(candidates) if _message_visible(item, membership, user_id)]
+    visible = [
+        item
+        for item in reversed(candidates)
+        if _message_visible_for_role(item, membership_role, user_id)
+    ]
     return [
         {
             "sequence": item.sequence,
@@ -995,28 +1015,167 @@ def _project_turn_messages(
     return projected
 
 
-async def _run_agent(
+@dataclass(frozen=True)
+class _MessagePreparation:
+    message_id: str
+    response: dict[str, Any] | None
+    run_agent: bool
+    membership_role: str
+
+
+@dataclass(frozen=True)
+class _AgentPreparation:
+    campaign: CampaignProjection
+    campaign_system_id: str
+    domain_runtime: Any
+    principal_id: str
+    host_role: str
+    viewer_role: str
+    reservation_id: str
+    reservation_quantity: Decimal
+    run_id: str
+    room_id: str
+    trigger_id: str
+    trigger_content: str
+    trigger_payload: dict[str, Any]
+    sender_display_name: str
+    session_id: str
+    identity_context: dict[str, Any]
+    room_context: list[dict[str, Any]]
+
+
+def _prepare_message_transaction(
+    session: Session,
+    *,
+    campaign_id: str,
+    payload: CampaignMessageCreate,
+    user_id: str,
+    user_display_name: str,
+    idempotency_key: str,
+) -> _MessagePreparation:
+    membership = _membership(session, campaign_id, user_id)
+    room = _room(session, campaign_id)
+    existing = session.scalar(
+        select(CampaignMessage).where(
+            CampaignMessage.room_id == room.id,
+            CampaignMessage.client_message_id == idempotency_key,
+        )
+    )
+    if existing is not None:
+        if (
+            existing.sender_user_id != user_id
+            or existing.content != payload.content
+            or existing.message_type != payload.mode
+            or existing.audience != payload.audience
+            or list(existing.audience_user_ids or []) != payload.audience_user_ids
+            or existing.reply_to_message_id != payload.reply_to_message_id
+            or dict(existing.structured_payload or {}) != payload.structured_payload
+        ):
+            raise HTTPException(status.HTTP_409_CONFLICT, "idempotency key payload mismatch")
+        assistants = session.scalars(
+            select(CampaignMessage)
+            .where(CampaignMessage.trigger_message_id == existing.id)
+            .order_by(CampaignMessage.sequence)
+        ).all()
+        visible_assistant = next(
+            (item for item in assistants if _message_visible(item, membership, user_id)),
+            None,
+        )
+        response = {
+            "message": _message_view(existing, user_id),
+            "agent_message": (
+                _message_view(visible_assistant, user_id)
+                if visible_assistant is not None
+                else None
+            ),
+        }
+        session.commit()
+        return _MessagePreparation(existing.id, response, False, membership.role)
+    if payload.mode == "narration" and membership.role not in {"owner", "dm"}:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "DM role required for narration")
+    if payload.audience == "private":
+        active_users = set(
+            session.scalars(
+                select(CampaignMembershipProjection.user_id).where(
+                    CampaignMembershipProjection.campaign_id == campaign_id,
+                    CampaignMembershipProjection.status == "active",
+                    CampaignMembershipProjection.user_id.in_(payload.audience_user_ids),
+                )
+            ).all()
+        )
+        if active_users != set(payload.audience_user_ids):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, "private audience is invalid"
+            )
+    if payload.reply_to_message_id:
+        parent = session.get(CampaignMessage, payload.reply_to_message_id)
+        if parent is None or parent.room_id != room.id or not _message_visible(
+            parent, membership, user_id
+        ):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "reply target not found")
+    if payload.mode == "action":
+        _expire_suggestions(session, room, target_user_id=user_id)
+    message = _append_message(
+        session,
+        room,
+        campaign_id=campaign_id,
+        sender_type="user",
+        sender_user_id=user_id,
+        sender_display_name=user_display_name,
+        message_type=payload.mode,
+        audience=payload.audience,
+        audience_user_ids=payload.audience_user_ids,
+        content=payload.content,
+        client_message_id=idempotency_key,
+        structured_payload=payload.structured_payload,
+        reply_to_message_id=payload.reply_to_message_id,
+        status_value="processing" if payload.mode == "action" else "completed",
+    )
+    session.add(
+        AuditEvent(
+            actor_user_id=user_id,
+            action="campaign.room.message.create",
+            subject_type="campaign_message",
+            subject_id=message.id,
+            details={"campaign_id": campaign_id, "mode": payload.mode},
+        )
+    )
+    session.commit()
+    response = None
+    if payload.mode != "action":
+        response = {"message": _message_view(message, user_id), "agent_message": None}
+    return _MessagePreparation(
+        message.id,
+        response,
+        payload.mode == "action",
+        membership.role,
+    )
+
+
+def _prepare_agent_transaction(
+    session: Session,
     *,
     request: Request,
-    session: Session,
     campaign_id: str,
-    room: CampaignRoom,
-    membership: CampaignMembershipProjection,
-    user: User,
-    trigger: CampaignMessage,
+    trigger_id: str,
+    user_id: str,
+    user_principal_id: str,
+    viewer_role: str,
     idempotency_key: str,
-) -> list[CampaignMessage]:
+) -> _AgentPreparation:
     campaign = session.get(CampaignProjection, campaign_id)
-    if campaign is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "campaign not found")
-    principal_id = user.principal_id
-    host_role = membership.role
-    quota_user_id = user.id
-    conversation_user_id = user.id
+    trigger = session.get(CampaignMessage, trigger_id)
+    if campaign is None or trigger is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "campaign action context not found")
+    room = _room(session, campaign_id)
+    principal_id = user_principal_id
+    host_role = viewer_role
+    quota_user_id = user_id
+    conversation_user_id = user_id
     identity_assignment_id: str | None = None
+    identity_id: str | None = None
     identity_context: dict[str, Any] = {}
     sender_display_name = "SagaSmith"
-    session_id: str | None = None
     if room.host_identity_assignment_id:
         assignment = session.scalar(
             select(IdentityCampaignAssignment).where(
@@ -1056,6 +1215,7 @@ async def _run_agent(
         quota_user_id = assignment.quota_payer_user_id
         conversation_user_id = assignment.invited_by_user_id
         identity_assignment_id = assignment.id
+        identity_id = identity.id
         sender_display_name = identity.name
         identity_context = {
             "identity": {
@@ -1084,14 +1244,9 @@ async def _run_agent(
     context_membership = (
         _membership(session, campaign_id, conversation_user_id)
         if identity_assignment_id is not None
-        else membership
+        else None
     )
-    context_user_id = conversation_user_id if identity_assignment_id is not None else user.id
-    session_id = (
-        f"{campaign_id}:agent:{identity.id}:{conversation.id}"
-        if identity_assignment_id is not None
-        else f"{campaign_id}:{user.id}:{conversation.id}"
-    )
+    context_user_id = conversation_user_id if identity_assignment_id is not None else user_id
     reservation_quantity = Decimal(request.app.state.settings.agent_reservation_tokens)
     try:
         reservation = reserve(
@@ -1100,7 +1255,7 @@ async def _run_agent(
             campaign_id=campaign_id,
             metric="llm_tokens",
             quantity=reservation_quantity,
-            idempotency_key=f"room-agent-reserve:{user.id}:{idempotency_key}",
+            idempotency_key=f"room-agent-reserve:{user_id}:{idempotency_key}",
             ttl_seconds=300,
         )
     except QuotaExceededError as exc:
@@ -1114,103 +1269,152 @@ async def _run_agent(
         )
         session.commit()
         raise HTTPException(status.HTTP_402_PAYMENT_REQUIRED, str(exc)) from exc
-
     run = AgentRun(
         conversation_id=conversation.id,
         trigger_message_id=trigger.id,
         campaign_id=campaign_id,
-        user_id=user.id,
+        user_id=user_id,
         idempotency_key=f"room:{idempotency_key}",
         request_hash=hashlib.sha256(trigger.content.encode()).hexdigest(),
         user_content=trigger.content,
     )
     session.add(run)
     session.flush()
+    room_context = _recent_context(
+        session,
+        room,
+        context_membership.role if context_membership is not None else viewer_role,
+        context_user_id,
+    )
     _emit(session, room, "agent.started", {"message_id": trigger.id, "run_id": run.id})
+    domain_runtime = _campaign_runtime(request, session, campaign_id)
+    session.commit()
+    session_id = (
+        f"{campaign_id}:agent:{identity_id}:{conversation.id}"
+        if identity_assignment_id is not None
+        else f"{campaign_id}:{user_id}:{conversation.id}"
+    )
+    return _AgentPreparation(
+        campaign=campaign,
+        campaign_system_id=campaign.system_id,
+        domain_runtime=domain_runtime,
+        principal_id=principal_id,
+        host_role=host_role,
+        viewer_role=viewer_role,
+        reservation_id=reservation.id,
+        reservation_quantity=reservation_quantity,
+        run_id=run.id,
+        room_id=room.id,
+        trigger_id=trigger.id,
+        trigger_content=trigger.content,
+        trigger_payload=dict(trigger.structured_payload or {}),
+        sender_display_name=sender_display_name,
+        session_id=session_id,
+        identity_context=identity_context,
+        room_context=room_context,
+    )
+
+
+def _record_agent_unavailable(
+    session: Session,
+    *,
+    campaign_id: str,
+    preparation: _AgentPreparation,
+) -> None:
+    room = _room(session, campaign_id)
+    trigger = session.get(CampaignMessage, preparation.trigger_id)
+    run = session.get(AgentRun, preparation.run_id)
+    if trigger is None or run is None:
+        raise RuntimeError("persisted Agent run is unavailable")
+    release(session, preparation.reservation_id)
+    trigger.status = "failed"
+    trigger.completed_at = now_utc()
+    run.status = "failed"
+    run.error_code = "agent_unavailable"
+    run.completed_at = now_utc()
+    _close_run_activities(session, room, run_id=run.id, state="failed")
+    _emit(
+        session,
+        room,
+        "agent.failed",
+        {"message_id": trigger.id, "run_id": run.id, "error_code": run.error_code},
+    )
     session.commit()
 
-    runtime: AgentRuntime = request.app.state.agent_runtime
+
+async def _run_agent(
+    *,
+    request: Request,
+    session: AsyncSession,
+    campaign_id: str,
+    trigger_id: str,
+    user: User,
+    viewer_role: str,
+    idempotency_key: str,
+) -> dict[str, Any]:
+    preparation = await session.run_sync(
+        lambda sync_session: _prepare_agent_transaction(
+            sync_session,
+            request=request,
+            campaign_id=campaign_id,
+            trigger_id=trigger_id,
+            user_id=user.id,
+            user_principal_id=user.principal_id,
+            viewer_role=viewer_role,
+            idempotency_key=idempotency_key,
+        )
+    )
     settings = request.app.state.settings
     activity_callback = (
         f"{settings.service_internal_url.rstrip('/')}/api/campaigns/{campaign_id}"
-        f"/room/internal-activity/{run.id}"
+        f"/room/internal-activity/{preparation.run_id}"
     )
+    runtime: AgentRuntime = request.app.state.agent_runtime
     try:
         result = await runtime.complete(
-            session_id=session_id,
-            content=trigger.content,
+            session_id=preparation.session_id,
+            content=preparation.trigger_content,
             context={
                 "campaign_id": campaign_id,
-                "system_id": campaign.system_id,
-                "principal_id": principal_id,
-                "campaign_role": host_role,
-                "room_id": room.id,
-                "room_context": _recent_context(
-                    session,
-                    room,
-                    context_membership,
-                    context_user_id,
-                ),
-                "action_context": dict(trigger.structured_payload or {}),
-                "run_id": run.id,
-                "trigger_message_id": trigger.id,
+                "system_id": preparation.campaign_system_id,
+                "principal_id": preparation.principal_id,
+                "campaign_role": preparation.host_role,
+                "room_id": preparation.room_id,
+                "room_context": preparation.room_context,
+                "action_context": preparation.trigger_payload,
+                "run_id": preparation.run_id,
+                "trigger_message_id": preparation.trigger_id,
                 "response_contract": {
                     "terminal": room_turn_contract(),
                     "activity": room_activity_contract(),
                     "activity_callback": {
                         "url": activity_callback,
-                        "token": _activity_token(settings.session_secret, campaign_id, run.id),
+                        "token": _activity_token(
+                            settings.session_secret,
+                            campaign_id,
+                            preparation.run_id,
+                        ),
                     },
                 },
-                **identity_context,
+                **preparation.identity_context,
             },
         )
     except RuntimeError as exc:
-        # The Agent may have emitted room activity through the callback while
-        # this request was awaiting completion. Reacquire the room row and its
-        # authoritative counter before allocating another event sequence.
-        session.refresh(room, attribute_names=["next_event_sequence"], with_for_update=True)
-        release(session, reservation.id)
-        trigger.status = "failed"
-        trigger.completed_at = now_utc()
-        run.status = "failed"
-        run.error_code = "agent_unavailable"
-        run.completed_at = now_utc()
-        _close_run_activities(session, room, run_id=run.id, state="failed")
-        _emit(
-            session,
-            room,
-            "agent.failed",
-            {"message_id": trigger.id, "run_id": run.id, "error_code": run.error_code},
+        await session.run_sync(
+            lambda sync_session: _record_agent_unavailable(
+                sync_session,
+                campaign_id=campaign_id,
+                preparation=preparation,
+            )
         )
-        session.commit()
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
-
-    # Activity callbacks use independent transactions, so the identity-mapped
-    # room object can be stale even though every callback held the row lock.
-    session.refresh(room, attribute_names=["next_event_sequence"], with_for_update=True)
-
-    actual = min(result.total_tokens, int(reservation_quantity))
-    settle(
-        session,
-        reservation_id=reservation.id,
-        quantity=Decimal(actual),
-        idempotency_key=f"room-agent-settle:{user.id}:{idempotency_key}",
-        unit="tokens",
-        provider="nanobot",
-        model=result.model,
-        request_id=result.request_id,
-    )
-    run.upstream_request_id = result.request_id
-    run.model = result.model
-    run.prompt_tokens = result.prompt_tokens
-    run.completion_tokens = result.completion_tokens
 
     revision: int | None = None
     phase: str | None = None
     try:
-        runtime_state = await _campaign_runtime(request, session, campaign_id).get_campaign(
-            campaign_id=campaign_id, principal_id=principal_id
+        runtime_state = await preparation.domain_runtime.get_campaign(
+            campaign_id=campaign_id,
+            principal_id=preparation.principal_id,
         )
         state = runtime_state.get("result", runtime_state)
         revision = int(state.get("revision") or state.get("campaign_revision") or 0) or None
@@ -1220,21 +1424,29 @@ async def _run_agent(
             or state.get("game_phase")
         )
         phase = str(phase_value) if phase_value else None
-        campaign = session.get(CampaignProjection, campaign_id)
-        if campaign is not None and revision is not None:
-            campaign.mcp_revision = revision
     except RuntimeError:
         pass
+
+    actual = min(result.total_tokens, int(preparation.reservation_quantity))
     try:
         if result.structured_output is None:
             raise ValueError("Agent returned no structured room output")
         submission = RoomTurnSubmission.model_validate(result.structured_output)
-        projection_context = _RoomProjectionContext.load(
-            request,
-            session,
-            campaign_id=campaign_id,
-            trigger=trigger,
+        projection_context = await session.run_sync(
+            lambda sync_session: _RoomProjectionContext.load(
+                request,
+                sync_session,
+                campaign_id=campaign_id,
+                trigger=cast(
+                    CampaignMessage,
+                    sync_session.get(CampaignMessage, preparation.trigger_id),
+                ),
+                campaign=preparation.campaign,
+            )
         )
+        # End the read transaction before any MCP projection await. With
+        # expire_on_commit=False the immutable request snapshot remains usable.
+        await session.commit()
         audiences, resolution_index, actor_presentation_index = await _projection_indexes(
             projection_context,
             submission=submission,
@@ -1242,10 +1454,10 @@ async def _run_agent(
         projected = _project_turn_messages(
             context=projection_context,
             submission=submission,
-            run_id=run.id,
-            host_role=host_role,
+            run_id=preparation.run_id,
+            host_role=preparation.host_role,
             user=user,
-            secret=request.app.state.settings.session_secret,
+            secret=settings.session_secret,
             revision=revision,
             phase=phase,
             audiences=audiences,
@@ -1253,95 +1465,162 @@ async def _run_agent(
             actor_presentation_index=actor_presentation_index,
         )
     except (ValidationError, ValueError) as exc:
-        trigger.status = "failed"
-        trigger.completed_at = now_utc()
-        run.status = "failed"
-        run.error_code = "agent_invalid_output"
-        run.assistant_content = result.content
-        run.completed_at = now_utc()
-        _close_run_activities(session, room, run_id=run.id, state="failed")
-        _emit(
-            session,
-            room,
-            "agent.failed",
-            {"message_id": trigger.id, "run_id": run.id, "error_code": run.error_code},
-        )
-        session.add(
-            AuditEvent(
-                actor_user_id=user.id,
-                action="campaign.room.agent.invalid_output",
-                subject_type="campaign_message",
-                subject_id=trigger.id,
-                details={"campaign_id": campaign_id, "run_id": run.id},
+        if session.in_transaction():
+            await session.rollback()
+
+        def record_invalid(sync_session: Session) -> None:
+            room = _room(sync_session, campaign_id)
+            trigger = sync_session.get(CampaignMessage, preparation.trigger_id)
+            run = sync_session.get(AgentRun, preparation.run_id)
+            if trigger is None or run is None:
+                raise RuntimeError("persisted Agent run is unavailable")
+            settle(
+                sync_session,
+                reservation_id=preparation.reservation_id,
+                quantity=Decimal(actual),
+                idempotency_key=f"room-agent-settle:{user.id}:{idempotency_key}",
+                unit="tokens",
+                provider="nanobot",
+                model=result.model,
+                request_id=result.request_id,
             )
-        )
-        session.commit()
+            campaign = sync_session.get(CampaignProjection, campaign_id)
+            if campaign is not None and revision is not None:
+                campaign.mcp_revision = revision
+            trigger.status = "failed"
+            trigger.completed_at = now_utc()
+            run.status = "failed"
+            run.error_code = "agent_invalid_output"
+            run.assistant_content = result.content
+            run.upstream_request_id = result.request_id
+            run.model = result.model
+            run.prompt_tokens = result.prompt_tokens
+            run.completion_tokens = result.completion_tokens
+            run.completed_at = now_utc()
+            _close_run_activities(sync_session, room, run_id=run.id, state="failed")
+            _emit(
+                sync_session,
+                room,
+                "agent.failed",
+                {"message_id": trigger.id, "run_id": run.id, "error_code": run.error_code},
+            )
+            sync_session.add(
+                AuditEvent(
+                    actor_user_id=user.id,
+                    action="campaign.room.agent.invalid_output",
+                    subject_type="campaign_message",
+                    subject_id=trigger.id,
+                    details={"campaign_id": campaign_id, "run_id": run.id},
+                )
+            )
+            sync_session.commit()
+
+        await session.run_sync(record_invalid)
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY,
             "Agent returned an invalid structured room response",
         ) from exc
 
-    assistants: list[CampaignMessage] = []
-    for output in projected:
-        assistant = _append_message(
-            session,
-            room,
-            campaign_id=campaign_id,
-            sender_type="agent",
-            sender_display_name=sender_display_name,
-            message_type="presentation",
-            audience=output["audience"],
-            audience_user_ids=output["audience_user_ids"],
-            content=output["content"],
-            client_message_id=f"agent:{run.id}:{output['output_id']}",
-            trigger_message_id=trigger.id,
-            structured_payload=output["structured_payload"],
-            mcp_revision=revision,
+    def complete(sync_session: Session) -> dict[str, Any]:
+        room = _room(sync_session, campaign_id)
+        trigger = sync_session.get(CampaignMessage, preparation.trigger_id)
+        run = sync_session.get(AgentRun, preparation.run_id)
+        if trigger is None or run is None:
+            raise RuntimeError("persisted Agent run is unavailable")
+        settle(
+            sync_session,
+            reservation_id=preparation.reservation_id,
+            quantity=Decimal(actual),
+            idempotency_key=f"room-agent-settle:{user.id}:{idempotency_key}",
+            unit="tokens",
+            provider="nanobot",
+            model=result.model,
+            request_id=result.request_id,
         )
-        assistants.append(assistant)
-
-    run.assistant_content = "\n\n".join(item.content for item in assistants)
-    run.status = "completed"
-    run.completed_at = now_utc()
-    trigger.status = "completed"
-    trigger.completed_at = now_utc()
-    _close_run_activities(session, room, run_id=run.id, state="superseded")
-    _emit(
-        session,
-        room,
-        "agent.completed",
-        {
-            "message_id": trigger.id,
-            "agent_message_ids": [item.id for item in assistants],
-            "run_id": run.id,
-        },
-    )
-    _emit(
-        session,
-        room,
-        "state.changed",
-        {"reason": "agent.completed", "mcp_revision": revision},
-    )
-    session.add(
-        AuditEvent(
-            actor_user_id=user.id,
-            action="campaign.room.agent.complete",
-            subject_type="campaign_message",
-            subject_id=trigger.id,
-            details={
-                "campaign_id": campaign_id,
-                "tokens": actual,
+        campaign = sync_session.get(CampaignProjection, campaign_id)
+        if campaign is not None and revision is not None:
+            campaign.mcp_revision = revision
+        run.upstream_request_id = result.request_id
+        run.model = result.model
+        run.prompt_tokens = result.prompt_tokens
+        run.completion_tokens = result.completion_tokens
+        assistants = [
+            _append_message(
+                sync_session,
+                room,
+                campaign_id=campaign_id,
+                sender_type="agent",
+                sender_display_name=preparation.sender_display_name,
+                message_type="presentation",
+                audience=output["audience"],
+                audience_user_ids=output["audience_user_ids"],
+                content=output["content"],
+                client_message_id=f"agent:{run.id}:{output['output_id']}",
+                trigger_message_id=trigger.id,
+                structured_payload=output["structured_payload"],
+                mcp_revision=revision,
+            )
+            for output in projected
+        ]
+        run.assistant_content = "\n\n".join(item.content for item in assistants)
+        run.status = "completed"
+        run.completed_at = now_utc()
+        trigger.status = "completed"
+        trigger.completed_at = now_utc()
+        _close_run_activities(sync_session, room, run_id=run.id, state="superseded")
+        _emit(
+            sync_session,
+            room,
+            "agent.completed",
+            {
+                "message_id": trigger.id,
+                "agent_message_ids": [item.id for item in assistants],
                 "run_id": run.id,
-                "auth_context_receipts": [
-                    dict(receipt["auth_context_receipt"])
-                    for receipt in result.tool_receipts
-                    if isinstance(receipt.get("auth_context_receipt"), dict)
-                ],
             },
         )
-    )
-    session.commit()
-    return assistants
+        _emit(
+            sync_session,
+            room,
+            "state.changed",
+            {"reason": "agent.completed", "mcp_revision": revision},
+        )
+        sync_session.add(
+            AuditEvent(
+                actor_user_id=user.id,
+                action="campaign.room.agent.complete",
+                subject_type="campaign_message",
+                subject_id=trigger.id,
+                details={
+                    "campaign_id": campaign_id,
+                    "tokens": actual,
+                    "run_id": run.id,
+                    "auth_context_receipts": [
+                        dict(receipt["auth_context_receipt"])
+                        for receipt in result.tool_receipts
+                        if isinstance(receipt.get("auth_context_receipt"), dict)
+                    ],
+                },
+            )
+        )
+        sync_session.commit()
+        visible_assistant = next(
+            (
+                item
+                for item in assistants
+                if _message_visible_for_role(item, preparation.viewer_role, user.id)
+            ),
+            None,
+        )
+        return {
+            "message": _message_view(trigger, user.id),
+            "agent_message": (
+                _message_view(visible_assistant, user.id)
+                if visible_assistant is not None
+                else None
+            ),
+        }
+
+    return await session.run_sync(complete)
 
 
 async def _post_message(
@@ -1350,124 +1629,42 @@ async def _post_message(
     payload: CampaignMessageCreate,
     request: Request,
     user: User,
-    session: Session,
+    session: AsyncSession,
     idempotency_key: str,
 ) -> dict[str, Any]:
-    membership = _membership(session, campaign_id, user.id)
-    room = _room(session, campaign_id)
-    existing = session.scalar(
-        select(CampaignMessage).where(
-            CampaignMessage.room_id == room.id,
-            CampaignMessage.client_message_id == idempotency_key,
-        )
-    )
-    if existing is not None:
-        if (
-            existing.sender_user_id != user.id
-            or existing.content != payload.content
-            or existing.message_type != payload.mode
-            or existing.audience != payload.audience
-            or list(existing.audience_user_ids or []) != payload.audience_user_ids
-            or existing.reply_to_message_id != payload.reply_to_message_id
-            or dict(existing.structured_payload or {}) != payload.structured_payload
-        ):
-            raise HTTPException(status.HTTP_409_CONFLICT, "idempotency key payload mismatch")
-        response: dict[str, Any] = {
-            "message": _message_view(existing, user.id),
-            "agent_message": None,
-        }
-        assistants = session.scalars(
-            select(CampaignMessage)
-            .where(CampaignMessage.trigger_message_id == existing.id)
-            .order_by(CampaignMessage.sequence)
-        ).all()
-        visible_assistant = next(
-            (
-                item
-                for item in assistants
-                if _message_visible(item, membership, user.id)
-            ),
-            None,
-        )
-        if visible_assistant is not None:
-            response["agent_message"] = _message_view(visible_assistant, user.id)
-        return response
-    if payload.mode == "narration" and membership.role not in {"owner", "dm"}:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "DM role required for narration")
-    if payload.audience == "private":
-        active_users = set(
-            session.scalars(
-                select(CampaignMembershipProjection.user_id).where(
-                    CampaignMembershipProjection.campaign_id == campaign_id,
-                    CampaignMembershipProjection.status == "active",
-                    CampaignMembershipProjection.user_id.in_(payload.audience_user_ids),
-                )
-            ).all()
-        )
-        if active_users != set(payload.audience_user_ids):
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_CONTENT, "private audience is invalid"
+    async def prepare_once() -> _MessagePreparation:
+        return await session.run_sync(
+            lambda sync_session: _prepare_message_transaction(
+                sync_session,
+                campaign_id=campaign_id,
+                payload=payload,
+                user_id=user.id,
+                user_display_name=user.display_name,
+                idempotency_key=idempotency_key,
             )
-    if payload.reply_to_message_id:
-        parent = session.get(CampaignMessage, payload.reply_to_message_id)
-        if parent is None or parent.room_id != room.id or not _message_visible(
-            parent, membership, user.id
-        ):
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "reply target not found")
+        )
 
-    if payload.mode == "action":
-        _expire_suggestions(session, room, target_user_id=user.id)
-
-    message = _append_message(
-        session,
-        room,
+    try:
+        preparation = await prepare_once()
+    except IntegrityError:
+        # A concurrent retry or SQLite writer can race after the initial
+        # idempotency read. Re-read once from a clean transaction so the
+        # unique key remains the authority and a stale room sequence is retried.
+        await session.rollback()
+        preparation = await prepare_once()
+    if preparation.response is not None:
+        return preparation.response
+    if not preparation.run_agent:
+        raise RuntimeError("room message preparation returned no response")
+    return await _run_agent(
+        request=request,
+        session=session,
         campaign_id=campaign_id,
-        sender_type="user",
-        sender_user_id=user.id,
-        sender_display_name=user.display_name,
-        message_type=payload.mode,
-        audience=payload.audience,
-        audience_user_ids=payload.audience_user_ids,
-        content=payload.content,
-        client_message_id=idempotency_key,
-        structured_payload=payload.structured_payload,
-        reply_to_message_id=payload.reply_to_message_id,
-        status_value="processing" if payload.mode == "action" else "completed",
+        trigger_id=preparation.message_id,
+        user=user,
+        viewer_role=preparation.membership_role,
+        idempotency_key=idempotency_key,
     )
-    session.add(
-        AuditEvent(
-            actor_user_id=user.id,
-            action="campaign.room.message.create",
-            subject_type="campaign_message",
-            subject_id=message.id,
-            details={"campaign_id": campaign_id, "mode": payload.mode},
-        )
-    )
-    session.commit()
-    assistants: list[CampaignMessage] = []
-    if payload.mode == "action":
-        assistants = await _run_agent(
-            request=request,
-            session=session,
-            campaign_id=campaign_id,
-            room=room,
-            membership=membership,
-            user=user,
-            trigger=message,
-            idempotency_key=idempotency_key,
-        )
-    visible_assistant = next(
-        (item for item in assistants if _message_visible(item, membership, user.id)),
-        None,
-    )
-    return {
-        "message": _message_view(message, user.id),
-        "agent_message": (
-            _message_view(visible_assistant, user.id)
-            if visible_assistant is not None
-            else None
-        ),
-    }
 
 
 @router.post("/internal-activity/{run_id}")
@@ -1657,8 +1854,8 @@ async def post_message(
     campaign_id: str,
     payload: CampaignMessageCreate,
     request: Request,
-    user: CurrentUser,
-    session: DbSession,
+    user: AsyncCurrentUser,
+    session: AsyncDbSession,
     idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=8, max_length=160)],
 ) -> dict[str, Any]:
     return await _post_message(
@@ -1865,10 +2062,9 @@ async def panel_action(
     request: Request,
     user: CurrentUser,
     session: DbSession,
+    async_session: AsyncDbSession,
     idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=8, max_length=160)],
 ) -> dict[str, Any]:
-    membership = _membership(session, campaign_id, user.id)
-    room = _room(session, campaign_id)
     if payload.action.endswith(".intent"):
         intent = str(payload.payload.get("intent") or "").strip()
         if not intent:
@@ -1885,9 +2081,11 @@ async def panel_action(
             ),
             request=request,
             user=user,
-            session=session,
+            session=async_session,
             idempotency_key=idempotency_key,
         )
+    membership = _membership(session, campaign_id, user.id)
+    room = _room(session, campaign_id)
     existing = session.scalar(
         select(CampaignMessage).where(
             CampaignMessage.room_id == room.id,

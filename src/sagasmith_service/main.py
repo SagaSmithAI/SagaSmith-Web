@@ -17,6 +17,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.engine import Engine
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from sagasmith_service import __version__
 from sagasmith_service.api.admin import router as admin_router
@@ -35,7 +36,13 @@ from sagasmith_service.api.rooms import router as rooms_router
 from sagasmith_service.api.usage import router as usage_router
 from sagasmith_service.audit import bind_request_id, reset_request_id
 from sagasmith_service.config import Settings, get_settings
-from sagasmith_service.database import Base, make_engine, make_session_factory
+from sagasmith_service.database import (
+    Base,
+    make_async_engine,
+    make_async_session_factory,
+    make_engine,
+    make_session_factory,
+)
 from sagasmith_service.integrations.agent import AgentRuntime, HttpAgentRuntime
 from sagasmith_service.integrations.coc_mcp import StreamableHttpCocRuntime
 from sagasmith_service.integrations.dnd_mcp import DndRuntime, StreamableHttpDndRuntime
@@ -74,10 +81,15 @@ def create_app(
     rate_limiter: RateLimiter | None = None,
     coc_runtime: object | None = None,
     narrative_runtime: object | None = None,
+    async_engine: AsyncEngine | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
     engine = engine or make_engine(settings.database_url)
     install_database_observability(engine)
+    async_engine = async_engine or make_async_engine(
+        engine.url.render_as_string(hide_password=False)
+    )
+    install_database_observability(async_engine.sync_engine)
     if settings.env in {"development", "test"}:
         Base.metadata.create_all(engine)
     managed_http_clients: dict[str, httpx.AsyncClient] = {}
@@ -103,6 +115,10 @@ def create_app(
                         name,
                         type(result).__name__,
                     )
+            try:
+                await async_engine.dispose()
+            except BaseException:
+                logger.exception("async database engine shutdown failed")
 
     app = FastAPI(
         title="SagaSmith Service",
@@ -114,6 +130,8 @@ def create_app(
     app.state.settings = settings
     app.state.engine = engine
     app.state.session_factory = make_session_factory(engine)
+    app.state.async_engine = async_engine
+    app.state.async_session_factory = make_async_session_factory(async_engine)
     auth_context_secret = settings.auth_context_secret.get_secret_value()
     app.state.dnd_runtime = dnd_runtime or StreamableHttpDndRuntime(
         settings.dnd_mcp_url,

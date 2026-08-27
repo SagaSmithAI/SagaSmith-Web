@@ -7,7 +7,9 @@ four paths where database work and awaited upstream work can overlap:
 | Operation class | Route shape | Current execution model |
 |---|---|---|
 | `agent_message` | `POST /api/campaigns/{id}/agent/conversations/{id}/messages` | async handler, sync session |
-| `room_action` | `POST /api/campaigns/{id}/room/messages` and panel intents | async handler, sync session |
+| `room_action` | `POST /api/campaigns/{id}/room/messages` | async authentication + `AsyncSession`; no transaction spans Agent/MCP awaits |
+| `room_action` | panel intents | async persistence after the existing sync authentication dependency |
+| `room_action` | authoritative panel commands | async handler, sync session; retain until independently measured |
 | `projection_refresh` | `GET /api/campaigns/{id}/room/panel` | async handler, sync session |
 | `activity_callback` | `POST /api/campaigns/{id}/room/internal-activity/{id}` | sync handler in worker thread |
 
@@ -26,9 +28,12 @@ The API exports these series on `/metrics`:
 - `sagasmith_db_statements_per_request`: statement count per request and execution context.
 
 Labels are restricted to the four operation classes, `select|insert|update|delete|transaction|other`,
-`event_loop|worker`, and `success|error`. They never contain a user, campaign, room, run, tool,
-query text, or argument. Cursor timing does not include ORM object construction and therefore must
-be interpreted together with route latency and event-loop lag.
+`async_driver|event_loop|worker`, and `success|error`. `async_driver` identifies SQLAlchemy's async
+dialect: cursor duration is awaited and does not by itself mean the event loop was blocked.
+`event_loop` identifies synchronous-driver work invoked from an async handler, while `worker`
+identifies synchronous work offloaded by FastAPI. Labels never contain a user, campaign, room, run,
+tool, query text, or argument. Cursor timing does not include ORM object construction and therefore
+must be interpreted together with route latency and event-loop lag.
 
 ## Reproducible harness
 
@@ -93,6 +98,36 @@ The Docker client was installed, but its daemon was unavailable during this base
 PostgreSQL number is claimed. SQLite proves a real local deployment failure and validates the
 diagnostic route; it is not a substitute for staging PostgreSQL evidence.
 
+## 2026-08-27 selective room-action migration
+
+The first gated migration moves `/room/messages` and panel intents to an `AsyncEngine` and
+`AsyncSession`. The transaction sequence is deliberately short:
+
+1. validate membership/idempotency, append the trigger, reserve quota and persist the Agent run;
+2. commit before Agent completion and before every domain MCP projection await;
+3. load one request-scoped projection snapshot, end its read transaction, then call MCP;
+4. reacquire the room row and atomically settle quota, append outputs and advance event sequences.
+
+Development and test SQLite must be file-backed so the synchronous and `aiosqlite` engines see the
+same database. Anonymous `sqlite://` and `:memory:` URLs are rejected instead of silently creating
+two isolated authorities. File SQLite enables foreign keys, a 5-second busy timeout and WAL mode;
+production continues to require `postgresql+psycopg`.
+
+The same Windows/CPython 3.12 temporary-file SQLite harness at four lanes and five measured
+iterations per lane, 5 ms upstream delay and 2 ms lag sampling produced:
+
+| Operation | Success | p95 request | Max loop lag | Sync event-loop DB share |
+|---|---:|---:|---:|---:|
+| room action after migration | 20/20 | 6.94 s | 14 ms | 0% |
+
+All 20 requests succeeded and all 900 measured statements, including the per-request persisted
+authentication heartbeat, were attributed to `async_driver`; neither `event_loop` nor `worker`
+recorded room-message database work.
+SQLite still serializes writers, so this is a correctness and event-loop result rather than a
+claim that local write p95 is solved. It removes the baseline's 12 lock-related HTTP 500s and 11.19 s
+maximum scheduling lag under the same concurrency shape. This is SQLite evidence only: the
+disposable PostgreSQL staging passes below remain a release-observation requirement.
+
 ## Migration gate
 
 Run at least three staging passes with representative PostgreSQL latency and one current worker
@@ -106,14 +141,14 @@ the smallest path when any of these repeat:
 4. increasing worker/replica count moves the bottleneck to PostgreSQL without restoring the route
    latency objective.
 
-Start with `room_action`; the SQLite failure already makes it the first candidate. Before changing
-its session type, explicitly map transaction boundaries around Agent completion, quota settlement,
-activity callbacks, MCP projection reads, idempotency, and the final room sequence allocation.
-Do not hold a database transaction across an Agent or MCP await. Validate concurrent retries,
-payload-mismatch conflicts, quota settlement, callback sequence monotonicity, and authority-first
-receipts against both SQLite and PostgreSQL.
+`room_action` crossed the gate and its message/intent path now follows the mapped transaction
+boundaries above. Concurrent same-key retries, payload-mismatch conflicts, quota settlement,
+callback sequence monotonicity and authority-first receipts are covered by the SQLite API suite;
+repeat them against disposable PostgreSQL during staging. Authoritative panel commands remain a
+separate measured follow-up because their MCP receipt/write ordering differs from Agent turns.
 
 `agent_message` and `projection_refresh` should move only if their own staging measurements cross
 the gate. `activity_callback` should remain synchronous unless its worker-pool saturation, rather
 than event-loop lag, is independently demonstrated. Low-frequency admin/community CRUD remains on
-the sync engine.
+the sync engine. The remaining evidence-gated paths and their authority/idempotency acceptance
+criteria are tracked in [#22](https://github.com/SagaSmithAI/SagaSmith-service/issues/22).

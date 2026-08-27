@@ -42,15 +42,16 @@ def test_authenticated_writes_require_configured_origin(client: TestClient) -> N
     assert allowed.status_code == 201
 
 
-def test_auth_rate_limit_returns_retry_after() -> None:
+def test_auth_rate_limit_returns_retry_after(tmp_path) -> None:
+    database_url = f"sqlite:///{(tmp_path / 'rate-limit.db').as_posix()}"
     settings = Settings(
         env="test",
-        database_url="sqlite://",
+        database_url=database_url,
         public_origin="http://testserver",
         auth_rate_limit=2,
         auth_rate_window_seconds=60,
     )
-    with TestClient(create_app(settings, make_engine("sqlite://"))) as client:
+    with TestClient(create_app(settings, make_engine(database_url))) as client:
         client.headers["Origin"] = "http://testserver"
         assert client.post("/api/auth/register", json=registration(10)).status_code == 201
         client.cookies.clear()
@@ -66,11 +67,12 @@ class UnavailableLimiter:
         raise RateLimiterUnavailableError("offline")
 
 
-def test_protected_route_fails_closed_when_rate_limiter_is_unavailable() -> None:
-    settings = Settings(env="test", database_url="sqlite://")
+def test_protected_route_fails_closed_when_rate_limiter_is_unavailable(tmp_path) -> None:
+    database_url = f"sqlite:///{(tmp_path / 'unavailable-rate-limit.db').as_posix()}"
+    settings = Settings(env="test", database_url=database_url)
     app = create_app(
         settings,
-        make_engine("sqlite://"),
+        make_engine(database_url),
         rate_limiter=UnavailableLimiter(),
     )
     with TestClient(app) as client:

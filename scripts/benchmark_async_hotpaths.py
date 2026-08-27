@@ -25,7 +25,7 @@ from sagasmith_service.main import create_app
 from sagasmith_service.models import AgentRun
 
 _STATEMENT_CLASSES = ("select", "insert", "update", "delete", "transaction", "other")
-_EXECUTION_CONTEXTS = ("event_loop", "worker")
+_EXECUTION_CONTEXTS = ("async_driver", "event_loop", "worker")
 _STATUSES = ("success", "error")
 _PASSWORD = "benchmark-only-correct-horse-battery-staple"
 

@@ -31,7 +31,7 @@ def _sample(name: str, labels: dict[str, str]) -> float:
     return float(REGISTRY.get_sample_value(name, labels) or 0)
 
 
-def test_app_lifespan_owns_and_closes_each_default_http_client(monkeypatch) -> None:
+def test_app_lifespan_owns_and_closes_each_default_http_client(monkeypatch, tmp_path) -> None:
     created: list[Any] = []
 
     class TrackingClient:
@@ -46,9 +46,10 @@ def test_app_lifespan_owns_and_closes_each_default_http_client(monkeypatch) -> N
                 raise RuntimeError("simulated close failure")
 
     monkeypatch.setattr("sagasmith_service.main.httpx.AsyncClient", TrackingClient)
+    database_url = f"sqlite:///{(tmp_path / 'http-lifecycle.db').as_posix()}"
     app = create_app(
-        Settings(env="test", database_url="sqlite://"),
-        make_engine("sqlite://"),
+        Settings(env="test", database_url=database_url),
+        make_engine(database_url),
     )
 
     assert list(app.state.outbound_http_clients) == ["dnd", "coc", "narrative", "agent"]

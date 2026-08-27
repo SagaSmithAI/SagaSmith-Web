@@ -62,9 +62,12 @@ Only ports 80/443 are public. SagaSmith Web starts with `alembic upgrade head`. 
 - Selective database diagnosis uses `sagasmith_event_loop_lag_seconds`,
   `sagasmith_db_statement_seconds`, `sagasmith_db_request_seconds`, and
   `sagasmith_db_statements_per_request` for room actions, Agent messages, projection refreshes, and
-  activity callbacks. Labels are bounded operation/statement/execution/status classes. Follow the
-  [async database hot-path runbook](async-database-hotpaths.md) before introducing AsyncSession;
-  never benchmark against production campaign data.
+  activity callbacks. Labels are bounded operation/statement/execution/status classes;
+  `async_driver` distinguishes awaited database I/O from blocking sync-driver calls on the event
+  loop. Room messages use async authentication and persistence; panel intents use async
+  persistence after sync authentication. The other route families remain evidence-gated. Follow
+  the [async database hot-path runbook](async-database-hotpaths.md) and never benchmark against
+  production campaign data.
 - `module-worker:9101/metrics`: Module task outcomes and expired-lease recovery counters on the
   private network.
 - `X-Request-ID`: accepted only in a safe shape or generated, echoed, and logged.

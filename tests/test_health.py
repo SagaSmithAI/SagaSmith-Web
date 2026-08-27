@@ -5,9 +5,10 @@ from sagasmith_service.database import make_engine
 from sagasmith_service.main import create_app
 
 
-def test_health_reports_current_service() -> None:
-    settings = Settings(env="test", database_url="sqlite://")
-    client = TestClient(create_app(settings, make_engine("sqlite://")))
+def test_health_reports_current_service(tmp_path) -> None:
+    database_url = f"sqlite:///{(tmp_path / 'health.db').as_posix()}"
+    settings = Settings(env="test", database_url=database_url)
+    client = TestClient(create_app(settings, make_engine(database_url)))
 
     response = client.get("/api/health")
 
@@ -15,9 +16,10 @@ def test_health_reports_current_service() -> None:
     assert response.json() == {"status": "ok", "version": "0.1.0"}
 
 
-def test_web_shell() -> None:
-    settings = Settings(env="test", database_url="sqlite://")
-    client = TestClient(create_app(settings, make_engine("sqlite://")))
+def test_web_shell(tmp_path) -> None:
+    database_url = f"sqlite:///{(tmp_path / 'web-shell.db').as_posix()}"
+    settings = Settings(env="test", database_url=database_url)
+    client = TestClient(create_app(settings, make_engine(database_url)))
     response = client.get("/")
     assert response.status_code == 200
     assert "SagaSmith" in response.text
@@ -26,11 +28,12 @@ def test_web_shell() -> None:
 
 
 def test_readiness_metrics_and_request_id(dnd_runtime, agent_runtime, tmp_path) -> None:
-    settings = Settings(env="test", database_url="sqlite://")
+    database_url = f"sqlite:///{(tmp_path / 'readiness.db').as_posix()}"
+    settings = Settings(env="test", database_url=database_url)
     client = TestClient(
         create_app(
             settings,
-            make_engine("sqlite://"),
+            make_engine(database_url),
             dnd_runtime,
             agent_runtime,
             coc_runtime=dnd_runtime,
@@ -72,16 +75,17 @@ def test_readiness_rejects_an_unavailable_required_component(
     dnd_runtime, agent_runtime, tmp_path
 ) -> None:
     dnd_runtime.fail_probe = True
+    database_url = f"sqlite:///{(tmp_path / 'unavailable.db').as_posix()}"
     settings = Settings(
         env="test",
-        database_url="sqlite://",
+        database_url=database_url,
         private_storage_dir=str(tmp_path / "private"),
         exchange_dir=str(tmp_path / "exchange"),
     )
     client = TestClient(
         create_app(
             settings,
-            make_engine("sqlite://"),
+            make_engine(database_url),
             dnd_runtime,
             agent_runtime,
             coc_runtime=dnd_runtime,
