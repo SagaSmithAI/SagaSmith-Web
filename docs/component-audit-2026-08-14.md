@@ -1,5 +1,12 @@
 # Component audit — 2026-08-14
 
+> Historical snapshot: this report records the pre-convergence repository layout on 2026-08-14.
+> It is not a current release manifest. The active source of truth is
+> [`component-versions.json`](../component-versions.json): `SagaSmith-agent`, `sagasmith-core`, and
+> the `sagasmith-dnd`, `sagasmith-coc`, and `sagasmith-narrative` vertical repositories. Former
+> standalone MCP, Skills, UI, and Module Generator repositories named below are archived history;
+> they are not release inputs, compatibility fallbacks, or destinations for new issues.
+
 ## Result
 
 All 18 SagaSmith repositories were fetched and compared with their configured upstream default

@@ -1,12 +1,24 @@
-# SagaSmith Service
+# SagaSmith Web
 
 [Website](https://sagasmithai.github.io) · [Platform overview](https://github.com/SagaSmithAI/.github/blob/main/profile/README.md) · [Public content repository](https://github.com/SagaSmithAI/SagaSmith-dnd-content-library) · [All repositories](https://github.com/orgs/SagaSmithAI/repositories)
 
-Publicly visible source for the hosted SagaSmith product. Repository visibility does not change
-the proprietary terms in [LICENSE](LICENSE). The open local and self-hosted SagaSmith repositories
-remain complete applications; this repository adds hosted accounts, quota, campaign rooms, Agent
-orchestration, unified Web, billing, and operations without becoming an authority for D&D, CoC,
-or Narrative game state.
+Publicly visible source for **SagaSmith Web**, the hosted browser product. The repository keeps the
+name `SagaSmith-service` for now; repository visibility does not change the proprietary terms in
+[LICENSE](LICENSE). The product includes:
+
+```text
+SagaSmith Web
+├── Browser frontend and PWA
+├── FastAPI API/BFF
+├── Hosted control plane
+├── Campaign collaboration and live rooms
+├── Forge and Module Studio
+├── Agent and worker orchestration
+└── Operations and deployment infrastructure
+```
+
+The open SagaSmith repositories form a complete Local Agent Kit. They never depend on this
+repository, and SagaSmith Web never becomes a second authority for D&D, CoC, or Narrative state.
 
 The same deployment includes **SagaSmith Forge**, the account-scoped creation and sharing layer for
 Rule/Module Packs, character blueprints, Souls, Skills, assets, and hosted DM/Keeper Identities.
@@ -24,12 +36,39 @@ moderation primitives while keeping each artifact type's installation semantics 
 | Narrative Domain / MCP / Skills | [`sagasmith-narrative`](https://github.com/SagaSmithAI/sagasmith-narrative) |
 
 Former standalone MCP, Skills, UI, and generic Module Generator repositories
-are archived and are not release inputs or compatibility fallbacks.
+are archived, do not accept new issues, and are not release inputs or compatibility fallbacks.
+
+## One authority contract, two deployment shapes
+
+```text
+Local Agent Kit
+Bot / generic Agent / SagaSmith Agent
+                  -> domain MCP (stdio or localhost Streamable HTTP)
+                  -> matching domain runtime
+                  -> SQLite and local files
+
+Hosted Web
+Browser / PWA -> SagaSmith Web API/BFF -> principal-scoped Agent worker
+                                     -> matching domain MCP
+                                     -> matching domain runtime
+```
+
+Both paths use the same domain handlers, tool schemas, capability discovery, error structures,
+authorization, revision, and idempotency rules. Only transport, authentication, storage, and
+deployment may vary. Local installations do not require SagaSmith Web, PostgreSQL, Redis,
+MinIO/S3, hosted accounts, quota/billing, or Forge. Discord, QQ, and Telegram bots can use
+SagaSmith Agent, while Codex, Claude Code, OpenClaw, and other MCP-capable agents can connect
+directly to the selected domain MCP.
+
+The public product name is now SagaSmith Web. The repository remains `SagaSmith-service`, the
+Python package remains `sagasmith_service`, and the CLI remains `sagasmith-service`. See the
+[staged repository rename checklist](docs/repository-rename-checklist.md) before changing any of
+those implementation identifiers.
 
 ## Verified integration baseline
 
 The 2026-08-20 baseline rebuilds the hosted stack from the reviewed revisions in
-`component-versions.json`. Service signs short-lived `sagasmith.auth-context/v1`
+`component-versions.json`. SagaSmith Web signs short-lived `sagasmith.auth-context/v1`
 principal context, the Agent forwards session identity to dynamic native tools,
 and each domain MCP revalidates campaign, role, actor, phase, and revision at the
 call boundary. Isolated D&D and CoC reference campaigns completed concurrently
@@ -82,8 +121,9 @@ uv run ruff check .
 ```
 
 The API image uses this repository's `uv.lock`. The combined hosted Agent supervisor uses the
-Service-owned, hash-locked `infrastructure/agent-supervisor-requirements.txt`, generated from both
-Service and Agent constraints. This is an integrated deployment lock, not a third reusable package.
+SagaSmith Web-owned, hash-locked `infrastructure/agent-supervisor-requirements.txt`, generated from
+both SagaSmith Web and Agent constraints. This is an integrated deployment lock, not a third
+reusable package.
 
 The real container acceptance suite is intentionally separate from unit tests. It boots
 PostgreSQL, Redis, MinIO, the D&D and CoC network MCP servers, real Nanobot workers, the persistent Module
@@ -105,6 +145,7 @@ Architecture and operating references:
 - [`docs/operations.md`](docs/operations.md)
 - [`docs/test-matrix.md`](docs/test-matrix.md)
 - [`docs/community.md`](docs/community.md)
+- [`docs/repository-rename-checklist.md`](docs/repository-rename-checklist.md)
 - [`docs/component-audit-2026-08-14.md`](docs/component-audit-2026-08-14.md)
 - [`docs/component-audit-2026-08-16.md`](docs/component-audit-2026-08-16.md)
 
@@ -117,7 +158,8 @@ uv run python scripts/audit_components.py --fetch --strict
 
 ## Non-negotiable boundary
 
-The control plane stores cloud workflow and projections only. D&D and CoC run as isolated network
+The hosted control-plane layer inside SagaSmith Web stores cloud workflow and projections only.
+D&D and CoC run as isolated network
 domain services. Narrative runs as a process-local stdio domain for each Agent worker because its
 capability contract explicitly rejects shared network transport. Every authoritative campaign,
 membership, actor, phase, revision, combat, random, and Pack activation write goes through the

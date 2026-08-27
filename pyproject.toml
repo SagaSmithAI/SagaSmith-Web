@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "sagasmith-service"
 version = "0.1.0"
-description = "Closed-source hosted SagaSmith control plane and D&D service"
+description = "Hosted SagaSmith Web product and control plane"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Proprietary" }

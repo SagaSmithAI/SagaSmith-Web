@@ -90,7 +90,7 @@
       "revision": "self",
       "base_revision": "da7ce3aebaf9cc67cc818ff0842a731bba9e1243",
       "remote": "https://github.com/SagaSmithAI/SagaSmith-service.git",
-      "usage": "control-plane-workspace",
+      "usage": "hosted-web-product",
       "enforced": false
     },
     {
