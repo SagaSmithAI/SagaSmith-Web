@@ -21,7 +21,9 @@ jobs:
       MINIO_ROOT_PASSWORD: recovery-minio-secret
       OPENAI_API_KEY: recovery-only-key
       SAGASMITH_AGENT_INTERNAL_KEY: recovery-internal-agent-key
-      SAGASMITH_AUTH_CONTEXT_SECRET: recovery-auth-context-secret-at-least-32-bytes
+      # The recovery stack uses tests/e2e/agent-config.json, whose signed MCP
+      # clients are intentionally wired to this deterministic fixture secret.
+      SAGASMITH_AUTH_CONTEXT_SECRET: e2e-auth-context-secret-at-least-32-bytes
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.0.1
