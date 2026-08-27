@@ -120,6 +120,16 @@ uv run pytest
 uv run ruff check .
 ```
 
+Diagnose sync-database work in the selected async request paths with the disposable load harness:
+
+```powershell
+uv run python scripts/benchmark_async_hotpaths.py --concurrency 4 --iterations 5
+```
+
+The default uses a temporary SQLite file. See the
+[async database hot-path runbook](docs/async-database-hotpaths.md) for bounded metrics, the measured
+baseline, migration thresholds, and the explicit disposable-PostgreSQL safety gate.
+
 The API image uses this repository's `uv.lock`. The combined hosted Agent supervisor uses the
 SagaSmith Web-owned, hash-locked `infrastructure/agent-supervisor-requirements.txt`, generated from
 both SagaSmith Web and Agent constraints. This is an integrated deployment lock, not a third
