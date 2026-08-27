@@ -21,7 +21,8 @@ jobs:
       - run: uv sync --frozen --all-extras
       - run: uv run ruff check .
       - run: uv run pytest --cov=sagasmith_service --cov-report=term-missing
-      - run: node --check src/sagasmith_service/web/app.js
+      - name: Check all browser JavaScript
+        run: find src/sagasmith_service/web -type f -name '*.js' -print0 | xargs -0 -n1 node --check
       - run: uv run alembic upgrade head
         env:
           SAGASMITH_DATABASE_URL: sqlite:///./migration-ci.db

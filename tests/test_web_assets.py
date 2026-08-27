@@ -14,7 +14,7 @@ def test_browser_entry_loads_complete_precached_module_graph(client: TestClient)
 
     service_worker = client.get("/service-worker.js")
     assert service_worker.status_code == 200
-    assert 'const CACHE="sagasmith-shell-v6"' in service_worker.text
+    assert 'const CACHE="sagasmith-shell-v7"' in service_worker.text
 
     expected_modules = {
         "/assets/api/client.js",
@@ -30,11 +30,18 @@ def test_browser_entry_loads_complete_precached_module_graph(client: TestClient)
         "/assets/forge/studio.js",
         "/assets/identity/controller.js",
         "/assets/module-studio/controller.js",
+        "/assets/room/characters.js",
+        "/assets/room/combat-grid.js",
+        "/assets/room/controller.js",
+        "/assets/room/model.js",
+        "/assets/room/timeline.js",
+        "/assets/room/view.js",
         "/assets/state/store.js",
     }
     pending = ["/app.js"]
     visited: set[str] = set()
     discovered: set[str] = set()
+    import_graph: dict[str, set[str]] = {}
     while pending:
         path = pending.pop()
         if path in visited:
@@ -45,6 +52,7 @@ def test_browser_entry_loads_complete_precached_module_graph(client: TestClient)
         media_type = response.headers["content-type"].partition(";")[0]
         assert media_type in {"application/javascript", "text/javascript"}, path
         imports = set(_STATIC_IMPORT.findall(response.text))
+        import_graph[path] = imports
         discovered.update(imports)
         pending.extend(imports - visited)
 
@@ -55,12 +63,36 @@ def test_browser_entry_loads_complete_precached_module_graph(client: TestClient)
     entry = client.get("/app.js").text
     assert "/api/community" not in entry
     assert "/api/identities" not in entry
+    assert "/api/campaigns/" not in entry
+    assert "#character-select" not in entry
+    assert "#combat-grid" not in entry
     forge_sources = "".join(
         client.get(path).text for path in expected_modules if path.startswith("/assets/forge/")
     )
     identity_source = client.get("/assets/identity/controller.js").text
     assert "/assets/identity/" not in forge_sources
     assert "/assets/forge/" not in identity_source
+
+    room_sources = "".join(
+        client.get(path).text for path in expected_modules if path.startswith("/assets/room/")
+    )
+    for feature in ("campaign", "forge", "identity", "module-studio"):
+        assert f'/assets/{feature}/' not in room_sources
+
+    visiting: set[str] = set()
+    complete: set[str] = set()
+
+    def visit(path: str) -> None:
+        assert path not in visiting, f"circular browser import at {path}"
+        if path in complete:
+            return
+        visiting.add(path)
+        for imported in import_graph.get(path, set()):
+            visit(imported)
+        visiting.remove(path)
+        complete.add(path)
+
+    visit("/app.js")
 
 
 def test_asset_namespace_does_not_capture_backend_api(client: TestClient) -> None:
