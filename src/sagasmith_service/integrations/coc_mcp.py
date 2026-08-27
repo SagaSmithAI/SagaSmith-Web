@@ -16,6 +16,13 @@ from sagasmith_service.auth_context import (
     exposure_revision,
     sign_auth_context,
 )
+from sagasmith_service.observability import (
+    MCP_EXPOSURE_SECONDS,
+    MCP_INITIALIZE_SECONDS,
+    MCP_TOOL_SECONDS,
+    MCP_TRANSPORT_SETUP_SECONDS,
+    observe_latency,
+)
 
 
 def _tool_payload(result: Any) -> dict[str, Any]:
@@ -57,18 +64,34 @@ class StreamableHttpCocRuntime:
         *,
         bearer_token: str | None = None,
         auth_context_secret: str = "",
+        http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self.url = url
         self.bearer_token = bearer_token
         self.auth_context_secret = auth_context_secret
-
-    async def probe(self) -> None:
-        """Verify the MCP endpoint and the hosted contract without mutating state."""
+        self._owns_http_client = http_client is None
         headers = (
             {"Authorization": f"Bearer {self.bearer_token}"}
             if self.bearer_token
             else {}
         )
+        self.http_client = (
+            http_client
+            if http_client is not None
+            else httpx.AsyncClient(
+                headers=headers,
+                timeout=httpx.Timeout(30, connect=10),
+            )
+        )
+        if http_client is not None and headers:
+            self.http_client.headers.update(headers)
+
+    async def aclose(self) -> None:
+        if self._owns_http_client:
+            await self.http_client.aclose()
+
+    async def probe(self) -> None:
+        """Verify the MCP endpoint and the hosted contract without mutating state."""
         required = {
             "exposure",
             "server_capabilities",
@@ -80,15 +103,30 @@ class StreamableHttpCocRuntime:
         }
         try:
             async with AsyncExitStack() as stack:
-                client = await stack.enter_async_context(
-                    httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(10, connect=5))
-                )
-                read, write, _ = await stack.enter_async_context(
-                    streamable_http_client(self.url, http_client=client)
-                )
+                with observe_latency(
+                    MCP_TRANSPORT_SETUP_SECONDS,
+                    system="coc7e",
+                    operation_class="probe",
+                    transport="streamable_http",
+                ):
+                    read, write, _ = await stack.enter_async_context(
+                        streamable_http_client(self.url, http_client=self.http_client)
+                    )
                 session = await stack.enter_async_context(ClientSession(read, write))
-                await session.initialize()
-                available = {tool.name for tool in (await session.list_tools()).tools}
+                with observe_latency(
+                    MCP_INITIALIZE_SECONDS,
+                    system="coc7e",
+                    operation_class="probe",
+                    transport="streamable_http",
+                ):
+                    await session.initialize()
+                with observe_latency(
+                    MCP_TOOL_SECONDS,
+                    system="coc7e",
+                    operation_class="probe",
+                    transport="streamable_http",
+                ):
+                    available = {tool.name for tool in (await session.list_tools()).tools}
         except Exception as exc:
             raise RuntimeError("CoC MCP readiness probe failed") from exc
         missing = sorted(required - available)
@@ -114,21 +152,25 @@ class StreamableHttpCocRuntime:
         principal_id: str,
         campaign_id: str | None,
     ) -> dict[str, Any]:
-        headers = (
-            {"Authorization": f"Bearer {self.bearer_token}"}
-            if self.bearer_token
-            else {}
-        )
         try:
             async with AsyncExitStack() as stack:
-                client = await stack.enter_async_context(
-                    httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(30, connect=10))
-                )
-                read, write, _ = await stack.enter_async_context(
-                    streamable_http_client(self.url, http_client=client)
-                )
+                with observe_latency(
+                    MCP_TRANSPORT_SETUP_SECONDS,
+                    system="coc7e",
+                    operation_class="request",
+                    transport="streamable_http",
+                ):
+                    read, write, _ = await stack.enter_async_context(
+                        streamable_http_client(self.url, http_client=self.http_client)
+                    )
                 session = await stack.enter_async_context(ClientSession(read, write))
-                await session.initialize()
+                with observe_latency(
+                    MCP_INITIALIZE_SECONDS,
+                    system="coc7e",
+                    operation_class="request",
+                    transport="streamable_http",
+                ):
+                    await session.initialize()
                 auth_session_id = f"service:{uuid.uuid4().hex}"
                 conversation_principal = (
                     f"service:campaign:{campaign_id}" if campaign_id else "service:control-plane"
@@ -158,35 +200,50 @@ class StreamableHttpCocRuntime:
                     authorization_epoch = exposure_revision(payload, authorization_epoch)
                     return payload
 
-                exposure: dict[str, Any] = {"action": "open", "principal_id": principal_id}
-                if campaign_id is not None:
-                    exposure["campaign_id"] = campaign_id
-                await call("exposure", exposure)
-                if name != "exposure":
-                    search = await call(
-                        "exposure",
-                        {
-                            "action": "search",
-                            "campaign_id": campaign_id,
-                            "principal_id": principal_id,
-                            "query": name,
-                        },
-                    )
-                    visible = {str(item) for item in search.get("visible_tools", [])}
-                    if name not in visible:
-                        await call(
+                with observe_latency(
+                    MCP_EXPOSURE_SECONDS,
+                    system="coc7e",
+                    operation_class="request",
+                    transport="streamable_http",
+                ):
+                    exposure: dict[str, Any] = {
+                        "action": "open",
+                        "principal_id": principal_id,
+                    }
+                    if campaign_id is not None:
+                        exposure["campaign_id"] = campaign_id
+                    await call("exposure", exposure)
+                    if name != "exposure":
+                        search = await call(
                             "exposure",
                             {
-                                "action": "set",
+                                "action": "search",
                                 "campaign_id": campaign_id,
                                 "principal_id": principal_id,
-                                "add_tool_ids": [name],
+                                "query": name,
                             },
                         )
-                    listed = await session.list_tools()
-                    if name not in {tool.name for tool in listed.tools}:
-                        raise RuntimeError(f"CoC MCP did not expose {name!r}")
-                return await call(name, arguments)
+                        visible = {str(item) for item in search.get("visible_tools", [])}
+                        if name not in visible:
+                            await call(
+                                "exposure",
+                                {
+                                    "action": "set",
+                                    "campaign_id": campaign_id,
+                                    "principal_id": principal_id,
+                                    "add_tool_ids": [name],
+                                },
+                            )
+                        listed = await session.list_tools()
+                        if name not in {tool.name for tool in listed.tools}:
+                            raise RuntimeError(f"CoC MCP did not expose {name!r}")
+                with observe_latency(
+                    MCP_TOOL_SECONDS,
+                    system="coc7e",
+                    operation_class="request",
+                    transport="streamable_http",
+                ):
+                    return await call(name, arguments)
         except RuntimeError:
             raise
         except Exception as exc:

@@ -23,6 +23,11 @@ D&D and CoC MCP run as isolated network services. Narrative advertises
 Narrative MCP process instead of exposing a compatibility HTTP wrapper.
 ```
 
+The FastAPI lifespan owns one long-lived HTTP connection pool for each Agent, D&D, CoC and
+Narrative adapter. D&D and CoC still create a fresh MCP transport and `ClientSession` for every
+operation so principal context, authorization epoch and dynamic exposure never cross calls; only
+the lower-level TCP/TLS pool is reused.
+
 ## Module Studio
 
 Module Studio is the primary D&D creation surface. A hidden Lobby campaign gives each project a

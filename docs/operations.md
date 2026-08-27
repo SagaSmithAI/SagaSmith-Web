@@ -53,6 +53,12 @@ Only ports 80/443 are public. Service starts with `alembic upgrade head`. For a 
   and private object storage. Any missing dependency returns HTTP 503 with a
   per-component status map.
 - `/metrics`: Prometheus counters and latency histograms; firewall it in production.
+- Outbound latency is split across `sagasmith_agent_upstream_seconds`,
+  `sagasmith_mcp_transport_setup_seconds`, `sagasmith_mcp_initialize_seconds`,
+  `sagasmith_mcp_exposure_seconds`, and `sagasmith_mcp_tool_seconds`. Room fan-out is measured by
+  `sagasmith_room_projection_batch_seconds` and `sagasmith_room_projection_jobs`. These series use
+  only bounded `system`, `operation_class`, `status`, and `transport` labels; never add campaign,
+  user, run, or tool-argument values.
 - `module-worker:9101/metrics`: Module task outcomes and expired-lease recovery counters on the
   private network.
 - `X-Request-ID`: accepted only in a safe shape or generated, echoed, and logged.

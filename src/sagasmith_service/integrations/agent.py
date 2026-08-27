@@ -7,6 +7,8 @@ from urllib.parse import quote
 
 import httpx
 
+from sagasmith_service.observability import AGENT_UPSTREAM_SECONDS, observe_latency
+
 
 @dataclass(frozen=True)
 class AgentResult:
@@ -36,17 +38,43 @@ class AgentRuntime(Protocol):
 
 
 class HttpAgentRuntime:
-    def __init__(self, base_url: str, api_key: str = "", *, timeout_seconds: int = 180) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str = "",
+        *,
+        timeout_seconds: int = 180,
+        http_client: httpx.AsyncClient | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
+        self._owns_http_client = http_client is None
+        self.http_client = (
+            http_client
+            if http_client is not None
+            else httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds, connect=10))
+        )
+
+    async def aclose(self) -> None:
+        if self._owns_http_client:
+            await self.http_client.aclose()
 
     async def probe(self) -> None:
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(10, connect=5)) as client:
-                response = await client.get(f"{self.base_url}/health", headers=headers)
-            response.raise_for_status()
+            with observe_latency(
+                AGENT_UPSTREAM_SECONDS,
+                system="agent",
+                operation_class="probe",
+                transport="http",
+            ):
+                response = await self.http_client.get(
+                    f"{self.base_url}/health",
+                    headers=headers,
+                    timeout=httpx.Timeout(10, connect=5),
+                )
+                response.raise_for_status()
         except Exception as exc:
             raise RuntimeError("Agent readiness probe failed") from exc
 
@@ -120,10 +148,13 @@ class HttpAgentRuntime:
             )
         context_lines.extend(["[Player message]", content])
         authenticated_context = "\n".join(context_lines)
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(self.timeout_seconds, connect=10)
-        ) as client:
-            response = await client.post(
+        with observe_latency(
+            AGENT_UPSTREAM_SECONDS,
+            system="agent",
+            operation_class="completion",
+            transport="http",
+        ):
+            response = await self.http_client.post(
                 f"{self.base_url}/v1/conversations/{quote(session_id, safe='')}/completions",
                 headers=headers,
                 json={
@@ -132,29 +163,30 @@ class HttpAgentRuntime:
                     "stream": False,
                     "response_contract": response_contract,
                 },
+                timeout=httpx.Timeout(self.timeout_seconds, connect=10),
             )
-        if response.status_code >= 400:
-            raise RuntimeError(f"Agent returned HTTP {response.status_code}")
-        payload = response.json()
-        try:
-            content_value = str(payload["choices"][0]["message"]["content"])
-        except (KeyError, IndexError, TypeError) as exc:
-            raise RuntimeError("Agent returned an invalid completion") from exc
-        usage = payload.get("usage") or {}
-        return AgentResult(
-            content=content_value,
-            request_id=payload.get("id"),
-            model=payload.get("model"),
-            prompt_tokens=int(usage.get("prompt_tokens") or 0),
-            completion_tokens=int(usage.get("completion_tokens") or 0),
-            structured_output=(
-                dict(payload["structured_output"])
-                if isinstance(payload.get("structured_output"), dict)
-                else None
-            ),
-            tool_receipts=tuple(
-                dict(item)
-                for item in (payload.get("tool_receipts") or [])
-                if isinstance(item, dict)
-            ),
-        )
+            if response.status_code >= 400:
+                raise RuntimeError(f"Agent returned HTTP {response.status_code}")
+            payload = response.json()
+            try:
+                content_value = str(payload["choices"][0]["message"]["content"])
+            except (KeyError, IndexError, TypeError) as exc:
+                raise RuntimeError("Agent returned an invalid completion") from exc
+            usage = payload.get("usage") or {}
+            return AgentResult(
+                content=content_value,
+                request_id=payload.get("id"),
+                model=payload.get("model"),
+                prompt_tokens=int(usage.get("prompt_tokens") or 0),
+                completion_tokens=int(usage.get("completion_tokens") or 0),
+                structured_output=(
+                    dict(payload["structured_output"])
+                    if isinstance(payload.get("structured_output"), dict)
+                    else None
+                ),
+                tool_receipts=tuple(
+                    dict(item)
+                    for item in (payload.get("tool_receipts") or [])
+                    if isinstance(item, dict)
+                ),
+            )

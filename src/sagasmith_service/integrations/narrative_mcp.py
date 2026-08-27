@@ -6,12 +6,31 @@ from typing import Any
 
 import httpx
 
+from sagasmith_service.observability import AGENT_UPSTREAM_SECONDS, observe_latency
+
 
 class HttpNarrativeRuntime:
-    def __init__(self, base_url: str, api_key: str, *, timeout_seconds: int = 180) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        *,
+        timeout_seconds: int = 180,
+        http_client: httpx.AsyncClient | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
+        self._owns_http_client = http_client is None
+        self.http_client = (
+            http_client
+            if http_client is not None
+            else httpx.AsyncClient(timeout=httpx.Timeout(timeout_seconds, connect=10))
+        )
+
+    async def aclose(self) -> None:
+        if self._owns_http_client:
+            await self.http_client.aclose()
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -19,29 +38,42 @@ class HttpNarrativeRuntime:
 
     async def probe(self) -> None:
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(15, connect=5)) as client:
-                response = await client.get(
-                    f"{self.base_url}/health/narrative", headers=self._headers
+            with observe_latency(
+                AGENT_UPSTREAM_SECONDS,
+                system="narrative",
+                operation_class="probe",
+                transport="http",
+            ):
+                response = await self.http_client.get(
+                    f"{self.base_url}/health/narrative",
+                    headers=self._headers,
+                    timeout=httpx.Timeout(15, connect=5),
                 )
-            response.raise_for_status()
+                response.raise_for_status()
         except Exception as exc:
             raise RuntimeError("Narrative readiness probe failed") from exc
 
     async def _operation(self, operation: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(self.timeout_seconds, connect=10)
-        ) as client:
-            response = await client.post(
+        with observe_latency(
+            AGENT_UPSTREAM_SECONDS,
+            system="narrative",
+            operation_class="operation",
+            transport="http",
+        ):
+            response = await self.http_client.post(
                 f"{self.base_url}/v1/narrative/operations",
                 headers=self._headers,
                 json={"operation": operation, "arguments": arguments},
+                timeout=httpx.Timeout(self.timeout_seconds, connect=10),
             )
-        if response.status_code >= 400:
-            raise RuntimeError(f"Narrative Supervisor returned HTTP {response.status_code}")
-        value = response.json()
-        if not isinstance(value, dict):
-            raise RuntimeError("Narrative Supervisor returned an invalid result")
-        return value
+            if response.status_code >= 400:
+                raise RuntimeError(
+                    f"Narrative Supervisor returned HTTP {response.status_code}"
+                )
+            value = response.json()
+            if not isinstance(value, dict):
+                raise RuntimeError("Narrative Supervisor returned an invalid result")
+            return value
 
     async def create_campaign(
         self,
