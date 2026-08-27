@@ -118,7 +118,7 @@ DB_STATEMENTS_PER_REQUEST = Histogram(
 HOT_PATH_OPERATIONS = frozenset(
     {"room_action", "agent_message", "projection_refresh", "activity_callback"}
 )
-_EXECUTION_CONTEXTS = ("event_loop", "worker")
+_EXECUTION_CONTEXTS = ("async_driver", "event_loop", "worker")
 _STATEMENT_CLASSES = frozenset({"select", "insert", "update", "delete", "transaction"})
 
 
@@ -215,7 +215,9 @@ def _statement_class(statement: str) -> str:
     return "other"
 
 
-def _execution_context() -> str:
+def _execution_context(connection: Any) -> str:
+    if bool(getattr(connection.engine.dialect, "is_async", False)):
+        return "async_driver"
     try:
         asyncio.get_running_loop()
     except RuntimeError:
@@ -224,7 +226,7 @@ def _execution_context() -> str:
 
 
 def _before_cursor_execute(
-    _connection: Any,
+    connection: Any,
     _cursor: Any,
     statement: str,
     _parameters: Any,
@@ -238,7 +240,7 @@ def _before_cursor_execute(
             time.perf_counter(),
             observation,
             _statement_class(statement),
-            _execution_context(),
+            _execution_context(connection),
         )
     setattr(execution_context, _EXECUTION_RECORD_ATTRIBUTE, record)
 

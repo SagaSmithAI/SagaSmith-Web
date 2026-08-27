@@ -311,9 +311,10 @@ def agent_runtime() -> FakeAgentRuntime:
 def client(
     dnd_runtime: FakeDndRuntime, agent_runtime: FakeAgentRuntime, tmp_path: Path
 ) -> Iterator[TestClient]:
+    database_url = f"sqlite:///{(tmp_path / 'service-test.db').as_posix()}"
     settings = Settings(
         env="test",
-        database_url="sqlite://",
+        database_url=database_url,
         session_secret="test-session-secret-at-least-thirty-two-characters",
         private_storage_dir=str(tmp_path / "private"),
         exchange_dir=str(tmp_path / "exchange"),
@@ -321,7 +322,7 @@ def client(
     )
     app = create_app(
         settings,
-        make_engine("sqlite://"),
+        make_engine(database_url),
         dnd_runtime,
         agent_runtime,
         coc_runtime=dnd_runtime,

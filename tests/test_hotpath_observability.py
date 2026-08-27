@@ -1,13 +1,16 @@
 import asyncio
 import time
+from datetime import UTC, datetime
 
+from fastapi import Request
 from fastapi.testclient import TestClient
 from prometheus_client import REGISTRY
 from sqlalchemy import select, text
 
+from sagasmith_service.api.dependencies import get_async_db
 from sagasmith_service.api.rooms import _activity_token
 from sagasmith_service.database import make_engine
-from sagasmith_service.models import AgentRun
+from sagasmith_service.models import AgentRun, UserSession
 from sagasmith_service.observability import (
     DB_REQUEST_SECONDS,
     DB_STATEMENT_SECONDS,
@@ -103,6 +106,67 @@ def test_database_observability_distinguishes_event_loop_and_worker_execution() 
     assert worker_observation.snapshot()["event_loop"][1] == 0
     assert event_loop_observation.snapshot()["event_loop"][1] == 1
     assert event_loop_observation.snapshot()["worker"][1] == 0
+
+
+def test_room_action_uses_only_async_driver_database_work(
+    client: TestClient,
+) -> None:
+    registered = client.post(
+        "/api/auth/register",
+        json={
+            "email": "hotpath-room-async@example.com",
+            "password": "correct horse battery staple",
+            "display_name": "Hot path room async",
+        },
+    )
+    assert registered.status_code == 201
+    campaign = client.post(
+        "/api/campaigns",
+        headers={"Idempotency-Key": "hotpath-room-async-campaign"},
+        json={"name": "Hot path async room"},
+    )
+    assert campaign.status_code == 201
+    heartbeat_sentinel = datetime(2000, 1, 1, tzinfo=UTC)
+    with client.app.state.session_factory.begin() as session:
+        active_session = session.scalar(select(UserSession))
+        assert active_session is not None
+        active_session.last_seen_at = heartbeat_sentinel
+        active_session_id = active_session.id
+    before_async = _statement_count("room_action", "async_driver")
+    before_event_loop = _statement_count("room_action", "event_loop")
+    before_worker = _statement_count("room_action", "worker")
+    dependency_sessions = 0
+
+    async def counted_async_db(request: Request):
+        nonlocal dependency_sessions
+        dependency_sessions += 1
+        async with request.app.state.async_session_factory() as session:
+            try:
+                yield session
+            finally:
+                if session.in_transaction():
+                    await session.rollback()
+
+    client.app.dependency_overrides[get_async_db] = counted_async_db
+
+    try:
+        response = client.post(
+            f"/api/campaigns/{campaign.json()['id']}/room/messages",
+            headers={"Idempotency-Key": "hotpath-room-async-action"},
+            json={"content": "Measure async persistence.", "mode": "action"},
+        )
+    finally:
+        client.app.dependency_overrides.pop(get_async_db, None)
+
+    assert response.status_code == 200, response.text
+    assert dependency_sessions == 1
+    assert _statement_count("room_action", "async_driver") > before_async
+    assert _statement_count("room_action", "event_loop") == before_event_loop
+    assert _statement_count("room_action", "worker") == before_worker
+    with client.app.state.session_factory() as session:
+        refreshed_session = session.get(UserSession, active_session_id)
+        assert refreshed_session is not None
+        assert refreshed_session.last_seen_at > heartbeat_sentinel.replace(tzinfo=None)
 
 
 def test_event_loop_sampler_detects_synchronous_blocking() -> None:

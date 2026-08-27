@@ -1,4 +1,7 @@
 import asyncio
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from conftest import FakeAgentRuntime, FakeDndRuntime
@@ -9,6 +12,7 @@ from sagasmith_service.api.rooms import _activity_token
 from sagasmith_service.models import (
     AgentRun,
     AuditEvent,
+    CampaignMessage,
     CampaignRoomEvent,
     CampaignSuggestion,
 )
@@ -130,6 +134,88 @@ def test_room_is_shared_and_agent_receives_sender_visible_timeline(
     assert timeline[1]["sender_user_id"] == player["id"]
     assert timeline[2]["trigger_message_id"] == timeline[1]["id"]
     assert timeline[0]["sender_user_id"] == owner["id"]
+
+
+def test_concurrent_room_action_retries_share_one_agent_run(
+    client: TestClient,
+    agent_runtime: FakeAgentRuntime,
+) -> None:
+    register(client, "room-owner@example.com", "DM")
+    create_campaign(client)
+    entered_agent = threading.Event()
+    release_agent = threading.Event()
+    original_complete = agent_runtime.complete
+
+    async def delayed_complete(**arguments: Any):
+        entered_agent.set()
+        while not release_agent.is_set():
+            await asyncio.sleep(0.01)
+        return await original_complete(**arguments)
+
+    agent_runtime.complete = delayed_complete
+    start = threading.Barrier(3)
+
+    def post_retry():
+        start.wait()
+        return client.post(
+            "/api/campaigns/campaign-1/room/messages",
+            headers={"Idempotency-Key": "concurrent-room-retry"},
+            json={"content": "I inspect the same lock.", "mode": "action"},
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(post_retry) for _ in range(2)]
+        start.wait()
+        assert entered_agent.wait(timeout=5)
+        deadline = time.monotonic() + 5
+        while not any(future.done() for future in futures) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert any(future.done() for future in futures), (
+            "an idempotent retry should not wait for the in-flight Agent call"
+        )
+        release_agent.set()
+        responses = [future.result(timeout=5) for future in futures]
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert len(agent_runtime.calls) == 1
+    with client.app.state.session_factory() as session:
+        messages = session.scalars(
+            select(CampaignMessage).where(
+                CampaignMessage.client_message_id == "concurrent-room-retry"
+            )
+        ).all()
+        runs = session.scalars(
+            select(AgentRun).where(AgentRun.idempotency_key == "room:concurrent-room-retry")
+        ).all()
+    assert len(messages) == 1
+    assert len(runs) == 1
+
+
+def test_invalid_async_room_action_rolls_back_staged_room_work(
+    client: TestClient,
+) -> None:
+    register(client, "room-owner@example.com", "DM")
+    create_campaign(client)
+
+    response = client.post(
+        "/api/campaigns/campaign-1/room/messages",
+        headers={"Idempotency-Key": "invalid-private-room-action"},
+        json={
+            "content": "This audience does not exist.",
+            "mode": "action",
+            "audience": "private",
+            "audience_user_ids": ["missing-user"],
+        },
+    )
+
+    assert response.status_code == 422
+    with client.app.state.session_factory() as session:
+        message = session.scalar(
+            select(CampaignMessage).where(
+                CampaignMessage.client_message_id == "invalid-private-room-action"
+            )
+        )
+    assert message is None
 
 
 def test_room_activity_accepts_only_safe_scoped_state_transitions(
@@ -871,7 +957,12 @@ def test_room_projection_queries_do_not_scale_with_output_actor_audience_product
             statements.append(statement.lower())
 
         call_start = len(dnd_runtime.calls)
-        event.listen(client.app.state.engine, "before_cursor_execute", collect)
+        observed_engines = (
+            client.app.state.engine,
+            client.app.state.async_engine.sync_engine,
+        )
+        for observed_engine in observed_engines:
+            event.listen(observed_engine, "before_cursor_execute", collect)
         try:
             response = client.post(
                 "/api/campaigns/campaign-1/room/messages",
@@ -879,7 +970,8 @@ def test_room_projection_queries_do_not_scale_with_output_actor_audience_product
                 json={"content": idempotency_key, "mode": "action"},
             )
         finally:
-            event.remove(client.app.state.engine, "before_cursor_execute", collect)
+            for observed_engine in observed_engines:
+                event.remove(observed_engine, "before_cursor_execute", collect)
         assert response.status_code == 200, response.text
         tables = (
             "campaign_projections",
