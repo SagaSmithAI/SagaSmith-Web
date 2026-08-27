@@ -118,7 +118,7 @@ iterations per lane, 5 ms upstream delay and 2 ms lag sampling produced:
 
 | Operation | Success | p95 request | Max loop lag | Sync event-loop DB share |
 |---|---:|---:|---:|---:|
-| room action after migration | 20/20 | 6.60 s | 14 ms | 0% |
+| room action after migration | 20/20 | 6.94 s | 14 ms | 0% |
 
 All 20 requests succeeded and all 900 measured statements, including the per-request persisted
 authentication heartbeat, were attributed to `async_driver`; neither `event_loop` nor `worker`

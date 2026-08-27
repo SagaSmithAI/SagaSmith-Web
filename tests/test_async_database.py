@@ -40,17 +40,20 @@ def test_file_sqlite_enables_wal_and_busy_timeout_for_both_engines(tmp_path) -> 
     sync_engine = make_engine(database_url)
     async_engine = make_async_engine(database_url)
 
-    with sync_engine.connect() as connection:
-        assert connection.scalar(text("PRAGMA journal_mode")) == "wal"
-        assert connection.scalar(text("PRAGMA busy_timeout")) == 5000
-
     async def inspect_async() -> None:
+        # The async hot path can be the first connection in a production
+        # process, before readiness or a synchronous CRUD route opens the
+        # synchronous engine.
         async with async_engine.connect() as connection:
             assert await connection.scalar(text("PRAGMA journal_mode")) == "wal"
             assert await connection.scalar(text("PRAGMA busy_timeout")) == 5000
         await async_engine.dispose()
 
     asyncio.run(inspect_async())
+
+    with sync_engine.connect() as connection:
+        assert connection.scalar(text("PRAGMA journal_mode")) == "wal"
+        assert connection.scalar(text("PRAGMA busy_timeout")) == 5000
 
 
 def test_async_session_dependency_rolls_back_uncommitted_work(tmp_path) -> None:

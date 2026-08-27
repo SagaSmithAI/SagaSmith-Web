@@ -2,12 +2,15 @@ import asyncio
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from typing import Any
 
 from conftest import FakeAgentRuntime, FakeDndRuntime
+from fastapi import Request
 from fastapi.testclient import TestClient
 from sqlalchemy import event, select
 
+from sagasmith_service.api.dependencies import get_async_db
 from sagasmith_service.api.rooms import _activity_token
 from sagasmith_service.models import (
     AgentRun,
@@ -15,6 +18,7 @@ from sagasmith_service.models import (
     CampaignMessage,
     CampaignRoomEvent,
     CampaignSuggestion,
+    UserSession,
 )
 
 PASSWORD = "correct horse battery staple"
@@ -191,11 +195,113 @@ def test_concurrent_room_action_retries_share_one_agent_run(
     assert len(runs) == 1
 
 
+def test_async_room_action_releases_database_before_agent_and_mcp_awaits(
+    client: TestClient,
+    agent_runtime: FakeAgentRuntime,
+    dnd_runtime: FakeDndRuntime,
+) -> None:
+    register(client, "room-owner@example.com", "DM")
+    create_campaign(client)
+    captured_sessions: list[Any] = []
+    observed_awaits: list[str] = []
+
+    async def captured_async_db(request: Request):
+        async with request.app.state.async_session_factory() as session:
+            captured_sessions.append(session)
+            try:
+                yield session
+            finally:
+                if session.in_transaction():
+                    await session.rollback()
+
+    def assert_database_released(label: str) -> None:
+        assert len(captured_sessions) == 1
+        assert not captured_sessions[0].in_transaction()
+        checked_out = client.app.state.async_engine.sync_engine.pool.checkedout()
+        assert checked_out == 0
+        observed_awaits.append(label)
+
+    original_agent_complete = agent_runtime.complete
+    original_campaign_get = dnd_runtime.get_campaign
+    original_resolution_get = dnd_runtime.get_resolution_presentation
+
+    async def checked_agent_complete(**arguments: Any):
+        assert_database_released("agent")
+        return await original_agent_complete(**arguments)
+
+    async def checked_campaign_get(**arguments: Any):
+        assert_database_released("campaign")
+        return await original_campaign_get(**arguments)
+
+    async def checked_resolution_get(**arguments: Any):
+        assert_database_released("projection")
+        return await original_resolution_get(**arguments)
+
+    agent_runtime.complete = checked_agent_complete
+    dnd_runtime.get_campaign = checked_campaign_get
+    dnd_runtime.get_resolution_presentation = checked_resolution_get
+    dnd_runtime.resolution_presentations["transaction-boundary"] = {
+        "schema": "sagasmith.resolution-presentation/v1",
+        "system_id": "dnd5e",
+        "thread_id": "transaction-boundary",
+        "event_sequence": 1,
+        "operation": "character.ability",
+        "status": "settled",
+        "audience": {"scope": "public", "actor_refs": [], "disclosure": "public"},
+        "actor_refs": [],
+        "rolls": [],
+        "outcome": {"success": True},
+        "pending_choice": None,
+        "campaign_revision": 7,
+        "random_stream_receipt": {"draw_count": 0},
+    }
+
+    def output(context: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "schema": "sagasmith.room-turn/v1",
+            "run_id": context["run_id"],
+            "messages": [
+                {
+                    "output_id": "transaction-boundary",
+                    "audience": {"kind": "public"},
+                    "blocks": [
+                        {
+                            "type": "resolution_ref",
+                            "block_id": "transaction-boundary-resolution",
+                            "resolution_id": "transaction-boundary",
+                        }
+                    ],
+                }
+            ],
+            "suggestions": [],
+        }
+
+    agent_runtime.structured_output_factory = output
+    client.app.dependency_overrides[get_async_db] = captured_async_db
+    try:
+        response = client.post(
+            "/api/campaigns/campaign-1/room/messages",
+            headers={"Idempotency-Key": "transaction-boundary-action"},
+            json={"content": "Check transaction boundaries.", "mode": "action"},
+        )
+    finally:
+        client.app.dependency_overrides.pop(get_async_db, None)
+
+    assert response.status_code == 200, response.text
+    assert observed_awaits == ["agent", "campaign", "projection"]
+
+
 def test_invalid_async_room_action_rolls_back_staged_room_work(
     client: TestClient,
 ) -> None:
     register(client, "room-owner@example.com", "DM")
     create_campaign(client)
+    heartbeat_sentinel = datetime(2000, 1, 1, tzinfo=UTC)
+    with client.app.state.session_factory.begin() as session:
+        active_session = session.scalar(select(UserSession))
+        assert active_session is not None
+        active_session.last_seen_at = heartbeat_sentinel
+        active_session_id = active_session.id
 
     response = client.post(
         "/api/campaigns/campaign-1/room/messages",
@@ -215,7 +321,10 @@ def test_invalid_async_room_action_rolls_back_staged_room_work(
                 CampaignMessage.client_message_id == "invalid-private-room-action"
             )
         )
+        refreshed_session = session.get(UserSession, active_session_id)
     assert message is None
+    assert refreshed_session is not None
+    assert refreshed_session.last_seen_at > heartbeat_sentinel.replace(tzinfo=None)
 
 
 def test_room_activity_accepts_only_safe_scoped_state_transitions(

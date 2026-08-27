@@ -71,12 +71,15 @@ def make_async_engine(database_url: str) -> AsyncEngine:
         options["connect_args"] = {"check_same_thread": False}
     engine = create_async_engine(async_url, **options)
     if async_url.startswith("sqlite"):
+        file_backed = engine.url.database not in {None, "", ":memory:"}
 
         @event.listens_for(engine.sync_engine, "connect")
         def enable_foreign_keys(dbapi_connection, _connection_record) -> None:
             cursor = dbapi_connection.cursor()
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.execute("PRAGMA busy_timeout=5000")
+            if file_backed:
+                cursor.execute("PRAGMA journal_mode=WAL")
             cursor.close()
 
     return engine
