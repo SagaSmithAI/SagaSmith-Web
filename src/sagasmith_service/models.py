@@ -305,11 +305,54 @@ class CampaignMessage(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class CampaignSuggestion(Base):
+    __tablename__ = "campaign_suggestions"
+    __table_args__ = (
+        UniqueConstraint(
+            "message_id",
+            "suggestion_id",
+            name="uq_campaign_suggestion_message_id",
+        ),
+        Index(
+            "ix_campaign_suggestion_active_target",
+            "room_id",
+            "target_user_id",
+            "expired",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    room_id: Mapped[str] = mapped_column(
+        ForeignKey("campaign_rooms.id", ondelete="CASCADE"), index=True
+    )
+    message_id: Mapped[str] = mapped_column(
+        ForeignKey("campaign_messages.id", ondelete="CASCADE"), index=True
+    )
+    suggestion_id: Mapped[str] = mapped_column(String(80))
+    target_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE")
+    )
+    actor_ref: Mapped[str | None] = mapped_column(String(64))
+    run_id: Mapped[str] = mapped_column(String(64))
+    expired: Mapped[bool] = mapped_column(Boolean, default=False)
+    valid_revision: Mapped[int | None] = mapped_column()
+    valid_phase: Mapped[str | None] = mapped_column(String(64))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
 class CampaignRoomEvent(Base):
     __tablename__ = "campaign_room_events"
     __table_args__ = (
         UniqueConstraint("room_id", "sequence", name="uq_campaign_room_event_sequence"),
         Index("ix_campaign_room_event_stream", "room_id", "sequence"),
+        Index(
+            "ix_campaign_room_event_activity",
+            "room_id",
+            "run_id",
+            "activity_id",
+            "sequence",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -318,6 +361,9 @@ class CampaignRoomEvent(Base):
     )
     sequence: Mapped[int] = mapped_column()
     event_type: Mapped[str] = mapped_column(String(50), index=True)
+    run_id: Mapped[str | None] = mapped_column(String(64))
+    activity_id: Mapped[str | None] = mapped_column(String(80))
+    activity_state: Mapped[str | None] = mapped_column(String(24))
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 

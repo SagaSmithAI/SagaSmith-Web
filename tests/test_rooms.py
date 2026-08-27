@@ -6,7 +6,12 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from sagasmith_service.api.rooms import _activity_token
-from sagasmith_service.models import AgentRun, AuditEvent, CampaignRoomEvent
+from sagasmith_service.models import (
+    AgentRun,
+    AuditEvent,
+    CampaignRoomEvent,
+    CampaignSuggestion,
+)
 
 PASSWORD = "correct horse battery staple"
 
@@ -516,6 +521,19 @@ def test_structured_room_turn_projects_actor_identity_and_personal_suggestions(
     assert message["structured_payload"]["blocks"][2]["verified"] is True
     assert message["structured_payload"]["suggestions"][0]["text"] == "我出示通行文书。"
     assert "target_user_id" not in message["structured_payload"]["suggestions"][0]
+    with client.app.state.session_factory() as session:
+        suggestion = session.scalar(
+            select(CampaignSuggestion).where(
+                CampaignSuggestion.message_id == message["id"],
+                CampaignSuggestion.suggestion_id == "s1",
+            )
+        )
+        assert suggestion is not None
+        assert suggestion.room_id == response.json()["message"]["room_id"]
+        assert suggestion.target_user_id == owner["id"]
+        assert suggestion.expired is False
+        assert suggestion.valid_revision == 7
+        assert suggestion.valid_phase == "play"
 
     player = add_player(client, "room-structured-player@example.com", "Player")
     timeline = client.get("/api/campaigns/campaign-1/room/messages").json()
