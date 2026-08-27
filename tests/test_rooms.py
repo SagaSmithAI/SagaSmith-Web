@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any
 
 from conftest import FakeAgentRuntime, FakeDndRuntime
@@ -593,6 +594,81 @@ def test_public_room_turn_cannot_reference_dm_only_resolution(
         resolution_id not in str(message.get("structured_payload") or {})
         for message in timeline
     )
+
+
+def test_public_room_turn_bounds_parallel_resolution_projection_reads(
+    client: TestClient, agent_runtime: FakeAgentRuntime, dnd_runtime: FakeDndRuntime
+) -> None:
+    register(client, "room-owner@example.com", "DM")
+    create_campaign(client)
+    add_player(client, "projection-player@example.com", "Player")
+    resolution_ids = [f"parallel-resolution-{index}" for index in range(9)]
+    for resolution_id in resolution_ids:
+        dnd_runtime.resolution_presentations[resolution_id] = {
+            "schema": "sagasmith.resolution-presentation/v1",
+            "system_id": "dnd5e",
+            "thread_id": resolution_id,
+            "event_sequence": 1,
+            "operation": "dice.roll",
+            "status": "settled",
+            "audience": {"scope": "public", "actor_refs": [], "disclosure": "public"},
+            "actor_refs": [],
+            "rolls": [],
+            "outcome": {"success": True},
+            "pending_choice": None,
+            "campaign_revision": 7,
+        }
+
+    active = 0
+    maximum = 0
+    original = dnd_runtime.get_resolution_presentation
+
+    async def delayed_projection(**arguments: Any) -> dict[str, Any]:
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        try:
+            await asyncio.sleep(0.01)
+            return await original(**arguments)
+        finally:
+            active -= 1
+
+    dnd_runtime.get_resolution_presentation = delayed_projection
+
+    def output(context: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "schema": "sagasmith.room-turn/v1",
+            "run_id": context["run_id"],
+            "messages": [
+                {
+                    "output_id": "parallel-public-rolls",
+                    "audience": {"kind": "public"},
+                    "blocks": [
+                        {"type": "narration", "block_id": "n1", "text": "骰声接连落定。"},
+                        *[
+                            {
+                                "type": "resolution_ref",
+                                "block_id": f"r{index}",
+                                "resolution_id": resolution_id,
+                            }
+                            for index, resolution_id in enumerate(resolution_ids)
+                        ],
+                    ],
+                }
+            ],
+        }
+
+    agent_runtime.structured_output_factory = output
+    response = client.post(
+        "/api/campaigns/campaign-1/room/messages",
+        headers={"Idempotency-Key": "parallel-resolution-projection"},
+        json={"content": "依次检定。", "mode": "action"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert maximum == 16
+    blocks = response.json()["agent_message"]["structured_payload"]["blocks"]
+    assert [block["resolution_id"] for block in blocks[1:]] == resolution_ids
 
 
 def test_suggestion_cannot_reference_hidden_or_stale_pending_choice(
