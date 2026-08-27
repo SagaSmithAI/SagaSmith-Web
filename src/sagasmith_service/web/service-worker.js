@@ -1,4 +1,4 @@
-const CACHE="sagasmith-shell-v6";
+const CACHE="sagasmith-shell-v7";
 const SHELL=[
   "/",
   "/styles.css",
@@ -16,6 +16,12 @@ const SHELL=[
   "/assets/forge/studio.js",
   "/assets/identity/controller.js",
   "/assets/module-studio/controller.js",
+  "/assets/room/characters.js",
+  "/assets/room/combat-grid.js",
+  "/assets/room/controller.js",
+  "/assets/room/model.js",
+  "/assets/room/timeline.js",
+  "/assets/room/view.js",
   "/assets/state/store.js",
   "/manifest.webmanifest",
   "/sagasmith-icon.svg",
