@@ -263,17 +263,21 @@ def _resolve_room_audience(
     return audience, user_ids
 
 
+def _runtime_for_system(request: Request, system_id: str) -> Any:
+    runtimes = getattr(request.app.state, "game_runtimes", {})
+    runtime = runtimes.get(system_id) if isinstance(runtimes, dict) else None
+    if runtime is None and system_id == "dnd5e":
+        runtime = getattr(request.app.state, "dnd_runtime", None)
+    if runtime is None:
+        raise ValueError(f"no hosted runtime for system {system_id!r}")
+    return runtime
+
+
 def _campaign_runtime(request: Request, session: Session, campaign_id: str) -> Any:
     campaign = session.get(CampaignProjection, campaign_id)
     if campaign is None:
         raise ValueError("campaign projection not found")
-    runtimes = getattr(request.app.state, "game_runtimes", {})
-    runtime = runtimes.get(campaign.system_id) if isinstance(runtimes, dict) else None
-    if runtime is None and campaign.system_id == "dnd5e":
-        runtime = getattr(request.app.state, "dnd_runtime", None)
-    if runtime is None:
-        raise ValueError(f"no hosted runtime for system {campaign.system_id!r}")
-    return runtime
+    return _runtime_for_system(request, campaign.system_id)
 
 
 def _activity_token(secret: Any, campaign_id: str, run_id: str) -> str:
@@ -1975,38 +1979,57 @@ async def room_events(
 async def panel_state(
     campaign_id: str,
     request: Request,
-    user: CurrentUser,
-    session: DbSession,
+    user: AsyncCurrentUser,
+    session: AsyncDbSession,
 ) -> dict[str, Any]:
-    membership = _membership(session, campaign_id, user.id)
-    runtime = _campaign_runtime(request, session, campaign_id)
-    try:
-        value = await runtime.get_panel_state(
-            campaign_id=campaign_id, principal_id=user.principal_id
+    user_id = user.id
+    principal_id = user.principal_id
+    membership = await session.scalar(
+        select(CampaignMembershipProjection).where(
+            CampaignMembershipProjection.campaign_id == campaign_id,
+            CampaignMembershipProjection.user_id == user_id,
+            CampaignMembershipProjection.status == "active",
         )
+    )
+    if membership is None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "campaign membership required")
+    campaign = await session.get(CampaignProjection, campaign_id)
+    if campaign is None:
+        raise ValueError("campaign projection not found")
+    membership_role = membership.role
+    runtime = _runtime_for_system(request, campaign.system_id)
+    await session.rollback()
+    try:
+        value = await runtime.get_panel_state(campaign_id=campaign_id, principal_id=principal_id)
     except RuntimeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
-    bindings = session.scalars(
-        select(ActorBindingProjection).where(
-            ActorBindingProjection.campaign_id == campaign_id,
-            ActorBindingProjection.status == "active",
+    bindings = (
+        await session.scalars(
+            select(ActorBindingProjection).where(
+                ActorBindingProjection.campaign_id == campaign_id,
+                ActorBindingProjection.status == "active",
+            )
         )
     ).all()
-    visible_bindings = bindings if membership.role in {"owner", "dm"} else [
-        item for item in bindings if item.user_id == user.id
+    visible_bindings = (
+        bindings
+        if membership_role in {"owner", "dm"}
+        else [item for item in bindings if item.user_id == user_id]
+    )
+    binding_views = [
+        {
+            "actor_id": item.actor_id,
+            "user_id": item.user_id,
+            "can_control": item.can_control,
+            "can_view_private": item.can_view_private,
+        }
+        for item in visible_bindings
     ]
+    await session.rollback()
     return {
         **value,
-        "membership": {"role": membership.role, "user_id": user.id},
-        "actor_bindings": [
-            {
-                "actor_id": item.actor_id,
-                "user_id": item.user_id,
-                "can_control": item.can_control,
-                "can_view_private": item.can_view_private,
-            }
-            for item in visible_bindings
-        ],
+        "membership": {"role": membership_role, "user_id": user_id},
+        "actor_bindings": binding_views,
     }
 
 
