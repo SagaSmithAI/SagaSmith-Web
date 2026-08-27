@@ -61,6 +61,7 @@ export function createRoomController({
     state.actingActorId = null;
     state.selectedTargetId = null;
     state.gridDestination = null;
+    state.gridCursor = null;
     state.gridExpanded = false;
     state.characterPage =
       localStorage.getItem(`sagasmith:character-page:${campaign.id}`) || "character";

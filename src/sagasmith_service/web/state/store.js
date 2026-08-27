@@ -30,6 +30,7 @@ export const state = {
   roomMode: "table",
   selectedTargetId: null,
   gridDestination: null,
+  gridCursor: null,
   animatedResolutions: new Set(),
   hydratingRoom: false,
 };

@@ -14,7 +14,7 @@ def test_browser_entry_loads_complete_precached_module_graph(client: TestClient)
 
     service_worker = client.get("/service-worker.js")
     assert service_worker.status_code == 200
-    assert 'const CACHE="sagasmith-shell-v7"' in service_worker.text
+    assert 'const CACHE="sagasmith-shell-v9"' in service_worker.text
 
     expected_modules = {
         "/assets/api/client.js",
@@ -32,6 +32,7 @@ def test_browser_entry_loads_complete_precached_module_graph(client: TestClient)
         "/assets/module-studio/controller.js",
         "/assets/room/characters.js",
         "/assets/room/combat-grid.js",
+        "/assets/room/combat-grid-state.js",
         "/assets/room/controller.js",
         "/assets/room/model.js",
         "/assets/room/timeline.js",
@@ -59,6 +60,11 @@ def test_browser_entry_loads_complete_precached_module_graph(client: TestClient)
     assert discovered == expected_modules
     for path in expected_modules:
         assert f'"{path}"' in service_worker.text
+    texture = client.get("/sagasmith-grid-texture.webp")
+    assert texture.status_code == 200
+    assert texture.headers["content-type"] == "image/webp"
+    assert len(texture.content) < 250_000
+    assert '"/sagasmith-grid-texture.webp"' in service_worker.text
 
     entry = client.get("/app.js").text
     assert "/api/community" not in entry

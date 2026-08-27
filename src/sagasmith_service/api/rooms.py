@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -12,7 +13,7 @@ from decimal import Decimal
 from typing import Annotated, Any, TypeVar, cast
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -2031,6 +2032,60 @@ async def panel_state(
         "membership": {"role": membership_role, "user_id": user_id},
         "actor_bindings": binding_views,
     }
+
+
+@router.get("/combat/render")
+async def public_combat_render(
+    campaign_id: str,
+    request: Request,
+    user: CurrentUser,
+    session: DbSession,
+) -> Response:
+    """Return only the D&D MCP's party-public combat projection."""
+
+    _membership(session, campaign_id, user.id)
+    campaign = session.get(CampaignProjection, campaign_id)
+    if campaign is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "campaign not found")
+    if campaign.system_id != "dnd5e":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "combat render unavailable")
+    runtime = _campaign_runtime(request, session, campaign_id)
+    try:
+        rendered = await runtime.render_public_combat(
+            campaign_id=campaign_id,
+            principal_id=user.principal_id,
+        )
+    except (AttributeError, RuntimeError) as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "public combat render unavailable"
+        ) from exc
+    if rendered.metadata.get("audience_projection") != "party_public":
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "invalid combat render projection")
+    checksum = rendered.metadata["image_checksum"]
+    public_text_headers = {}
+    for field, header, limit in (
+        ("alt_text", "X-SagaSmith-Combat-Alt", 240),
+        ("suggested_caption", "X-SagaSmith-Combat-Caption", 500),
+    ):
+        value = rendered.metadata.get(field)
+        if not isinstance(value, str):
+            continue
+        value = " ".join(value.split())[:limit].strip()
+        if value:
+            public_text_headers[header] = base64.urlsafe_b64encode(
+                value.encode("utf-8")
+            ).decode("ascii").rstrip("=")
+    return Response(
+        content=rendered.content,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": 'inline; filename="sagasmith-party-combat.png"',
+            "ETag": f'"{checksum}"',
+            "X-Content-Type-Options": "nosniff",
+            **public_text_headers,
+        },
+    )
 
 
 @router.get("/characters/{actor_id}")

@@ -25,6 +25,7 @@ def test_web_shell(tmp_path) -> None:
     assert "SagaSmith" in response.text
     assert "SAGASMITH FORGE" in response.text
     assert "script-src 'self'" in response.headers["Content-Security-Policy"]
+    assert "img-src 'self' https: data: blob:" in response.headers["Content-Security-Policy"]
 
 
 def test_readiness_metrics_and_request_id(dnd_runtime, agent_runtime, tmp_path) -> None:

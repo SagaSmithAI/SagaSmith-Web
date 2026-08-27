@@ -1,4 +1,4 @@
-const CACHE="sagasmith-shell-v7";
+const CACHE="sagasmith-shell-v9";
 const SHELL=[
   "/",
   "/styles.css",
@@ -18,6 +18,7 @@ const SHELL=[
   "/assets/module-studio/controller.js",
   "/assets/room/characters.js",
   "/assets/room/combat-grid.js",
+  "/assets/room/combat-grid-state.js",
   "/assets/room/controller.js",
   "/assets/room/model.js",
   "/assets/room/timeline.js",
@@ -25,6 +26,7 @@ const SHELL=[
   "/assets/state/store.js",
   "/manifest.webmanifest",
   "/sagasmith-icon.svg",
+  "/sagasmith-grid-texture.webp",
 ];
 self.addEventListener("install",event=>event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(SHELL))));
 self.addEventListener("activate",event=>event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(key=>key!==CACHE).map(key=>caches.delete(key))))));

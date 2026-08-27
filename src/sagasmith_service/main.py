@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import mimetypes
 import re
 import time
 import uuid
@@ -295,7 +296,7 @@ def create_app(
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; script-src 'self'; style-src 'self'; "
-            "img-src 'self' https: data:; connect-src 'self'; object-src 'none'; "
+            "img-src 'self' https: data: blob:; connect-src 'self'; object-src 'none'; "
             "base-uri 'self'; frame-ancestors 'none'"
         )
         logger.info(
@@ -328,6 +329,9 @@ def create_app(
         return {"status": "ok", "version": __version__}
 
     web_root = Path(__file__).parent / "web"
+    # Python's Windows MIME registry may not know WebP, which would make the
+    # tactical-map texture an opaque download instead of an image response.
+    mimetypes.add_type("image/webp", ".webp")
     app.mount("/assets", StaticFiles(directory=web_root), name="web-assets")
     app.mount("/", StaticFiles(directory=web_root, html=True), name="web")
 
