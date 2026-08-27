@@ -27,12 +27,16 @@ def test_component_lock_covers_every_current_repository() -> None:
     )
 
 
-def test_compose_pins_every_enforced_component_revision() -> None:
+def test_deployment_defaults_pin_every_enforced_component_revision() -> None:
     lock = json.loads((ROOT / "component-versions.json").read_text(encoding="utf-8"))
-    compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
+    deployment_defaults = (
+        (ROOT / "compose.yaml").read_text(encoding="utf-8"),
+        (ROOT / ".env.example").read_text(encoding="utf-8"),
+    )
     for component in lock["components"]:
         if component["enforced"]:
-            assert f"#{component['revision']}" in compose
+            for deployment_default in deployment_defaults:
+                assert f"#{component['revision']}" in deployment_default
 
 
 def test_service_release_manifest_pins_every_runtime_layer() -> None:
@@ -72,6 +76,16 @@ def test_agent_supervisor_has_one_hash_locked_dependency_solution() -> None:
     )
     assert "--require-hashes -r /tmp/requirements.txt" in dockerfile
     assert "uv export" not in dockerfile
+
+
+def test_agent_supervisor_lock_does_not_disclose_local_paths() -> None:
+    requirements = (
+        ROOT / "infrastructure" / "agent-supervisor-requirements.txt"
+    ).read_text(encoding="utf-8")
+    assert "file://" not in requirements.casefold()
+    assert "# via" not in requirements.casefold()
+    assert re.search(r"(?<![a-z])[a-z]:[\\/]", requirements, re.IGNORECASE) is None
+    assert re.search(r"\(/(?:home|users|tmp|var/tmp)/", requirements, re.IGNORECASE) is None
 
 
 def test_hosted_contract_requires_dynamic_scoped_structured_tools() -> None:

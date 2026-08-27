@@ -32,6 +32,7 @@ def main() -> None:
             "3.12",
             "--universal",
             "--generate-hashes",
+            "--no-annotate",
             "--no-emit-package",
             "sagasmith-service",
             "--no-emit-package",
