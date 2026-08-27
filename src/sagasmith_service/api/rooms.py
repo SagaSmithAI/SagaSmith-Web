@@ -7,6 +7,7 @@ import json
 import time
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Annotated, Any, TypeVar, cast
 
@@ -280,112 +281,161 @@ def _output_resolution_ids(output: Any) -> set[str]:
     return identifiers
 
 
-async def _resolution_index(
-    request: Request,
-    session: Session,
-    *,
-    submission: RoomTurnSubmission,
-    campaign_id: str,
-    trigger: CampaignMessage,
-) -> dict[tuple[str, str], dict[str, Any]]:
-    """Verify every reference by querying the MCP as every target user."""
+@dataclass(frozen=True)
+class _RoomProjectionContext:
+    """One request-scoped snapshot for projection authorization and routing."""
 
-    runtime = _campaign_runtime(request, session, campaign_id)
-    campaign = session.get(CampaignProjection, campaign_id)
-    assert campaign is not None
-    groups: list[tuple[tuple[str, str], list[str]]] = []
-    for output in submission.messages:
-        identifiers = _output_resolution_ids(output)
-        if not identifiers:
-            continue
-        audience, audience_user_ids = _resolve_room_audience(
-            session,
-            campaign_id=campaign_id,
-            requested=output.audience,
-            trigger=trigger,
-        )
-        target_user_ids = _audience_users(
-            session,
-            campaign_id,
-            audience,
-            audience_user_ids,
-        )
-        users = [session.get(User, user_id) for user_id in sorted(target_user_ids)]
-        if any(user is None for user in users):
-            raise ValueError("resolution audience contains an unknown user")
-        principals = [target.principal_id for target in users if target is not None]
-        groups.extend(
-            ((output.output_id, resolution_id), principals)
-            for resolution_id in sorted(identifiers)
-        )
+    campaign: CampaignProjection
+    runtime: Any
+    trigger: CampaignMessage
+    members_by_user: dict[str, CampaignMembershipProjection]
+    users_by_id: dict[str, User]
+    bindings_by_actor: dict[str, tuple[ActorBindingProjection, ...]]
 
-    jobs = [
-        (key, principal_id)
-        for key, principal_ids in groups
-        for principal_id in principal_ids
-    ]
-
-    async def fetch(
-        job: tuple[tuple[str, str], str],
-    ) -> tuple[tuple[str, str], dict[str, Any]]:
-        key, principal_id = job
-        _, resolution_id = key
-        try:
-            projection = await runtime.get_resolution_presentation(
-                campaign_id=campaign_id,
-                resolution_id=resolution_id,
-                principal_id=principal_id,
+    @classmethod
+    def load(
+        cls,
+        request: Request,
+        session: Session,
+        *,
+        campaign_id: str,
+        trigger: CampaignMessage,
+    ) -> _RoomProjectionContext:
+        campaign = session.get(CampaignProjection, campaign_id)
+        if campaign is None:
+            raise ValueError("campaign projection not found")
+        members = session.scalars(
+            select(CampaignMembershipProjection).where(
+                CampaignMembershipProjection.campaign_id == campaign_id,
+                CampaignMembershipProjection.status == "active",
             )
-        except RuntimeError as exc:
-            raise ValueError(
-                "resolution is not visible to the complete message audience"
-            ) from exc
-        if (
-            projection.get("schema") != "sagasmith.resolution-presentation/v1"
-            or str(projection.get("resolution_id") or "") != resolution_id
-            or str(projection.get("campaign_id") or "") != campaign_id
-            or str(projection.get("system_id") or "") != campaign.system_id
-        ):
-            raise ValueError("MCP returned a mismatched resolution presentation")
-        return key, dict(projection)
+        ).all()
+        members_by_user = {item.user_id: item for item in members}
+        users = (
+            session.scalars(
+                select(User).where(User.id.in_(sorted(members_by_user)))
+            ).all()
+            if members_by_user
+            else []
+        )
+        users_by_id = {item.id: item for item in users}
+        if users_by_id.keys() != members_by_user.keys():
+            raise ValueError("campaign membership contains an unknown user")
+        bindings = session.scalars(
+            select(ActorBindingProjection).where(
+                ActorBindingProjection.campaign_id == campaign_id,
+                ActorBindingProjection.status == "active",
+            )
+        ).all()
+        bindings_by_actor: dict[str, list[ActorBindingProjection]] = {}
+        for binding in bindings:
+            bindings_by_actor.setdefault(binding.actor_id, []).append(binding)
+        return cls(
+            campaign=campaign,
+            runtime=_campaign_runtime(request, session, campaign_id),
+            trigger=trigger,
+            members_by_user=members_by_user,
+            users_by_id=users_by_id,
+            bindings_by_actor={
+                actor_id: tuple(sorted(items, key=lambda item: item.id))
+                for actor_id, items in bindings_by_actor.items()
+            },
+        )
 
-    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {key: [] for key, _ in groups}
-    for key, projection in await _observed_projection_batch(
-        jobs,
-        fetch,
-        system=campaign.system_id,
-        operation_class="resolution",
-    ):
-        grouped[key].append(projection)
+    def audience_users(
+        self,
+        audience: str,
+        audience_user_ids: list[str],
+    ) -> set[str]:
+        if audience == "public":
+            return set(self.members_by_user)
+        if audience == "dm":
+            return {
+                user_id
+                for user_id, membership in self.members_by_user.items()
+                if membership.role in {"owner", "dm"}
+            }
+        requested = set(audience_user_ids)
+        return set(self.members_by_user).intersection(requested)
 
-    indexed: dict[tuple[str, str], dict[str, Any]] = {}
-    for key, _ in groups:
-        projections = grouped[key]
-        if not projections:
-            raise ValueError("resolution message has no audience")
-        comparison = [
-            json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-            for item in projections
-        ]
-        if len(set(comparison)) != 1:
-            raise ValueError("MCP resolution projection differs inside one message audience")
-        indexed[key] = projections[0]
-    return indexed
+    def resolve_audience(self, requested: RoomAudience) -> tuple[str, list[str]]:
+        if requested.kind == "public":
+            audience, user_ids = "public", []
+        elif requested.kind == "dm":
+            audience, user_ids = "dm", []
+        else:
+            bindings = [
+                binding
+                for actor_ref in requested.actor_refs
+                for binding in self.bindings_by_actor.get(actor_ref, ())
+                if binding.can_view_private
+            ]
+            bound_refs = {item.actor_id for item in bindings}
+            if bound_refs != set(requested.actor_refs):
+                raise ValueError("actor audience is not fully bound")
+            user_ids = sorted({item.user_id for item in bindings})
+            if not user_ids:
+                raise ValueError("actor audience has no active recipients")
+            audience = "private"
+        trigger_users = self.audience_users(
+            self.trigger.audience,
+            list(self.trigger.audience_user_ids or []),
+        )
+        output_users = self.audience_users(audience, user_ids)
+        if not output_users or not output_users.issubset(trigger_users):
+            raise ValueError("structured output would broaden the trigger audience")
+        return audience, user_ids
+
+    def principals_for(self, user_ids: set[str], *, subject: str) -> list[str]:
+        missing = user_ids.difference(self.users_by_id)
+        if missing:
+            raise ValueError(f"{subject} audience contains an unknown user")
+        return [self.users_by_id[user_id].principal_id for user_id in sorted(user_ids)]
 
 
-async def _actor_presentation_index(
-    request: Request,
-    session: Session,
+@dataclass(frozen=True)
+class _ProjectionJob:
+    kind: str
+    key: tuple[str, str]
+    principal_id: str
+    suggestion: bool = False
+
+
+async def _projection_indexes(
+    context: _RoomProjectionContext,
     *,
     submission: RoomTurnSubmission,
-    campaign_id: str,
-    trigger: CampaignMessage,
-) -> dict[tuple[str, str], dict[str, Any]]:
-    runtime = _campaign_runtime(request, session, campaign_id)
-    campaign = session.get(CampaignProjection, campaign_id)
-    assert campaign is not None
-    groups: list[tuple[tuple[str, str], list[str]]] = []
+) -> tuple[
+    dict[str, tuple[str, list[str]]],
+    dict[tuple[str, str], dict[str, Any]],
+    dict[tuple[str, str], dict[str, Any]],
+]:
+    """Plan every independent projection and execute one globally bounded queue."""
+
+    resolution_groups: dict[tuple[str, str], list[str]] = {}
+    actor_groups: dict[tuple[str, str], list[str]] = {}
+    audiences: dict[str, tuple[str, list[str]]] = {}
+    resolution_jobs: list[_ProjectionJob] = []
+    actor_jobs: list[_ProjectionJob] = []
     for output in submission.messages:
+        audience, audience_user_ids = context.resolve_audience(output.audience)
+        audiences[output.output_id] = (audience, audience_user_ids)
+        target_user_ids = context.audience_users(audience, audience_user_ids)
+        resolution_principals = context.principals_for(
+            target_user_ids,
+            subject="resolution",
+        )
+        actor_principals = context.principals_for(
+            target_user_ids,
+            subject="actor presentation",
+        )
+        for resolution_id in sorted(_output_resolution_ids(output)):
+            key = (output.output_id, resolution_id)
+            resolution_groups[key] = resolution_principals
+            resolution_jobs.extend(
+                _ProjectionJob("resolution", key, principal_id)
+                for principal_id in resolution_principals
+            )
         actor_refs = {
             str(block.speaker.actor_ref)
             for block in output.blocks
@@ -393,104 +443,133 @@ async def _actor_presentation_index(
             and block.speaker.kind == "published_actor"
             and block.speaker.actor_ref
         }
-        if not actor_refs:
-            continue
-        audience, audience_user_ids = _resolve_room_audience(
-            session,
-            campaign_id=campaign_id,
-            requested=output.audience,
-            trigger=trigger,
-        )
-        target_user_ids = _audience_users(
-            session,
-            campaign_id,
-            audience,
-            audience_user_ids,
-        )
-        users = [session.get(User, user_id) for user_id in sorted(target_user_ids)]
-        if any(target is None for target in users):
-            raise ValueError("actor presentation audience contains an unknown user")
-        principals = [target.principal_id for target in users if target is not None]
-        groups.extend(
-            ((output.output_id, actor_ref), principals) for actor_ref in sorted(actor_refs)
-        )
+        for actor_ref in sorted(actor_refs):
+            key = (output.output_id, actor_ref)
+            actor_groups[key] = actor_principals
+            actor_jobs.extend(
+                _ProjectionJob("actor", key, principal_id)
+                for principal_id in actor_principals
+            )
+
     suggestion_actor_refs = {
         str(item.actor_ref) for item in submission.suggestions if item.actor_ref
     }
-    target = session.get(User, trigger.sender_user_id) if trigger.sender_user_id else None
+    target = (
+        context.users_by_id.get(context.trigger.sender_user_id)
+        if context.trigger.sender_user_id
+        else None
+    )
     if suggestion_actor_refs and target is None:
         raise ValueError("suggestion actor has no triggering principal")
-    suggestion_keys = [("__suggestion__", actor_ref) for actor_ref in sorted(suggestion_actor_refs)]
-    jobs = [
-        (key, principal_id, False)
-        for key, principal_ids in groups
-        for principal_id in principal_ids
+    suggestion_keys = [
+        ("__suggestion__", actor_ref)
+        for actor_ref in sorted(suggestion_actor_refs)
     ]
-    jobs.extend(
-        (key, target.principal_id, True)
+    actor_jobs.extend(
+        _ProjectionJob("actor", key, target.principal_id, suggestion=True)
         for key in suggestion_keys
         if target is not None
     )
 
-    async def fetch(
-        job: tuple[tuple[str, str], str, bool],
-    ) -> tuple[tuple[str, str], bool, dict[str, Any]]:
-        key, principal_id, suggestion = job
-        _, actor_ref = key
+    jobs: list[_ProjectionJob] = []
+    for index in range(max(len(resolution_jobs), len(actor_jobs), 0)):
+        if index < len(resolution_jobs):
+            jobs.append(resolution_jobs[index])
+        if index < len(actor_jobs):
+            jobs.append(actor_jobs[index])
+
+    async def fetch(job: _ProjectionJob) -> tuple[_ProjectionJob, dict[str, Any]]:
+        _, reference_id = job.key
+        if job.kind == "resolution":
+            try:
+                projection = await context.runtime.get_resolution_presentation(
+                    campaign_id=context.campaign.id,
+                    resolution_id=reference_id,
+                    principal_id=job.principal_id,
+                )
+            except RuntimeError as exc:
+                raise ValueError(
+                    "resolution is not visible to the complete message audience"
+                ) from exc
+            if (
+                projection.get("schema") != "sagasmith.resolution-presentation/v1"
+                or str(projection.get("resolution_id") or "") != reference_id
+                or str(projection.get("campaign_id") or "") != context.campaign.id
+                or str(projection.get("system_id") or "") != context.campaign.system_id
+            ):
+                raise ValueError("MCP returned a mismatched resolution presentation")
+            return job, dict(projection)
         try:
-            actor = await runtime.get_character_card(
-                campaign_id=campaign_id,
-                character_id=actor_ref,
-                principal_id=principal_id,
+            actor = await context.runtime.get_character_card(
+                campaign_id=context.campaign.id,
+                character_id=reference_id,
+                principal_id=job.principal_id,
             )
         except RuntimeError as exc:
             message = (
                 "suggestion actor is not visible to its target"
-                if suggestion
+                if job.suggestion
                 else "published actor is not visible to the message audience"
             )
             raise ValueError(message) from exc
         if (
-            str(actor.get("id") or "") != actor_ref
-            or str(actor.get("campaign_id") or "") != campaign_id
-            or (not suggestion and not str(actor.get("name") or "").strip())
+            str(actor.get("id") or "") != reference_id
+            or str(actor.get("campaign_id") or "") != context.campaign.id
+            or (not job.suggestion and not str(actor.get("name") or "").strip())
         ):
             message = (
                 "MCP returned a mismatched suggestion actor"
-                if suggestion
+                if job.suggestion
                 else "MCP returned a mismatched actor presentation"
             )
             raise ValueError(message)
-        return key, suggestion, {
+        return job, {
             "label": str(actor.get("name") or ""),
             "character_type": str(actor.get("character_type") or ""),
             "revision": int(actor.get("revision") or 0),
         }
 
-    published: dict[tuple[str, str], list[dict[str, Any]]] = {key: [] for key, _ in groups}
-    suggested: dict[tuple[str, str], list[dict[str, Any]]] = {key: [] for key in suggestion_keys}
-    for key, suggestion, presentation in await _observed_projection_batch(
+    resolution_values = {key: [] for key in resolution_groups}
+    actor_values = {key: [] for key in actor_groups}
+    suggestion_values = {key: [] for key in suggestion_keys}
+    results = await _observed_projection_batch(
         jobs,
         fetch,
-        system=campaign.system_id,
-        operation_class="actor",
-    ):
-        (suggested if suggestion else published)[key].append(presentation)
+        system=context.campaign.system_id,
+        operation_class="turn",
+    )
+    for job, value in results:
+        if job.kind == "resolution":
+            resolution_values[job.key].append(value)
+        elif job.suggestion:
+            suggestion_values[job.key].append(value)
+        else:
+            actor_values[job.key].append(value)
 
-    indexed: dict[tuple[str, str], dict[str, Any]] = {}
-    for key, _ in groups:
-        presentations = published[key]
-        if not presentations or len(
-            {
-                json.dumps(item, sort_keys=True, ensure_ascii=False)
-                for item in presentations
-            }
+    resolution_index: dict[tuple[str, str], dict[str, Any]] = {}
+    for key, values in resolution_values.items():
+        if not values:
+            raise ValueError("resolution message has no audience")
+        comparison = {
+            json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+            for item in values
+        }
+        if len(comparison) != 1:
+            raise ValueError("MCP resolution projection differs inside one message audience")
+        resolution_index[key] = values[0]
+
+    actor_index: dict[tuple[str, str], dict[str, Any]] = {}
+    for key, values in actor_values.items():
+        if not values or len(
+            {json.dumps(item, sort_keys=True, ensure_ascii=False) for item in values}
         ) != 1:
             raise ValueError("actor presentation differs inside one message audience")
-        indexed[key] = presentations[0]
-    for key in suggestion_keys:
-        indexed[key] = suggested[key][0]
-    return indexed
+        actor_index[key] = values[0]
+    for key, values in suggestion_values.items():
+        if not values:
+            raise ValueError("suggestion actor lacks an MCP presentation")
+        actor_index[key] = values[0]
+    return audiences, resolution_index, actor_index
 
 
 def _emit(
@@ -763,17 +842,16 @@ def _conversation(
 
 
 def _project_turn_messages(
-    session: Session,
     *,
+    context: _RoomProjectionContext,
     submission: RoomTurnSubmission,
-    campaign_id: str,
     run_id: str,
-    trigger: CampaignMessage,
     host_role: str,
     user: User,
     secret: Any,
     revision: int | None,
     phase: str | None,
+    audiences: dict[str, tuple[str, list[str]]],
     resolution_index: dict[tuple[str, str], dict[str, Any]],
     actor_presentation_index: dict[tuple[str, str], dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -791,16 +869,11 @@ def _project_turn_messages(
     for suggestion in submission.suggestions:
         actor_revision = suggestion.actor_revision
         if suggestion.actor_ref:
-            binding = session.scalar(
-                select(ActorBindingProjection.id).where(
-                    ActorBindingProjection.campaign_id == campaign_id,
-                    ActorBindingProjection.actor_id == suggestion.actor_ref,
-                    ActorBindingProjection.user_id == user.id,
-                    ActorBindingProjection.status == "active",
-                    ActorBindingProjection.can_control.is_(True),
-                )
+            controls_actor = any(
+                binding.user_id == user.id and binding.can_control
+                for binding in context.bindings_by_actor.get(suggestion.actor_ref, ())
             )
-            if binding is None:
+            if not controls_actor:
                 raise ValueError("suggestion actor is outside the triggering principal scope")
             actor_presentation = actor_presentation_index.get(
                 ("__suggestion__", suggestion.actor_ref)
@@ -831,7 +904,7 @@ def _project_turn_messages(
                     "actor_ref": suggestion.actor_ref,
                     "actor_revision": actor_revision,
                     "pending_choice_id": suggestion.pending_choice_id,
-                    "trigger_sequence": trigger.sequence,
+                    "trigger_sequence": context.trigger.sequence,
                     "expired": False,
                 },
             }
@@ -839,26 +912,13 @@ def _project_turn_messages(
 
     suggestions_attached = False
     for output in submission.messages:
-        audience, audience_user_ids = _resolve_room_audience(
-            session,
-            campaign_id=campaign_id,
-            requested=output.audience,
-            trigger=trigger,
-        )
+        audience, audience_user_ids = audiences[output.output_id]
         blocks: list[dict[str, Any]] = []
         for block in output.blocks:
             value = block.model_dump(mode="json")
             if isinstance(block, PerformanceBlock):
                 actor_ref = block.speaker.actor_ref
-                bindings = []
-                if actor_ref:
-                    bindings = session.scalars(
-                        select(ActorBindingProjection).where(
-                            ActorBindingProjection.campaign_id == campaign_id,
-                            ActorBindingProjection.actor_id == actor_ref,
-                            ActorBindingProjection.status == "active",
-                        )
-                    ).all()
+                bindings = context.bindings_by_actor.get(actor_ref, ()) if actor_ref else ()
                 actor_presentation = (
                     actor_presentation_index.get((output.output_id, actor_ref))
                     if actor_ref
@@ -877,7 +937,7 @@ def _project_turn_messages(
                     if (
                         not actor_ref
                         or not owns_actor
-                        or provenance.source_message_id != trigger.id
+                        or provenance.source_message_id != context.trigger.id
                     ):
                         raise ValueError("player performance lacks matching owner intent")
                 elif provenance.kind == "mcp_resolution":
@@ -893,7 +953,7 @@ def _project_turn_messages(
                 value["speaker"] = project_speaker(
                     block.speaker,
                     secret=secret,
-                    campaign_id=campaign_id,
+                    campaign_id=context.campaign.id,
                 )
                 if actor_presentation is not None:
                     value["speaker"]["label"] = actor_presentation["label"]
@@ -907,7 +967,7 @@ def _project_turn_messages(
                 value["presentation"] = deepcopy(presentation)
             blocks.append(value)
 
-        output_users = _audience_users(session, campaign_id, audience, audience_user_ids)
+        output_users = context.audience_users(audience, audience_user_ids)
         attach_suggestions = not suggestions_attached and user.id in output_users
         payload: dict[str, Any] = {
             "schema": "sagasmith.room-message/v1",
@@ -1169,31 +1229,26 @@ async def _run_agent(
         if result.structured_output is None:
             raise ValueError("Agent returned no structured room output")
         submission = RoomTurnSubmission.model_validate(result.structured_output)
-        resolution_index = await _resolution_index(
+        projection_context = _RoomProjectionContext.load(
             request,
             session,
-            submission=submission,
             campaign_id=campaign_id,
             trigger=trigger,
         )
-        actor_presentation_index = await _actor_presentation_index(
-            request,
-            session,
+        audiences, resolution_index, actor_presentation_index = await _projection_indexes(
+            projection_context,
             submission=submission,
-            campaign_id=campaign_id,
-            trigger=trigger,
         )
         projected = _project_turn_messages(
-            session,
+            context=projection_context,
             submission=submission,
-            campaign_id=campaign_id,
             run_id=run.id,
-            trigger=trigger,
             host_role=host_role,
             user=user,
             secret=request.app.state.settings.session_secret,
             revision=revision,
             phase=phase,
+            audiences=audiences,
             resolution_index=resolution_index,
             actor_presentation_index=actor_presentation_index,
         )
