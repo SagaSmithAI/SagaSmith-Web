@@ -6,6 +6,7 @@
     "service_api": "uv.lock",
     "agent_supervisor": "infrastructure/agent-supervisor-requirements.txt",
     "uv_version": "0.11.25",
+    "dependency_cutoff": "2026-08-17T12:00:00Z",
     "container_images": {
       "python_3_12_slim": "sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a",
       "python_3_12_alpine": "sha256:d09d15e60962ca365d1cd544a48773bac9d33f2fb1b00f2aa0deec78ade7dc31",
