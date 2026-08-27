@@ -30,13 +30,14 @@ Narrative adapter. D&D and CoC still create a fresh MCP transport and `ClientSes
 operation so principal context, authorization epoch and dynamic exposure never cross calls; only
 the lower-level TCP/TLS pool is reused.
 
-SagaSmith Web also owns a selective SQLAlchemy `AsyncEngine`/`AsyncSession` stack for room message
-and panel-intent actions. The room-message route authenticates and persists through one shared async
-session dependency, commits the message, quota reservation and Agent run before awaiting Agent or
-MCP work, then reacquires the room row for settlement and ordered projection writes. Other browser
-authentication, activity callbacks and low-frequency administration/community CRUD keep the
-synchronous engine; this is a hot-path migration, not a second authority or a repository-wide ORM
-rewrite.
+SagaSmith Web also owns a selective SQLAlchemy `AsyncEngine`/`AsyncSession` stack for room messages,
+panel intents and panel projection refreshes. Room messages authenticate and persist through one
+shared async session dependency, commit the message, quota reservation and Agent run before
+awaiting Agent or MCP work, then reacquire the room row for settlement and ordered projection
+writes. Panel refreshes end their membership/runtime read transaction before MCP and use a second
+short transaction for actor bindings afterward. Agent messages, authoritative panel commands,
+activity callbacks and low-frequency administration/community CRUD keep the synchronous engine;
+this is a measured hot-path migration, not a second authority or a repository-wide ORM rewrite.
 
 ## Shared authority across local and hosted deployments
 

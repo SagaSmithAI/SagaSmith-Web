@@ -65,8 +65,10 @@ Only ports 80/443 are public. SagaSmith Web starts with `alembic upgrade head`. 
   activity callbacks. Labels are bounded operation/statement/execution/status classes;
   `async_driver` distinguishes awaited database I/O from blocking sync-driver calls on the event
   loop. Room messages use async authentication and persistence; panel intents use async
-  persistence after sync authentication. The other route families remain evidence-gated. Follow
-  the [async database hot-path runbook](async-database-hotpaths.md) and never benchmark against
+  persistence after sync authentication; projection refreshes use async authentication and end
+  their local read transaction before MCP. Agent messages and authoritative panel commands remain
+  evidence-gated, while activity callbacks stay in worker threads. Follow the
+  [async database hot-path runbook](async-database-hotpaths.md) and never benchmark against
   production campaign data.
 - `module-worker:9101/metrics`: Module task outcomes and expired-lease recovery counters on the
   private network.

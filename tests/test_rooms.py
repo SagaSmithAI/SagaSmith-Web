@@ -291,6 +291,61 @@ def test_async_room_action_releases_database_before_agent_and_mcp_awaits(
     assert observed_awaits == ["agent", "campaign", "projection"]
 
 
+def test_async_projection_refresh_releases_database_before_mcp_await(
+    client: TestClient,
+    dnd_runtime: FakeDndRuntime,
+) -> None:
+    register(client, "projection-owner@example.com", "Projection DM")
+    create_campaign(client)
+    captured_sessions: list[Any] = []
+
+    async def captured_async_db(request: Request):
+        async with request.app.state.async_session_factory() as session:
+            captured_sessions.append(session)
+            try:
+                yield session
+            finally:
+                if session.in_transaction():
+                    await session.rollback()
+
+    original_panel_state = dnd_runtime.get_panel_state
+
+    async def checked_panel_state(**arguments: Any):
+        assert len(captured_sessions) == 1
+        assert not captured_sessions[0].in_transaction()
+        assert client.app.state.async_engine.sync_engine.pool.checkedout() == 0
+        return await original_panel_state(**arguments)
+
+    dnd_runtime.get_panel_state = checked_panel_state
+    client.app.dependency_overrides[get_async_db] = captured_async_db
+    try:
+        response = client.get("/api/campaigns/campaign-1/room/panel")
+    finally:
+        client.app.dependency_overrides.pop(get_async_db, None)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["membership"]["role"] == "owner"
+
+
+def test_async_projection_refresh_releases_database_when_mcp_fails(
+    client: TestClient,
+    dnd_runtime: FakeDndRuntime,
+) -> None:
+    register(client, "projection-failure@example.com", "Projection failure DM")
+    create_campaign(client)
+
+    async def unavailable_panel_state(**_arguments: Any) -> dict[str, Any]:
+        assert client.app.state.async_engine.sync_engine.pool.checkedout() == 0
+        raise RuntimeError("projection unavailable")
+
+    dnd_runtime.get_panel_state = unavailable_panel_state
+    response = client.get("/api/campaigns/campaign-1/room/panel")
+
+    assert response.status_code == 502
+    assert response.json() == {"detail": "projection unavailable"}
+    assert client.app.state.async_engine.sync_engine.pool.checkedout() == 0
+
+
 def test_invalid_async_room_action_rolls_back_staged_room_work(
     client: TestClient,
 ) -> None:

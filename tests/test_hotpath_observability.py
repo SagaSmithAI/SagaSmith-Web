@@ -169,6 +169,52 @@ def test_room_action_uses_only_async_driver_database_work(
         assert refreshed_session.last_seen_at > heartbeat_sentinel.replace(tzinfo=None)
 
 
+def test_projection_refresh_uses_only_async_driver_database_work(
+    client: TestClient,
+) -> None:
+    registered = client.post(
+        "/api/auth/register",
+        json={
+            "email": "hotpath-projection-async@example.com",
+            "password": "correct horse battery staple",
+            "display_name": "Hot path projection async",
+        },
+    )
+    assert registered.status_code == 201
+    campaign = client.post(
+        "/api/campaigns",
+        headers={"Idempotency-Key": "hotpath-projection-async-campaign"},
+        json={"name": "Hot path async projection"},
+    )
+    assert campaign.status_code == 201
+    before_async = _statement_count("projection_refresh", "async_driver")
+    before_event_loop = _statement_count("projection_refresh", "event_loop")
+    before_worker = _statement_count("projection_refresh", "worker")
+    dependency_sessions = 0
+
+    async def counted_async_db(request: Request):
+        nonlocal dependency_sessions
+        dependency_sessions += 1
+        async with request.app.state.async_session_factory() as session:
+            try:
+                yield session
+            finally:
+                if session.in_transaction():
+                    await session.rollback()
+
+    client.app.dependency_overrides[get_async_db] = counted_async_db
+    try:
+        response = client.get(f"/api/campaigns/{campaign.json()['id']}/room/panel")
+    finally:
+        client.app.dependency_overrides.pop(get_async_db, None)
+
+    assert response.status_code == 200, response.text
+    assert dependency_sessions == 1
+    assert _statement_count("projection_refresh", "async_driver") > before_async
+    assert _statement_count("projection_refresh", "event_loop") == before_event_loop
+    assert _statement_count("projection_refresh", "worker") == before_worker
+
+
 def test_event_loop_sampler_detects_synchronous_blocking() -> None:
     async def exercise() -> float:
         stop = asyncio.Event()
