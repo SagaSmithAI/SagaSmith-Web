@@ -59,6 +59,12 @@ Only ports 80/443 are public. SagaSmith Web starts with `alembic upgrade head`. 
   `sagasmith_room_projection_batch_seconds` and `sagasmith_room_projection_jobs`. These series use
   only bounded `system`, `operation_class`, `status`, and `transport` labels; never add campaign,
   user, run, or tool-argument values.
+- Selective database diagnosis uses `sagasmith_event_loop_lag_seconds`,
+  `sagasmith_db_statement_seconds`, `sagasmith_db_request_seconds`, and
+  `sagasmith_db_statements_per_request` for room actions, Agent messages, projection refreshes, and
+  activity callbacks. Labels are bounded operation/statement/execution/status classes. Follow the
+  [async database hot-path runbook](async-database-hotpaths.md) before introducing AsyncSession;
+  never benchmark against production campaign data.
 - `module-worker:9101/metrics`: Module task outcomes and expired-lease recovery counters on the
   private network.
 - `X-Request-ID`: accepted only in a safe shape or generated, echoed, and logged.

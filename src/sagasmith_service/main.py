@@ -40,7 +40,17 @@ from sagasmith_service.integrations.agent import AgentRuntime, HttpAgentRuntime
 from sagasmith_service.integrations.coc_mcp import StreamableHttpCocRuntime
 from sagasmith_service.integrations.dnd_mcp import DndRuntime, StreamableHttpDndRuntime
 from sagasmith_service.integrations.narrative_mcp import HttpNarrativeRuntime
-from sagasmith_service.observability import HTTP_LATENCY_SECONDS, REQUESTS
+from sagasmith_service.observability import (
+    HTTP_LATENCY_SECONDS,
+    REQUESTS,
+    HotPathRequestObservation,
+    bind_hot_path_observation,
+    hot_path_operation,
+    install_database_observability,
+    observe_hot_path_request,
+    reset_hot_path_observation,
+    sample_max_event_loop_lag,
+)
 from sagasmith_service.rate_limit import (
     MemoryRateLimiter,
     RateLimiter,
@@ -67,6 +77,7 @@ def create_app(
 ) -> FastAPI:
     settings = settings or get_settings()
     engine = engine or make_engine(settings.database_url)
+    install_database_observability(engine)
     if settings.env in {"development", "test"}:
         Base.metadata.create_all(engine)
     managed_http_clients: dict[str, httpx.AsyncClient] = {}
@@ -161,6 +172,34 @@ def create_app(
         app.state.private_storage = LocalPrivateStorage(
             settings.private_storage_dir, settings.exchange_dir
         )
+
+    @app.middleware("http")
+    async def hot_path_observability(request: Request, call_next):
+        operation_class = hot_path_operation(request.method, request.url.path)
+        if operation_class is None:
+            return await call_next(request)
+        observation = HotPathRequestObservation(operation_class)
+        observation_token = bind_hot_path_observation(observation)
+        stop = asyncio.Event()
+        sampler_started = asyncio.Event()
+        sampler = asyncio.create_task(
+            sample_max_event_loop_lag(stop, started=sampler_started)
+        )
+        await sampler_started.wait()
+        outcome = "error"
+        try:
+            response = await call_next(request)
+            outcome = "success" if response.status_code < 400 else "error"
+            return response
+        finally:
+            stop.set()
+            event_loop_lag = await sampler
+            observe_hot_path_request(
+                observation,
+                status=outcome,
+                event_loop_lag_seconds=event_loop_lag,
+            )
+            reset_hot_path_observation(observation_token)
 
     @app.middleware("http")
     async def request_observability(request: Request, call_next):

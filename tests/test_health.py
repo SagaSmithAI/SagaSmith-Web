@@ -60,6 +60,10 @@ def test_readiness_metrics_and_request_id(dnd_runtime, agent_runtime, tmp_path) 
         "sagasmith_mcp_tool_seconds",
         "sagasmith_room_projection_batch_seconds",
         "sagasmith_room_projection_jobs",
+        "sagasmith_event_loop_lag_seconds",
+        "sagasmith_db_statement_seconds",
+        "sagasmith_db_request_seconds",
+        "sagasmith_db_statements_per_request",
     ):
         assert metric_name in metrics.text
 
