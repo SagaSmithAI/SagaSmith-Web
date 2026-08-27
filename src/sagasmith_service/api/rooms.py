@@ -13,7 +13,7 @@ from typing import Annotated, Any, TypeVar, cast
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from sagasmith_service.api.dependencies import CurrentUser, DbSession
@@ -31,6 +31,7 @@ from sagasmith_service.models import (
     CampaignRoom,
     CampaignRoomEvent,
     CampaignRoomReadCursor,
+    CampaignSuggestion,
     IdentityCampaignAssignment,
     IdentityMemoryEntry,
     User,
@@ -500,10 +501,19 @@ def _emit(
 ) -> CampaignRoomEvent:
     sequence = room.next_event_sequence
     room.next_event_sequence += 1
+    run_id = str(payload.get("run_id") or "") or None
+    activity_id = None
+    activity_state = None
+    if event_type == "room.activity":
+        activity_id = str(payload.get("activity_id") or "") or None
+        activity_state = str(payload.get("state") or "") or None
     event = CampaignRoomEvent(
         room_id=room.id,
         sequence=sequence,
         event_type=event_type,
+        run_id=run_id,
+        activity_id=activity_id,
+        activity_state=activity_state,
         payload=payload,
     )
     session.add(event)
@@ -517,21 +527,39 @@ def _close_run_activities(
     run_id: str,
     state: str,
 ) -> None:
-    latest: dict[str, dict[str, Any]] = {}
-    events = session.scalars(
-        select(CampaignRoomEvent)
+    latest = (
+        select(
+            CampaignRoomEvent.activity_id.label("activity_id"),
+            func.max(CampaignRoomEvent.sequence).label("sequence"),
+        )
         .where(
             CampaignRoomEvent.room_id == room.id,
-            CampaignRoomEvent.event_type == "room.activity",
+            CampaignRoomEvent.run_id == run_id,
+            CampaignRoomEvent.activity_id.is_not(None),
         )
-        .order_by(CampaignRoomEvent.sequence)
+        .group_by(CampaignRoomEvent.activity_id)
+        .subquery()
+    )
+    events = session.execute(
+        select(
+            CampaignRoomEvent.activity_id,
+            CampaignRoomEvent.activity_state,
+            CampaignRoomEvent.payload,
+        )
+        .join(
+            latest,
+            (CampaignRoomEvent.activity_id == latest.c.activity_id)
+            & (CampaignRoomEvent.sequence == latest.c.sequence),
+        )
+        .where(
+            CampaignRoomEvent.room_id == room.id,
+            CampaignRoomEvent.run_id == run_id,
+        )
     ).all()
-    for event in events:
-        payload = dict(event.payload or {})
-        if payload.get("run_id") == run_id:
-            latest[str(payload.get("activity_id") or "")] = payload
-    for activity_id, payload in latest.items():
-        if not activity_id or payload.get("state") != "started":
+    for activity_id, activity_state, raw_payload in events:
+        payload = dict(raw_payload or {})
+        payload["state"] = activity_state
+        if not activity_id or activity_state != "started":
             continue
         _emit(
             session,
@@ -547,17 +575,39 @@ def _expire_suggestions(
     *,
     target_user_id: str | None = None,
 ) -> None:
+    statement = select(CampaignSuggestion).where(
+        CampaignSuggestion.room_id == room.id,
+        CampaignSuggestion.expired.is_(False),
+    )
+    if target_user_id is not None:
+        statement = statement.where(CampaignSuggestion.target_user_id == target_user_id)
+    suggestions_to_expire = session.scalars(statement.with_for_update()).all()
+    by_message: dict[str, set[tuple[str, str | None]]] = {}
+    for suggestion_row in suggestions_to_expire:
+        suggestion_row.expired = True
+        suggestion_payload = deepcopy(dict(suggestion_row.payload or {}))
+        valid_for = dict(suggestion_payload.get("valid_for") or {})
+        valid_for["expired"] = True
+        suggestion_payload["valid_for"] = valid_for
+        suggestion_row.payload = suggestion_payload
+        by_message.setdefault(suggestion_row.message_id, set()).add(
+            (suggestion_row.suggestion_id, suggestion_row.target_user_id)
+        )
+    if not by_message:
+        return
     messages = session.scalars(
-        select(CampaignMessage).where(CampaignMessage.room_id == room.id)
+        select(CampaignMessage).where(CampaignMessage.id.in_(by_message))
     ).all()
     for message in messages:
         payload = deepcopy(dict(message.structured_payload or {}))
         suggestions = list(payload.get("suggestions") or [])
+        expiring = by_message[message.id]
         changed = False
         for suggestion in suggestions:
             if not isinstance(suggestion, dict):
                 continue
-            if target_user_id is not None and suggestion.get("target_user_id") != target_user_id:
+            key = (str(suggestion.get("id") or ""), suggestion.get("target_user_id"))
+            if key not in expiring:
                 continue
             valid_for = dict(suggestion.get("valid_for") or {})
             if valid_for.get("expired"):
@@ -568,6 +618,41 @@ def _expire_suggestions(
         if changed:
             payload["suggestions"] = suggestions
             message.structured_payload = payload
+
+
+def _index_message_suggestions(session: Session, message: CampaignMessage) -> None:
+    if message.sender_type != "agent":
+        return
+    message_payload = dict(message.structured_payload or {})
+    if message_payload.get("schema") != "sagasmith.room-message/v1":
+        return
+    for raw_suggestion in list(message_payload.get("suggestions") or []):
+        if not isinstance(raw_suggestion, dict):
+            continue
+        suggestion_id = str(raw_suggestion.get("id") or "")
+        target_user_id = str(raw_suggestion.get("target_user_id") or "") or None
+        valid_for = dict(raw_suggestion.get("valid_for") or {})
+        run_id = str(valid_for.get("run_id") or message_payload.get("run_id") or "")
+        if not suggestion_id or target_user_id is None or not run_id:
+            continue
+        session.add(
+            CampaignSuggestion(
+                room_id=message.room_id,
+                message_id=message.id,
+                suggestion_id=suggestion_id,
+                target_user_id=target_user_id,
+                actor_ref=str(raw_suggestion.get("actor_ref") or "") or None,
+                run_id=run_id,
+                expired=bool(valid_for.get("expired", False)),
+                valid_revision=(
+                    int(valid_for["revision"])
+                    if valid_for.get("revision") is not None
+                    else None
+                ),
+                valid_phase=str(valid_for.get("phase") or "") or None,
+                payload=deepcopy(raw_suggestion),
+            )
+        )
 
 
 def _append_message(
@@ -614,6 +699,7 @@ def _append_message(
     )
     session.add(item)
     session.flush()
+    _index_message_suggestions(session, item)
     _emit(session, room, "message.created", {"message_id": item.id})
     return item
 
@@ -1370,22 +1456,20 @@ def report_room_activity(
         )
     except ValueError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
-    previous = session.scalars(
-        select(CampaignRoomEvent).where(
+    previous_state = session.scalar(
+        select(CampaignRoomEvent.activity_state)
+        .where(
             CampaignRoomEvent.room_id == room.id,
-            CampaignRoomEvent.event_type == "room.activity",
+            CampaignRoomEvent.run_id == run_id,
+            CampaignRoomEvent.activity_id == payload.activity_id,
         )
-    ).all()
-    states = [
-        str(item.payload.get("state") or "")
-        for item in previous
-        if item.payload.get("run_id") == run_id
-        and item.payload.get("activity_id") == payload.activity_id
-    ]
-    if states and states[-1] == payload.state:
+        .order_by(CampaignRoomEvent.sequence.desc())
+        .limit(1)
+    )
+    if previous_state == payload.state:
         return {"accepted": True}
     terminal = {"completed", "failed", "cancelled", "superseded"}
-    if (not states and payload.state != "started") or (states and states[-1] in terminal):
+    if (previous_state is None and payload.state != "started") or previous_state in terminal:
         raise HTTPException(status.HTTP_409_CONFLICT, "invalid activity state transition")
     _emit(
         session,
