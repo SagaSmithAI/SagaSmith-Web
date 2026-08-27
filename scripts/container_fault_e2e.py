@@ -14,11 +14,90 @@ import httpx
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _docker(project: str, files: list[str], *arguments: str) -> None:
+def _compose_command(project: str, files: list[str]) -> list[str]:
     command = ["docker", "compose", "-p", project]
     for compose_file in files:
         command.extend(["-f", compose_file])
+    return command
+
+
+def _docker(project: str, files: list[str], *arguments: str) -> None:
+    command = _compose_command(project, files)
     subprocess.run([*command, *arguments], cwd=ROOT, check=True)
+
+
+def _compose_service_state(project: str, files: list[str], service: str) -> dict[str, object]:
+    result = subprocess.run(
+        [*_compose_command(project, files), "ps", "--all", "--format", "json", service],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    output = result.stdout.strip()
+    if not output:
+        raise RuntimeError(f"Compose service {service} has no container state")
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError:
+        payload = [json.loads(line) for line in output.splitlines() if line.strip()]
+    records = payload if isinstance(payload, list) else [payload]
+    matches = [
+        record
+        for record in records
+        if isinstance(record, dict) and str(record.get("Service") or "") == service
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"Compose service {service} returned {len(matches)} matching container states"
+        )
+    return matches[0]
+
+
+def _wait_compose_service(
+    project: str,
+    files: list[str],
+    service: str,
+    *,
+    expected_state: str,
+    expected_health: str | None = None,
+    attempts: int,
+    interval: float,
+) -> dict[str, object]:
+    if attempts < 1:
+        raise ValueError("attempts must be positive")
+    expected_states = {expected_state.lower()}
+    if expected_state.lower() in {"exited", "stopped"}:
+        expected_states.update({"exited", "stopped"})
+    expected_health = expected_health.lower() if expected_health else None
+    last: dict[str, object] | None = None
+    for attempt in range(attempts):
+        last = _compose_service_state(project, files, service)
+        state = str(last.get("State") or "unknown").lower()
+        health = str(last.get("Health") or "").lower()
+        raw_exit_code = last.get("ExitCode")
+        exit_code = int(raw_exit_code) if raw_exit_code not in {None, ""} else None
+        if state in {"dead", "exited", "stopped"} and exit_code not in {None, 0}:
+            raise RuntimeError(f"Compose service {service} exited with exit code {exit_code}")
+        if state in expected_states and (expected_health is None or health == expected_health):
+            return last
+        if state in {"dead", "exited", "stopped"} and not expected_states.intersection(
+            {"dead", "exited", "stopped"}
+        ):
+            raise RuntimeError(
+                f"Compose service {service} exited with exit code {exit_code} "
+                f"while waiting for {expected_state}"
+            )
+        if attempt + 1 < attempts:
+            time.sleep(interval)
+    assert last is not None
+    state = str(last.get("State") or "unknown").lower()
+    health = str(last.get("Health") or "").lower() or "none"
+    raise TimeoutError(
+        f"Compose service {service} did not reach {expected_state}"
+        f"{f'/{expected_health}' if expected_health else ''}; "
+        f"last state {state}, health {health}, exit code {last.get('ExitCode')}"
+    )
 
 
 def _wait_status(client: httpx.Client, path: str, status: int, *, attempts: int = 120) -> None:
@@ -128,6 +207,14 @@ def run(*, base_url: str, agent_url: str, project: str, files: list[str]) -> Non
             raise RuntimeError("Narrative MCP did not recover after the Worker restart")
 
         _docker(project, files, "stop", "redis")
+        _wait_compose_service(
+            project,
+            files,
+            "redis",
+            expected_state="exited",
+            attempts=40,
+            interval=0.25,
+        )
         _wait_status(client, "/api/ready", 503)
         protected = client.post(
             "/api/auth/login",
@@ -140,7 +227,16 @@ def run(*, base_url: str, agent_url: str, project: str, files: list[str]) -> Non
             raise RuntimeError(
                 f"protected request did not fail closed without Redis: {protected.status_code}"
             )
-        _docker(project, files, "up", "-d", "--wait", "redis")
+        _docker(project, files, "start", "redis")
+        _wait_compose_service(
+            project,
+            files,
+            "redis",
+            expected_state="running",
+            expected_health="healthy",
+            attempts=240,
+            interval=0.5,
+        )
         _wait_status(client, "/api/ready", 200)
 
     worker_headers = {"Authorization": "Bearer e2e-internal-agent-key"}
