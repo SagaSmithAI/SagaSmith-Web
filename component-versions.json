@@ -1,11 +1,12 @@
 {
   "schema": "sagasmith.component-lock/v1",
-  "audited_at": "2026-08-27T19:42:30+08:00",
+  "audited_at": "2026-08-28T02:11:10+08:00",
   "product_scope": "hosted-dnd-coc-narrative",
   "runtime_locks": {
     "service_api": "uv.lock",
     "agent_supervisor": "infrastructure/agent-supervisor-requirements.txt",
     "uv_version": "0.11.25",
+    "dependency_cutoff": "2026-08-17T12:00:00Z",
     "container_images": {
       "python_3_12_slim": "sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a",
       "python_3_12_alpine": "sha256:d09d15e60962ca365d1cd544a48773bac9d33f2fb1b00f2aa0deec78ade7dc31",
@@ -31,7 +32,7 @@
     {
       "repository": ".github",
       "branch": "main",
-      "revision": "b55c0528f94b8f1d068d2f3bcbad98be7ea2c1a7",
+      "revision": "f347e9045b0367d533aa76a175c58d4315de7b5a",
       "remote": "https://github.com/SagaSmithAI/.github.git",
       "usage": "organization-contract",
       "enforced": false
@@ -39,7 +40,7 @@
     {
       "repository": "SagaSmith-agent",
       "branch": "main",
-      "revision": "ecdb8189f4cbb91c39f9aa076f17cd52f4f0cb79",
+      "revision": "fc7f0cc0369bc54da7fa07cb3b9d62c0f7fd8a84",
       "remote": "https://github.com/SagaSmithAI/SagaSmith-agent.git",
       "usage": "build",
       "enforced": true
@@ -47,7 +48,7 @@
     {
       "repository": "sagasmith-core",
       "branch": "main",
-      "revision": "4cc3aefe34125a7530acb543fb7f0e2580a0f874",
+      "revision": "08ac611cfa8e551231028d181c5c3bf2727ee0f7",
       "remote": "https://github.com/SagaSmithAI/sagasmith-core.git",
       "usage": "build-shared-core",
       "enforced": true
@@ -55,7 +56,7 @@
     {
       "repository": "sagasmith-dnd",
       "branch": "main",
-      "revision": "710bb1e76d63bc53a165a92283997b944b04c462",
+      "revision": "25ee1ce4994f1950d6febd50145d364dbf621dbe",
       "remote": "https://github.com/SagaSmithAI/sagasmith-dnd.git",
       "usage": "build-domain-plane",
       "enforced": true
@@ -63,7 +64,7 @@
     {
       "repository": "sagasmith-coc",
       "branch": "main",
-      "revision": "ddc4030c861e60e39f6f216d07bdd28d1fb39c4d",
+      "revision": "36ded279e27acda86609bc3c6ee0c99c568218c7",
       "remote": "https://github.com/SagaSmithAI/sagasmith-coc.git",
       "usage": "build-domain-plane",
       "enforced": true
@@ -71,7 +72,7 @@
     {
       "repository": "sagasmith-narrative",
       "branch": "main",
-      "revision": "a7649a97b08a4c2d4d12f5cdcba27a6078905228",
+      "revision": "35c1510996237648298fb56d23ef4b9e5ff39a81",
       "remote": "https://github.com/SagaSmithAI/sagasmith-narrative.git",
       "usage": "build-agent-stdio-domain",
       "enforced": true
@@ -79,7 +80,7 @@
     {
       "repository": "SagaSmith-dnd-content-library",
       "branch": "main",
-      "revision": "71b0e69e4c37f67c046a5939a92dc6b0572cf4c2",
+      "revision": "51bb33c9ba16f1b097c090ce24c8a45334f2a3ff",
       "remote": "https://github.com/SagaSmithAI/SagaSmith-dnd-content-library.git",
       "usage": "audited-local-catalog",
       "enforced": false
@@ -88,7 +89,7 @@
       "repository": "SagaSmith-service",
       "branch": "main",
       "revision": "self",
-      "base_revision": "2105c7844b066f72c90b4377874b555a22987ba5",
+      "base_revision": "a071f0a622fd11f1a268f338a881da39e2dda6f1",
       "remote": "https://github.com/SagaSmithAI/SagaSmith-service.git",
       "usage": "hosted-web-product",
       "enforced": false
@@ -96,7 +97,7 @@
     {
       "repository": "SagaSmithAI.github.io",
       "branch": "main",
-      "revision": "7a99fd5726386362064f48966bc6bbbedf54b14b",
+      "revision": "68ecc38c554d36ca9dd4fc62bc2a8aad95fe16ed",
       "remote": "https://github.com/SagaSmithAI/SagaSmithAI.github.io.git",
       "usage": "public-documentation",
       "enforced": false

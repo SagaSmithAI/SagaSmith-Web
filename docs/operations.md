@@ -25,7 +25,11 @@ The Agent supervisor intentionally has one SagaSmith Web-owned integrated depend
 authoritative for standalone Nanobot installations, while the hosted image must reconcile Agent
 `[api]` and SagaSmith Web constraints as one environment. Regenerate it with
 `uv run python scripts/lock_agent_supervisor.py` whenever either `pyproject.toml` changes; do not
-install two independently pinned locks into one Python environment.
+install two independently pinned locks into one Python environment. The generator deliberately
+omits dependency-source annotations so the committed hash lock is reproducible and never records a
+developer machine's absolute Agent checkout path. It also resolves through the exact uv version and
+dependency cutoff declared in `component-versions.json`, so later package releases cannot silently
+change a regeneration.
 
 ## Single-server installation
 
