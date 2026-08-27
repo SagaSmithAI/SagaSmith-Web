@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
+import httpx
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from prometheus_client import Counter, Histogram
 from sqlalchemy.engine import Engine
 
 from sagasmith_service import __version__
@@ -36,6 +40,7 @@ from sagasmith_service.integrations.agent import AgentRuntime, HttpAgentRuntime
 from sagasmith_service.integrations.coc_mcp import StreamableHttpCocRuntime
 from sagasmith_service.integrations.dnd_mcp import DndRuntime, StreamableHttpDndRuntime
 from sagasmith_service.integrations.narrative_mcp import HttpNarrativeRuntime
+from sagasmith_service.observability import HTTP_LATENCY_SECONDS, REQUESTS
 from sagasmith_service.rate_limit import (
     MemoryRateLimiter,
     RateLimiter,
@@ -47,8 +52,7 @@ from sagasmith_service.security import SESSION_COOKIE
 from sagasmith_service.storage import LocalPrivateStorage, S3PrivateStorage
 
 logger = logging.getLogger("sagasmith_service.http")
-REQUESTS = Counter("sagasmith_http_requests_total", "HTTP requests", ["method", "route", "status"])
-LATENCY = Histogram("sagasmith_http_request_seconds", "HTTP request latency", ["method", "route"])
+LATENCY = HTTP_LATENCY_SECONDS
 SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9_-]{8,100}$")
 
 
@@ -65,11 +69,36 @@ def create_app(
     engine = engine or make_engine(settings.database_url)
     if settings.env in {"development", "test"}:
         Base.metadata.create_all(engine)
+    managed_http_clients: dict[str, httpx.AsyncClient] = {}
+
+    def managed_http_client(name: str, **kwargs: Any) -> httpx.AsyncClient:
+        client = httpx.AsyncClient(**kwargs)
+        managed_http_clients[name] = client
+        return client
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            results = await asyncio.gather(
+                *(client.aclose() for client in managed_http_clients.values()),
+                return_exceptions=True,
+            )
+            for name, result in zip(managed_http_clients, results, strict=True):
+                if isinstance(result, BaseException):
+                    logger.error(
+                        "outbound HTTP client shutdown failed client=%s error_type=%s",
+                        name,
+                        type(result).__name__,
+                    )
+
     app = FastAPI(
         title="SagaSmith Service",
         version=__version__,
         docs_url="/api/docs",
         openapi_url="/api/openapi.json",
+        lifespan=lifespan,
     )
     app.state.settings = settings
     app.state.engine = engine
@@ -78,15 +107,27 @@ def create_app(
     app.state.dnd_runtime = dnd_runtime or StreamableHttpDndRuntime(
         settings.dnd_mcp_url,
         auth_context_secret=auth_context_secret,
+        http_client=managed_http_client(
+            "dnd",
+            timeout=httpx.Timeout(30, connect=10),
+        ),
     )
     app.state.coc_runtime = coc_runtime or StreamableHttpCocRuntime(
         settings.coc_mcp_url,
         auth_context_secret=auth_context_secret,
+        http_client=managed_http_client(
+            "coc",
+            timeout=httpx.Timeout(30, connect=10),
+        ),
     )
     app.state.narrative_runtime = narrative_runtime or HttpNarrativeRuntime(
         settings.agent_api_url,
         settings.agent_api_key.get_secret_value(),
         timeout_seconds=settings.agent_completion_timeout_seconds,
+        http_client=managed_http_client(
+            "narrative",
+            timeout=httpx.Timeout(settings.agent_completion_timeout_seconds, connect=10),
+        ),
     )
     app.state.game_runtimes = {
         "dnd5e": app.state.dnd_runtime,
@@ -97,7 +138,12 @@ def create_app(
         settings.agent_api_url,
         settings.agent_api_key.get_secret_value(),
         timeout_seconds=settings.agent_completion_timeout_seconds,
+        http_client=managed_http_client(
+            "agent",
+            timeout=httpx.Timeout(settings.agent_completion_timeout_seconds, connect=10),
+        ),
     )
+    app.state.outbound_http_clients = managed_http_clients
     app.state.rate_limiter = rate_limiter or (
         RedisRateLimiter(settings.redis_url)
         if settings.rate_limit_backend == "redis"
@@ -184,7 +230,7 @@ def create_app(
         route = request.scope.get("route")
         route_path = getattr(route, "path", request.url.path)
         REQUESTS.labels(request.method, route_path, response.status_code).inc()
-        LATENCY.labels(request.method, route_path).observe(elapsed)
+        HTTP_LATENCY_SECONDS.labels(request.method, route_path).observe(elapsed)
         response.headers["X-Request-ID"] = request_id
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"

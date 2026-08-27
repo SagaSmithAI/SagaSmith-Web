@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import time
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from decimal import Decimal
@@ -34,6 +35,10 @@ from sagasmith_service.models import (
     IdentityMemoryEntry,
     User,
     now_utc,
+)
+from sagasmith_service.observability import (
+    ROOM_PROJECTION_BATCH_SECONDS,
+    ROOM_PROJECTION_JOBS,
 )
 from sagasmith_service.quota import QuotaExceededError, release, reserve, settle
 from sagasmith_service.room_activity import RoomActivitySubmission, room_activity_contract
@@ -91,6 +96,36 @@ async def _bounded_map_ordered(
         await asyncio.gather(*tasks, return_exceptions=True)
         raise
     return cast(list[_ResultT], results)
+
+
+async def _observed_projection_batch(
+    jobs: list[_JobT],
+    worker: Callable[[_JobT], Awaitable[_ResultT]],
+    *,
+    system: str,
+    operation_class: str,
+) -> list[_ResultT]:
+    """Record one bounded batch without adding per-campaign metric labels."""
+
+    transport = "streamable_http" if system in {"dnd5e", "coc7e"} else "http"
+    started = time.perf_counter()
+    metric_status = "success"
+    try:
+        return await _bounded_map_ordered(jobs, worker)
+    except BaseException:
+        metric_status = "error"
+        raise
+    finally:
+        labels = {
+            "system": system,
+            "operation_class": operation_class,
+            "status": metric_status,
+            "transport": transport,
+        }
+        ROOM_PROJECTION_BATCH_SECONDS.labels(**labels).observe(
+            time.perf_counter() - started
+        )
+        ROOM_PROJECTION_JOBS.labels(**labels).observe(len(jobs))
 
 
 def _membership(session: Session, campaign_id: str, user_id: str) -> CampaignMembershipProjection:
@@ -314,7 +349,12 @@ async def _resolution_index(
         return key, dict(projection)
 
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {key: [] for key, _ in groups}
-    for key, projection in await _bounded_map_ordered(jobs, fetch):
+    for key, projection in await _observed_projection_batch(
+        jobs,
+        fetch,
+        system=campaign.system_id,
+        operation_class="resolution",
+    ):
         grouped[key].append(projection)
 
     indexed: dict[tuple[str, str], dict[str, Any]] = {}
@@ -341,6 +381,8 @@ async def _actor_presentation_index(
     trigger: CampaignMessage,
 ) -> dict[tuple[str, str], dict[str, Any]]:
     runtime = _campaign_runtime(request, session, campaign_id)
+    campaign = session.get(CampaignProjection, campaign_id)
+    assert campaign is not None
     groups: list[tuple[tuple[str, str], list[str]]] = []
     for output in submission.messages:
         actor_refs = {
@@ -426,7 +468,12 @@ async def _actor_presentation_index(
 
     published: dict[tuple[str, str], list[dict[str, Any]]] = {key: [] for key, _ in groups}
     suggested: dict[tuple[str, str], list[dict[str, Any]]] = {key: [] for key in suggestion_keys}
-    for key, suggestion, presentation in await _bounded_map_ordered(jobs, fetch):
+    for key, suggestion, presentation in await _observed_projection_batch(
+        jobs,
+        fetch,
+        system=campaign.system_id,
+        operation_class="actor",
+    ):
         (suggested if suggestion else published)[key].append(presentation)
 
     indexed: dict[tuple[str, str], dict[str, Any]] = {}

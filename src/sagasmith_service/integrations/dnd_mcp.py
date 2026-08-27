@@ -16,6 +16,13 @@ from sagasmith_service.auth_context import (
     exposure_revision,
     sign_auth_context,
 )
+from sagasmith_service.observability import (
+    MCP_EXPOSURE_SECONDS,
+    MCP_INITIALIZE_SECONDS,
+    MCP_TOOL_SECONDS,
+    MCP_TRANSPORT_SETUP_SECONDS,
+    observe_latency,
+)
 
 
 class DndRuntime(Protocol):
@@ -214,18 +221,34 @@ class StreamableHttpDndRuntime:
         *,
         bearer_token: str | None = None,
         auth_context_secret: str = "",
+        http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self.url = url
         self.bearer_token = bearer_token
         self.auth_context_secret = auth_context_secret
-
-    async def probe(self) -> None:
-        """Verify the MCP endpoint and the hosted contract without mutating state."""
+        self._owns_http_client = http_client is None
         headers = (
             {"Authorization": f"Bearer {self.bearer_token}"}
             if self.bearer_token
             else {}
         )
+        self.http_client = (
+            http_client
+            if http_client is not None
+            else httpx.AsyncClient(
+                headers=headers,
+                timeout=httpx.Timeout(30, connect=10),
+            )
+        )
+        if http_client is not None and headers:
+            self.http_client.headers.update(headers)
+
+    async def aclose(self) -> None:
+        if self._owns_http_client:
+            await self.http_client.aclose()
+
+    async def probe(self) -> None:
+        """Verify the MCP endpoint and the hosted contract without mutating state."""
         required = {
             "exposure",
             "server_capabilities",
@@ -237,15 +260,30 @@ class StreamableHttpDndRuntime:
         }
         try:
             async with AsyncExitStack() as stack:
-                client = await stack.enter_async_context(
-                    httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(10, connect=5))
-                )
-                read, write, _ = await stack.enter_async_context(
-                    streamable_http_client(self.url, http_client=client)
-                )
+                with observe_latency(
+                    MCP_TRANSPORT_SETUP_SECONDS,
+                    system="dnd5e",
+                    operation_class="probe",
+                    transport="streamable_http",
+                ):
+                    read, write, _ = await stack.enter_async_context(
+                        streamable_http_client(self.url, http_client=self.http_client)
+                    )
                 session = await stack.enter_async_context(ClientSession(read, write))
-                await session.initialize()
-                available = {tool.name for tool in (await session.list_tools()).tools}
+                with observe_latency(
+                    MCP_INITIALIZE_SECONDS,
+                    system="dnd5e",
+                    operation_class="probe",
+                    transport="streamable_http",
+                ):
+                    await session.initialize()
+                with observe_latency(
+                    MCP_TOOL_SECONDS,
+                    system="dnd5e",
+                    operation_class="probe",
+                    transport="streamable_http",
+                ):
+                    available = {tool.name for tool in (await session.list_tools()).tools}
         except Exception as exc:
             raise RuntimeError("D&D MCP readiness probe failed") from exc
         missing = sorted(required - available)
@@ -260,19 +298,25 @@ class StreamableHttpDndRuntime:
         exposure_principal: str,
         campaign_id: str | None,
     ) -> dict[str, Any]:
-        headers = {}
-        if self.bearer_token:
-            headers["Authorization"] = f"Bearer {self.bearer_token}"
         try:
             async with AsyncExitStack() as stack:
-                client = await stack.enter_async_context(
-                    httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(30, connect=10))
-                )
-                read, write, _ = await stack.enter_async_context(
-                    streamable_http_client(self.url, http_client=client)
-                )
+                with observe_latency(
+                    MCP_TRANSPORT_SETUP_SECONDS,
+                    system="dnd5e",
+                    operation_class="request",
+                    transport="streamable_http",
+                ):
+                    read, write, _ = await stack.enter_async_context(
+                        streamable_http_client(self.url, http_client=self.http_client)
+                    )
                 session = await stack.enter_async_context(ClientSession(read, write))
-                await session.initialize()
+                with observe_latency(
+                    MCP_INITIALIZE_SECONDS,
+                    system="dnd5e",
+                    operation_class="request",
+                    transport="streamable_http",
+                ):
+                    await session.initialize()
                 auth_session_id = f"service:{uuid.uuid4().hex}"
                 conversation_principal = (
                     f"service:campaign:{campaign_id}" if campaign_id else "service:control-plane"
@@ -302,44 +346,58 @@ class StreamableHttpDndRuntime:
                     authorization_epoch = exposure_revision(payload, authorization_epoch)
                     return payload
 
-                exposure_args: dict[str, Any] = {
-                    "action": "open",
-                    "principal_id": exposure_principal,
-                }
-                if campaign_id is not None:
-                    exposure_args["campaign_id"] = campaign_id
-                await call("exposure", exposure_args)
-                search = await call(
-                    "exposure",
-                    {
-                        "action": "search",
-                        "campaign_id": campaign_id,
+                with observe_latency(
+                    MCP_EXPOSURE_SECONDS,
+                    system="dnd5e",
+                    operation_class="request",
+                    transport="streamable_http",
+                ):
+                    exposure_args: dict[str, Any] = {
+                        "action": "open",
                         "principal_id": exposure_principal,
-                        "query": name,
-                    },
-                )
-                matched_tools = {
-                    str(item.get("tool_id") or "") for item in search.get("matches", [])
-                }
-                visible_tools = {str(item) for item in search.get("visible_tools", [])}
-                if name not in matched_tools and name not in visible_tools:
-                    raise RuntimeError(
-                        f"D&D MCP does not expose {name!r} in the current context: {search}"
-                    )
-                if name not in visible_tools:
-                    await call(
+                    }
+                    if campaign_id is not None:
+                        exposure_args["campaign_id"] = campaign_id
+                    await call("exposure", exposure_args)
+                    search = await call(
                         "exposure",
                         {
-                            "action": "set",
+                            "action": "search",
                             "campaign_id": campaign_id,
                             "principal_id": exposure_principal,
-                            "add_tool_ids": [name],
+                            "query": name,
                         },
                     )
-                listed = await session.list_tools()
-                if name not in {tool.name for tool in listed.tools}:
-                    raise RuntimeError(f"D&D MCP did not publish {name!r} after exposure update")
-                return await call(name, arguments)
+                    matched_tools = {
+                        str(item.get("tool_id") or "") for item in search.get("matches", [])
+                    }
+                    visible_tools = {str(item) for item in search.get("visible_tools", [])}
+                    if name not in matched_tools and name not in visible_tools:
+                        raise RuntimeError(
+                            f"D&D MCP does not expose {name!r} in the current context: {search}"
+                        )
+                    if name not in visible_tools:
+                        await call(
+                            "exposure",
+                            {
+                                "action": "set",
+                                "campaign_id": campaign_id,
+                                "principal_id": exposure_principal,
+                                "add_tool_ids": [name],
+                            },
+                        )
+                    listed = await session.list_tools()
+                    if name not in {tool.name for tool in listed.tools}:
+                        raise RuntimeError(
+                            f"D&D MCP did not publish {name!r} after exposure update"
+                        )
+                with observe_latency(
+                    MCP_TOOL_SECONDS,
+                    system="dnd5e",
+                    operation_class="request",
+                    transport="streamable_http",
+                ):
+                    return await call(name, arguments)
         except Exception as exc:
             raise _runtime_error(exc) from exc
 

@@ -51,7 +51,17 @@ def test_readiness_metrics_and_request_id(dnd_runtime, agent_runtime, tmp_path) 
     assert ready.headers["X-Request-ID"] == "test-request-123"
     metrics = client.get("/metrics")
     assert metrics.status_code == 200
-    assert "sagasmith_http_requests_total" in metrics.text
+    for metric_name in (
+        "sagasmith_http_requests_total",
+        "sagasmith_agent_upstream_seconds",
+        "sagasmith_mcp_transport_setup_seconds",
+        "sagasmith_mcp_initialize_seconds",
+        "sagasmith_mcp_exposure_seconds",
+        "sagasmith_mcp_tool_seconds",
+        "sagasmith_room_projection_batch_seconds",
+        "sagasmith_room_projection_jobs",
+    ):
+        assert metric_name in metrics.text
 
 
 def test_readiness_rejects_an_unavailable_required_component(
