@@ -48,7 +48,9 @@ def create_session(session: Session, user: User, ttl_seconds: int) -> tuple[User
     return value, token
 
 
-def authenticate_session(session: Session, token: str | None) -> User | None:
+def authenticate_session(
+    session: Session, token: str | None
+) -> tuple[User, UserSession] | None:
     if not token:
         return None
     now = now_utc()
@@ -64,5 +66,4 @@ def authenticate_session(session: Session, token: str | None) -> User | None:
     user = session.get(User, value.user_id)
     if user is None or user.status != "active":
         return None
-    value.last_seen_at = now
-    return user
+    return user, value
