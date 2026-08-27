@@ -3,7 +3,7 @@ from typing import Any
 
 from conftest import FakeAgentRuntime, FakeDndRuntime
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from sagasmith_service.api.rooms import _activity_token
 from sagasmith_service.models import (
@@ -614,12 +614,20 @@ def test_public_room_turn_cannot_reference_dm_only_resolution(
     )
 
 
-def test_public_room_turn_bounds_parallel_resolution_projection_reads(
+def test_room_turn_globally_bounds_resolution_actor_and_suggestion_projections(
     client: TestClient, agent_runtime: FakeAgentRuntime, dnd_runtime: FakeDndRuntime
 ) -> None:
-    register(client, "room-owner@example.com", "DM")
+    owner = register(client, "room-owner@example.com", "DM")
     create_campaign(client)
-    add_player(client, "projection-player@example.com", "Player")
+    player = add_player(client, "projection-player@example.com", "Player")
+    login(client, "room-owner@example.com")
+    for actor_id in ("projection-actor-1", "projection-actor-2"):
+        bound = client.put(
+            f"/api/campaigns/campaign-1/actors/{actor_id}/binding",
+            json={"user_id": player["id"], "can_control": True, "can_view_private": True},
+        )
+        assert bound.status_code == 200, bound.text
+    login(client, "projection-player@example.com")
     resolution_ids = [f"parallel-resolution-{index}" for index in range(9)]
     for resolution_id in resolution_ids:
         dnd_runtime.resolution_presentations[resolution_id] = {
@@ -639,19 +647,34 @@ def test_public_room_turn_bounds_parallel_resolution_projection_reads(
 
     active = 0
     maximum = 0
-    original = dnd_runtime.get_resolution_presentation
+    starts: list[tuple[str, str]] = []
+    original_resolution = dnd_runtime.get_resolution_presentation
+    original_actor = dnd_runtime.get_character_card
 
     async def delayed_projection(**arguments: Any) -> dict[str, Any]:
         nonlocal active, maximum
+        starts.append(("resolution", arguments["resolution_id"]))
         active += 1
         maximum = max(maximum, active)
         try:
             await asyncio.sleep(0.01)
-            return await original(**arguments)
+            return await original_resolution(**arguments)
+        finally:
+            active -= 1
+
+    async def delayed_actor(**arguments: Any) -> dict[str, Any]:
+        nonlocal active, maximum
+        starts.append(("actor", arguments["character_id"]))
+        active += 1
+        maximum = max(maximum, active)
+        try:
+            await asyncio.sleep(0.01)
+            return await original_actor(**arguments)
         finally:
             active -= 1
 
     dnd_runtime.get_resolution_presentation = delayed_projection
+    dnd_runtime.get_character_card = delayed_actor
 
     def output(context: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -665,6 +688,26 @@ def test_public_room_turn_bounds_parallel_resolution_projection_reads(
                         {"type": "narration", "block_id": "n1", "text": "骰声接连落定。"},
                         *[
                             {
+                                "type": "performance",
+                                "block_id": f"p{index}",
+                                "speaker": {
+                                    "kind": "published_actor",
+                                    "label": "untrusted",
+                                    "actor_ref": actor_id,
+                                },
+                                "beats": [{"type": "action", "text": "他按计划行动。"}],
+                                "provenance": {
+                                    "kind": "player_intent",
+                                    "source_message_id": context["trigger_message_id"],
+                                },
+                            }
+                            for index, actor_id in enumerate(
+                                ("projection-actor-1", "projection-actor-2"),
+                                start=1,
+                            )
+                        ],
+                        *[
+                            {
                                 "type": "resolution_ref",
                                 "block_id": f"r{index}",
                                 "resolution_id": resolution_id,
@@ -672,6 +715,13 @@ def test_public_room_turn_bounds_parallel_resolution_projection_reads(
                             for index, resolution_id in enumerate(resolution_ids)
                         ],
                     ],
+                }
+            ],
+            "suggestions": [
+                {
+                    "id": "projection-suggestion",
+                    "text": "继续执行计划。",
+                    "actor_ref": "projection-actor-1",
                 }
             ],
         }
@@ -685,8 +735,192 @@ def test_public_room_turn_bounds_parallel_resolution_projection_reads(
 
     assert response.status_code == 200, response.text
     assert maximum == 16
+    assert {kind for kind, _ in starts[:16]} == {"resolution", "actor"}
+    last_resolution = max(
+        index for index, (kind, _) in enumerate(starts) if kind == "resolution"
+    )
+    assert any(
+        kind == "actor" and actor_id == "projection-actor-1"
+        for kind, actor_id in starts[:last_resolution]
+    )
+    assert starts.count(("actor", "projection-actor-1")) == 3
     blocks = response.json()["agent_message"]["structured_payload"]["blocks"]
-    assert [block["resolution_id"] for block in blocks[1:]] == resolution_ids
+    assert [block["resolution_id"] for block in blocks[3:]] == resolution_ids
+    assert response.json()["agent_message"]["structured_payload"]["suggestions"][0][
+        "actor_revision"
+    ] == 3
+    assert owner["id"] != player["id"]
+
+
+def test_room_projection_queries_do_not_scale_with_output_actor_audience_product(
+    client: TestClient, agent_runtime: FakeAgentRuntime, dnd_runtime: FakeDndRuntime
+) -> None:
+    owner = register(client, "room-owner@example.com", "DM")
+    create_campaign(client)
+    add_player(client, "query-player@example.com", "Player")
+    login(client, "room-owner@example.com")
+    actor_ids = [f"query-actor-{index}" for index in range(4)]
+    for actor_id in actor_ids:
+        bound = client.put(
+            f"/api/campaigns/campaign-1/actors/{actor_id}/binding",
+            json={"user_id": owner["id"], "can_control": True, "can_view_private": True},
+        )
+        assert bound.status_code == 200, bound.text
+    resolution_ids = [f"query-resolution-{index}" for index in range(4)]
+    for resolution_id in resolution_ids:
+        dnd_runtime.resolution_presentations[resolution_id] = {
+            "schema": "sagasmith.resolution-presentation/v1",
+            "system_id": "dnd5e",
+            "thread_id": resolution_id,
+            "event_sequence": 1,
+            "operation": "dice.roll",
+            "status": "settled",
+            "audience": {"scope": "public", "actor_refs": [], "disclosure": "public"},
+            "actor_refs": [],
+            "rolls": [],
+            "outcome": {"success": True},
+            "pending_choice": None,
+            "campaign_revision": 7,
+        }
+
+    def messages(
+        context: dict[str, Any],
+        *,
+        output_count: int,
+        actors_per_output: int,
+        resolutions_per_output: int,
+    ) -> list[dict[str, Any]]:
+        audiences = (
+            {"kind": "public"},
+            {"kind": "dm"},
+            {"kind": "actors", "actor_refs": [actor_ids[0]]},
+            {"kind": "public"},
+        )
+        return [
+            {
+                "output_id": f"query-output-{output_index}",
+                "audience": audiences[output_index],
+                "blocks": [
+                    *[
+                        {
+                            "type": "performance",
+                            "block_id": f"p-{output_index}-{actor_index}",
+                            "speaker": {
+                                "kind": "published_actor",
+                                "label": "untrusted",
+                                "actor_ref": actor_ids[actor_index],
+                            },
+                            "beats": [{"type": "action", "text": "按玩家意图行动。"}],
+                            "provenance": {
+                                "kind": "player_intent",
+                                "source_message_id": context["trigger_message_id"],
+                            },
+                        }
+                        for actor_index in range(actors_per_output)
+                    ],
+                    *[
+                        {
+                            "type": "resolution_ref",
+                            "block_id": f"r-{output_index}-{resolution_index}",
+                            "resolution_id": resolution_ids[resolution_index],
+                        }
+                        for resolution_index in range(resolutions_per_output)
+                    ],
+                ],
+            }
+            for output_index in range(output_count)
+        ]
+
+    def run_and_count(
+        *,
+        idempotency_key: str,
+        output_count: int,
+        actors_per_output: int,
+        resolutions_per_output: int,
+    ) -> tuple[dict[str, int], int]:
+        def output(context: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "schema": "sagasmith.room-turn/v1",
+                "run_id": context["run_id"],
+                "messages": messages(
+                    context,
+                    output_count=output_count,
+                    actors_per_output=actors_per_output,
+                    resolutions_per_output=resolutions_per_output,
+                ),
+                "suggestions": [
+                    {
+                        "id": "query-suggestion",
+                        "text": "继续。",
+                        "actor_ref": actor_ids[0],
+                    }
+                ],
+            }
+
+        agent_runtime.structured_output_factory = output
+        statements: list[str] = []
+
+        def collect(
+            _connection,
+            _cursor,
+            statement,
+            _parameters,
+            _context,
+            _executemany,
+        ) -> None:
+            statements.append(statement.lower())
+
+        call_start = len(dnd_runtime.calls)
+        event.listen(client.app.state.engine, "before_cursor_execute", collect)
+        try:
+            response = client.post(
+                "/api/campaigns/campaign-1/room/messages",
+                headers={"Idempotency-Key": idempotency_key},
+                json={"content": idempotency_key, "mode": "action"},
+            )
+        finally:
+            event.remove(client.app.state.engine, "before_cursor_execute", collect)
+        assert response.status_code == 200, response.text
+        tables = (
+            "campaign_projections",
+            "campaign_membership_projections",
+            "users",
+            "actor_binding_projections",
+        )
+        counts = {
+            table: sum(
+                statement.lstrip().startswith("select") and table in statement
+                for statement in statements
+            )
+            for table in tables
+        }
+        projection_calls = sum(
+            name in {"resolution_presentation", "character_card"}
+            for name, _ in dnd_runtime.calls[call_start:]
+        )
+        return counts, projection_calls
+
+    small_counts, small_projection_calls = run_and_count(
+        idempotency_key="projection-query-small",
+        output_count=1,
+        actors_per_output=1,
+        resolutions_per_output=1,
+    )
+    large_counts, large_projection_calls = run_and_count(
+        idempotency_key="projection-query-large",
+        output_count=4,
+        actors_per_output=4,
+        resolutions_per_output=4,
+    )
+
+    assert large_projection_calls > small_projection_calls
+    assert large_counts == small_counts
+    assert large_counts == {
+        "campaign_projections": 1,
+        "campaign_membership_projections": 2,
+        "users": 2,
+        "actor_binding_projections": 1,
+    }
 
 
 def test_suggestion_cannot_reference_hidden_or_stale_pending_choice(
