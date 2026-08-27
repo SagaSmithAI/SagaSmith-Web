@@ -310,6 +310,7 @@ def create_app(
         return {"status": "ok", "version": __version__}
 
     web_root = Path(__file__).parent / "web"
+    app.mount("/assets", StaticFiles(directory=web_root), name="web-assets")
     app.mount("/", StaticFiles(directory=web_root, html=True), name="web")
 
     return app
