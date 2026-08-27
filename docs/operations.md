@@ -20,10 +20,10 @@ Do not replace the pinned defaults with moving branches in a production release.
 overrides are intended for an explicit candidate revision during review, after which the accepted
 SHA becomes the new lock.
 
-The Agent supervisor intentionally has one Service-owned integrated dependency lock at
+The Agent supervisor intentionally has one SagaSmith Web-owned integrated dependency lock at
 `infrastructure/agent-supervisor-requirements.txt`. Agent's standalone `uv.lock` remains
 authoritative for standalone Nanobot installations, while the hosted image must reconcile Agent
-`[api]` and Service constraints as one environment. Regenerate it with
+`[api]` and SagaSmith Web constraints as one environment. Regenerate it with
 `uv run python scripts/lock_agent_supervisor.py` whenever either `pyproject.toml` changes; do not
 install two independently pinned locks into one Python environment.
 
@@ -40,10 +40,10 @@ The six `SAGASMITH_*_CONTEXT` values select the open-source build inputs, includ
 commit SHAs for production; never deploy moving branch references. Remote Git contexts deliberately
 avoid sending unrelated local worktrees, virtual environments or private content to Docker.
 
-The private stack contains Caddy, Service API/Web, persistent Module worker, PostgreSQL, Redis,
+The private stack contains Caddy, SagaSmith Web API/frontend, persistent Module worker, PostgreSQL, Redis,
 MinIO, D&D MCP, CoC MCP and the Agent Supervisor. Narrative remains process-local to each Hosted
 Worker and is probed through the Supervisor rather than exposed as a network service.
-Only ports 80/443 are public. Service starts with `alembic upgrade head`. For a real hostname set
+Only ports 80/443 are public. SagaSmith Web starts with `alembic upgrade head`. For a real hostname set
 `SAGASMITH_SITE_ADDRESS` to the hostname and `SAGASMITH_SECURE_COOKIES=true`.
 
 ## Health and observability
@@ -106,7 +106,7 @@ handled as DM-private campaign data, not community content.
 PostgreSQL custom dump and compressed copies
 of private object storage, D&D/CoC state and Agent workspaces, plus SHA-256 checksums. Copy the completed
 folder to encrypted off-host storage. Redis is a queue/cache and is not a recovery authority.
-The script stops all application writers for a consistent cut, records the Service commit and dirty
+The script stops all application writers for a consistent cut, records the SagaSmith Web commit and dirty
 state, verifies the finished manifest, checks every native Docker/Git exit code, and only then
 restarts healthy services. The destination filesystem itself must provide encryption at rest; the
 backup folder is deliberately portable and is not encrypted by the script. The manifest records
@@ -128,7 +128,7 @@ Narrative conversation, and waits for every idle Worker to disappear with no `/p
 
 ## Restore drill
 
-1. Provision a clean isolated host with the exact tagged open-source and Service releases.
+1. Provision a clean isolated host with the exact tagged open-source and SagaSmith Web releases.
 2. Verify every file against `manifest.json` before extracting.
 3. Restore object, D&D-state, CoC-state and Agent-workspace volumes while their services are stopped.
 4. Start PostgreSQL, restore `control.dump` with `pg_restore --clean --if-exists`, then run migrations.

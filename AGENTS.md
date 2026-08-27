@@ -1,7 +1,14 @@
-# SagaSmith Service Development Contract
+# SagaSmith Web Development Contract
 
-This is the closed-source hosted SagaSmith product. The sibling open-source repositories remain
-complete local/self-hosted products and must never depend on this repository.
+This repository currently keeps the historical name `SagaSmith-service`, but the product is
+**SagaSmith Web**: browser frontend, API/BFF, hosted control plane, collaboration, Forge, Module
+Studio, Agent orchestration, and operations. The Python package remains `sagasmith_service` and
+the existing CLI names remain stable until a separately reviewed migration.
+
+The sibling open-source repositories form the complete SagaSmith Local Agent Kit and must never
+depend on this repository. Local and hosted deployments must cross the same authoritative domain
+MCP contract. They may differ in transport, authentication, storage, and deployment, but not in
+tool schemas, rule semantics, authoritative writes, revision behavior, or idempotency.
 
 ## Current source topology
 
@@ -18,14 +25,14 @@ complete local/self-hosted products and must never depend on this repository.
 
 ## Authority boundaries
 
-- This service owns accounts, sessions, plans, quota reservations, usage, billing, invitations,
+- SagaSmith Web owns accounts, sessions, plans, quota reservations, usage, billing, invitations,
   join-request workflow, notifications, hosted process orchestration, and cloud projections.
 - The matching MCP inside `sagasmith-dnd`, `sagasmith-coc`, or `sagasmith-narrative` remains the
   only authority for campaign membership, actor authority, revisions, idempotency, random streams,
   atomic settlement, phases, and Pack activation.
 - Each domain monorepo owns its deterministic mechanics, MCP, Skills, and domain UI where present.
   `sagasmith-core` owns system-neutral persistence, documents, retrieval, versions, and transactions.
-- The service may cache projections but must not write open-source game tables directly.
+- SagaSmith Web may cache projections but must not write open-source game tables directly.
 - Agent and Workbench clients must use the server-owned dynamic MCP tool list. Never introduce a
   fixed tool superset, text imitation, compatibility alias, or fallback protocol.
 

@@ -19,11 +19,11 @@ quota, commercial Pack archives, extracted source content, backups, and audit tr
 | public copyright laundering | explicit provenance/license/rights attestation; real Agent review; administrator moderation; private-source publication block; report queue can withdraw releases without deleting audit evidence |
 | executable community rules | Rule manifest/payload rejects executable/script/binary entry shapes; production executes only reviewed open-source system/MCP code |
 | stored XSS from community text | JSON APIs plus browser `textContent`; restrictive CSP; no user HTML rendering |
-| Identity privilege escalation | campaign owner invitation plus Identity-owner acceptance; Service-derived `agent:<uuid>`; MCP grant before assignment activation; authority-first revoke |
+| Identity privilege escalation | campaign owner invitation plus Identity-owner acceptance; SagaSmith Web-derived `agent:<uuid>`; MCP grant before assignment activation; authority-first revoke |
 | cross-campaign Identity memory | unique assignment namespace, assignment FK, DM/Identity-owner checks, revision conflict, no memory copy into Soul/public profile |
 | path traversal | server-generated object keys; resolved paths constrained to storage/exchange roots |
 | SSRF | MCP and Agent URLs are deployment configuration, never user input; worker grants only exact DNS-resolved MCP host CIDRs, not a private-network wildcard |
-| prompt/tool injection | Agent is semantic authority but cannot bypass native schemas or MCP authorization/revision checks |
+| prompt/tool injection | Agent owns conversational judgment but cannot redefine MCP tool semantics or bypass native schemas, authorization, revision, or idempotency checks |
 | stale dynamic tools | real MCP session listens to `tools/list_changed`; call-time MCP checks remain final |
 | service compromise | containers run non-root, only proxy is public, databases and MCP are internal, secrets are mounted/env and excluded from Git |
 | ransomware/operator error | timestamped PostgreSQL/object/D&D/Agent backups, off-host encrypted copy, restore drills |

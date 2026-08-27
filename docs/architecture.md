@@ -1,12 +1,14 @@
-# Hosted SagaSmith domain architecture
+# SagaSmith Web architecture
 
 ## Product boundary
 
-`SagaSmith-service` is the private control plane and Web product. The Apache-licensed repositories
-remain complete local/self-hosted products. Dependency direction is one way:
+**SagaSmith Web** is the hosted product in the repository currently named `SagaSmith-service`.
+The control plane is one backend responsibility alongside the browser frontend, API/BFF,
+collaboration, Forge, Module Studio, Agent orchestration, and operations. The Apache-licensed
+repositories form the complete Local Agent Kit, so dependency direction is one way:
 
 ```text
-Browser -> Service API/BFF -> hosted Agent worker -> matching domain MCP facade
+Browser -> SagaSmith Web API/BFF -> hosted Agent worker -> matching domain MCP facade
                            -> PostgreSQL (cloud workflow/projections/usage)
                            -> private S3/MinIO (Pack archives)
 
@@ -28,6 +30,32 @@ Narrative adapter. D&D and CoC still create a fresh MCP transport and `ClientSes
 operation so principal context, authorization epoch and dynamic exposure never cross calls; only
 the lower-level TCP/TLS pool is reused.
 
+## Shared authority across local and hosted deployments
+
+```text
+Local Agent Kit                           Hosted Web Product
+
+Bot / generic Agent / SagaSmith Agent     Browser / PWA
+                  |                             |
+                  | MCP                         v
+                  |                       SagaSmith Web API/BFF
+                  |                             |
+                  |                       principal-scoped Agent worker
+                  |                             |
+                  +---------- domain MCP <-----+
+                               |
+                        matching domain runtime
+                               |
+                     authoritative campaign state
+```
+
+The two deployment shapes must execute the same MCP handlers and schemas. Local installations may
+use stdio or localhost Streamable HTTP with SQLite and local files; hosted deployments may use
+signed principals, network MCP, PostgreSQL, Redis, and object storage. Those differences must not
+create a second implementation of rules, state writes, tool semantics, revision checks, or
+idempotency. SagaSmith Agent is an MCP consumer and host in both shapes, never the owner of domain
+state.
+
 ## Module Studio
 
 Module Studio is the primary D&D creation surface. A hidden Lobby campaign gives each project a
@@ -37,7 +65,7 @@ leased tasks, retries, installations, notifications and quota receipts. Sources 
 object storage and are materialized into the MCP exchange volume only for the duration of import.
 
 The Module worker asks the Hosted Agent to follow the installed `sagasmith-modulegen` Skill and
-return strict semantic decisions. The Service transports those explicit decisions to
+return strict semantic decisions. SagaSmith Web transports those explicit decisions to
 `module_draft(start|get|evidence|edit|finalize)`. D&D MCP still owns extraction evidence, draft
 revision, validation, idempotency, mechanical import and the compiled content artifact. A task
 lease survives API restarts; an expired lease is requeued, while cached Agent decisions and stable
@@ -47,11 +75,11 @@ The product states are `idea -> outline_ready -> generating -> draft_review ->
 ready_to_finalize -> compiled`; `failed` and `canceled` are resumable. Finalization requires both an
 approved evidence review and a fresh explicit Agent confirmation. Compiled artifacts can be
 installed directly into owned/DM campaigns or submitted to Forge moderation. Published community
-installs import the same MCP artifact and never reconstruct rule or module state in Service.
+installs import the same MCP artifact and never reconstruct rule or module state in SagaSmith Web.
 
-The Service never opens either system MCP database. Campaign state, phase, random streams, revisions,
+SagaSmith Web never opens any domain MCP database. Campaign state, phase, random streams, revisions,
 idempotency, snapshots, branches, undo/redo, actor scope, settlement, and Pack activation remain
-MCP-owned. Service records a receipt and a disposable projection after a successful public tool
+MCP-owned. SagaSmith Web records a receipt and a disposable projection after a successful public tool
 call.
 
 ## Trust and identity
@@ -59,9 +87,9 @@ call.
 - Browser authentication is an opaque, hashed, revocable server session in an HttpOnly cookie.
 - A stable human MCP principal is derived as `user:<service-user-uuid>`. An accepted hosted
   Identity assignment derives `agent:<identity-uuid>`. Browsers cannot submit either principal.
-- Campaign ownership and admission workflow are Service concepts; effective membership and actor
+- Campaign ownership and admission workflow are SagaSmith Web concepts; effective membership and actor
   control are granted by `access_grant` and enforced again by MCP at call time.
-- The campaign owner may promote or demote active members between `player` and `dm`; Service calls
+- The campaign owner may promote or demote active members between `player` and `dm`; SagaSmith Web calls
   the MCP grant first and updates its role projection only after the authoritative receipt.
 - `owner` and `dm` may review applications, create invitations, bind actors, and import/activate
   finalized Packs.
@@ -95,7 +123,7 @@ campaign room -> principal-scoped conversation lease -> dedicated Agent worker
 Room messages and room events use monotonic per-room sequence numbers in PostgreSQL. The browser
 opens an SSE stream after loading a REST snapshot. Message events append to the timeline, while
 `state.changed` invalidates the Character, Play, Combat and Module projections. Panel commands use
-the same authenticated room action path or a narrow Service-to-MCP facade; panels never write game
+the same authenticated room action path or a narrow SagaSmith Web-to-MCP facade; panels never write game
 tables or reproduce rules. A periodic projection refresh is only recovery for a lost stream, not a
 second authority.
 
@@ -113,7 +141,7 @@ so its draft and selected audience survive expansion. Token, target and destinat
 sent to the Agent as declared action context, not authoritative facts; the Agent must validate them
 through MCP. Agent-positioned Combat never synthesizes coordinates or a fallback grid.
 
-The Service-injected context contains the authenticated campaign and principal. It is a semantic
+The SagaSmith Web-injected context contains the authenticated campaign and principal. It is a semantic
 aid only; every MCP call remains fail-closed on membership, actor, phase, revision and payload.
 The Supervisor requires either `campaign:user:conversation` or
 `campaign:agent:identity:conversation` to match its authenticated principal. The hosted worker maps
@@ -126,17 +154,17 @@ exception is granted.
 
 | Data | Authority | Recovery source |
 |---|---|---|
-| users, sessions, quotas, invitations, applications | Service PostgreSQL | PostgreSQL backup |
-| campaign/member/actor display projection | Service cache | MCP reconciliation |
+| users, sessions, quotas, invitations, applications | SagaSmith Web PostgreSQL | PostgreSQL backup |
+| campaign/member/actor display projection | SagaSmith Web cache | MCP reconciliation |
 | campaign world and mechanic state | D&D/CoC MCP | per-system state backup/snapshot |
-| room message/event/read cursor and Agent run/usage receipt | Service + Agent workspace | both backups |
+| room message/event/read cursor and Agent run/usage receipt | SagaSmith Web + Agent workspace | both backups |
 | private Pack archive | private object storage | versioned object backup |
 | imported/activated Pack state | system MCP | MCP backup + immutable archive |
-| public artifact/release metadata, discussions, reports | Service PostgreSQL | PostgreSQL backup |
-| Soul and Identity public profile | Service PostgreSQL | PostgreSQL backup |
-| Identity campaign assignment and curated memory | Service PostgreSQL + MCP access grant | PostgreSQL + MCP backup |
-| Module project/task/decision/version metadata | Service PostgreSQL | PostgreSQL backup |
-| Module source generations | private object storage | versioned object backup |
+| public artifact/release metadata, discussions, reports | SagaSmith Web PostgreSQL | PostgreSQL backup |
+| Soul and Identity public profile | SagaSmith Web PostgreSQL | PostgreSQL backup |
+| Identity campaign assignment and curated memory | SagaSmith Web PostgreSQL + MCP access grant | PostgreSQL + MCP backup |
+| Module project/task/decision/version metadata | SagaSmith Web PostgreSQL | PostgreSQL backup |
+| Module source generations | SagaSmith Web private object storage | versioned object backup |
 | Module draft and compiled artifact | D&D MCP | D&D state backup/snapshot |
 
 ## Pack lifecycle and copyright
@@ -146,7 +174,7 @@ an explicit right-to-store attestation, is always `distribution=private`, stream
 limit, receives a SHA-256 digest, and has no public download route. Import materializes a short-lived
 copy into a volume shared only with D&D MCP, then calls `content_pack(import)` in Lobby. Import
 receipts supply the runtime reference; activation is a distinct idempotent `content_pack(activate)`
-call. Service changes its projection to `activated` only after that authoritative receipt.
+call. SagaSmith Web changes its projection to `activated` only after that authoritative receipt.
 
 Source authoring remains `draft -> Agent evidence review -> finalize`. Draft source, extracted text,
 chunks and embeddings stay in private storage. Forge publication is a second trust boundary:
@@ -170,16 +198,16 @@ Soul/Skill/Asset releases install as library references and never mutate campaig
 
 ## Consistency
 
-- Campaign creation passes a Service-derived idempotency key to MCP. Retrying after a projection
+- Campaign creation passes a SagaSmith Web-derived idempotency key to MCP. Retrying after a projection
   write failure receives the same authoritative campaign and repairs the projection.
-- Join and actor grants write the Service projection only after an MCP receipt.
+- Join and actor grants write the SagaSmith Web projection only after an MCP receipt.
 - Agent calls reserve quota before provider execution, settle actual tokens afterward, and release
   on failure. Both reservation and settlement are idempotent.
 - Pack import uses campaign, Pack id and archive checksum as its MCP idempotency key.
 - Pack activation uses a caller idempotency key scoped by campaign and immutable Pack identity.
 - PostgreSQL row locks serialize invitation use, join decisions and quota balance changes.
 
-Campaign removal uses the public `access_revoke` facade. Service calls that authority first, then
+Campaign removal uses the public `access_revoke` facade. SagaSmith Web calls that authority first, then
 revokes its membership/actor projections and closes the removed user's active conversations. A
-failed MCP revocation leaves every Service projection active, so the control plane can never claim
+failed MCP revocation leaves every SagaSmith Web projection active, so the control-plane layer can never claim
 that access was removed when the authority still permits it.

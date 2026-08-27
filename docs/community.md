@@ -1,6 +1,6 @@
 # SagaSmith Forge
 
-Forge is the sharing and collaboration surface inside the private hosted Service. It is not a file
+Forge is the sharing and collaboration surface inside SagaSmith Web. It is not a file
 sharing site for rulebooks. Its unit of publication is an immutable, moderated SagaSmith Release.
 
 ## Supported objects
@@ -37,7 +37,7 @@ private source cannot be submitted. A published Release has no update API.
 ## Identity assignment
 
 The campaign owner invites an available Identity and chooses whether the campaign owner or Identity
-owner pays model quota. The Identity owner accepts. Only then does Service ask D&D MCP to grant
+owner pays model quota. The Identity owner accepts. Only then does SagaSmith Web ask D&D MCP to grant
 `agent:<identity-id>` the DM role. The assignment pins the current Soul Release and creates
 `campaign:<campaign-id>:identity:<identity-id>:assignment:<assignment-id>` as the private memory
 namespace. Revocation calls
@@ -52,7 +52,7 @@ enabled. This prevents a UI-only or fake Keeper path.
 - Commercial PDFs, extracted text, chunks, embeddings and private campaign Packs never enter the
   public catalog.
 - Public Pack payloads stay in private object storage and have no raw download endpoint; permitted
-  users install through Service and the authoritative MCP facade.
+  users install through SagaSmith Web and the authoritative MCP facade.
 - Fork is enabled only for licenses that permit derivatives. ARR works may be installed but not
   Forked.
 - Public discussion uses plain text and explicit spoiler markers. DM/private campaign memory is not
