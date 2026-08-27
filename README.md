@@ -155,6 +155,7 @@ Architecture and operating references:
 - [`docs/operations.md`](docs/operations.md)
 - [`docs/test-matrix.md`](docs/test-matrix.md)
 - [`docs/community.md`](docs/community.md)
+- [`docs/frontend-modules.md`](docs/frontend-modules.md)
 - [`docs/repository-rename-checklist.md`](docs/repository-rename-checklist.md)
 - [`docs/component-audit-2026-08-14.md`](docs/component-audit-2026-08-14.md)
 - [`docs/component-audit-2026-08-16.md`](docs/component-audit-2026-08-16.md)
