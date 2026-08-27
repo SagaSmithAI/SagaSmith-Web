@@ -14,7 +14,7 @@ def test_browser_entry_loads_complete_precached_module_graph(client: TestClient)
 
     service_worker = client.get("/service-worker.js")
     assert service_worker.status_code == 200
-    assert 'const CACHE="sagasmith-shell-v5"' in service_worker.text
+    assert 'const CACHE="sagasmith-shell-v6"' in service_worker.text
 
     expected_modules = {
         "/assets/api/client.js",
@@ -23,6 +23,12 @@ def test_browser_entry_loads_complete_precached_module_graph(client: TestClient)
         "/assets/components/dom.js",
         "/assets/components/pwa.js",
         "/assets/components/toast.js",
+        "/assets/forge/catalog.js",
+        "/assets/forge/controller.js",
+        "/assets/forge/moderation.js",
+        "/assets/forge/shared.js",
+        "/assets/forge/studio.js",
+        "/assets/identity/controller.js",
         "/assets/module-studio/controller.js",
         "/assets/state/store.js",
     }
@@ -45,6 +51,16 @@ def test_browser_entry_loads_complete_precached_module_graph(client: TestClient)
     assert discovered == expected_modules
     for path in expected_modules:
         assert f'"{path}"' in service_worker.text
+
+    entry = client.get("/app.js").text
+    assert "/api/community" not in entry
+    assert "/api/identities" not in entry
+    forge_sources = "".join(
+        client.get(path).text for path in expected_modules if path.startswith("/assets/forge/")
+    )
+    identity_source = client.get("/assets/identity/controller.js").text
+    assert "/assets/identity/" not in forge_sources
+    assert "/assets/forge/" not in identity_source
 
 
 def test_asset_namespace_does_not_capture_backend_api(client: TestClient) -> None:

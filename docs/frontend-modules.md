@@ -6,7 +6,7 @@ The HTML shell, PWA manifest, service worker, styles, icon, and `app.js` remain 
 existing root URLs. Imported JavaScript modules use the dedicated `/assets` static namespace so
 they cannot be confused with JSON endpoints under `/api`.
 
-## First-stage ownership
+## Current ownership
 
 | Path | Responsibility |
 |---|---|
@@ -16,13 +16,24 @@ they cannot be confused with JSON endpoints under `/api`.
 | `web/components/dom.js` | Small DOM element and selector helpers |
 | `web/components/toast.js` | Transient status messages |
 | `web/components/pwa.js` | Service-worker registration |
+| `web/forge/catalog.js` | Forge discovery, artifact details, discussions, installs, forks, and reports |
+| `web/forge/studio.js` | Creator Studio artifacts, release drafts, Agent review, and submission |
+| `web/forge/moderation.js` | Administrator release and report decisions |
+| `web/forge/shared.js` | Forge type labels and release JSON parsing |
+| `web/forge/controller.js` | Forge-internal composition and the public catalog/studio entrypoints |
+| `web/identity/controller.js` | Hosted Identities, assignments, isolated memory, invitations, and room hosting |
 | `web/module-studio/controller.js` | Module Studio project, run, source, install, and publish flow |
 | `web/state/store.js` | Shared browser-session state owned by the composition root |
-| `web/app.js` | Composition plus the still-coupled room, Forge, Identity, Pack, and usage flows |
+| `web/app.js` | Composition plus the still-coupled room, Pack, and usage flows |
 
 The first stage reduces `app.js` from 84,293 bytes to about 72 KB while moving a complete product
 surface (Module Studio) and the shared infrastructure behind explicit imports. The service-worker
 shell precaches the complete static import graph, preserving warm and offline PWA startup.
+
+The second stage moves Forge catalog, Creator Studio, moderation, and hosted Identity/assignment
+flows behind feature controllers. It reduces `app.js` again, from about 72 KB to about 56 KB. The
+composition root injects Pack loading and Identity Soul-option loading into Forge, so controllers
+do not import one another and the existing API, DOM, and authoritative MCP behavior stays intact.
 
 ## Dependency direction
 
@@ -38,10 +49,9 @@ that FastAPI serves every module as JavaScript, and verifies that each imported 
 
 Continue in product-sized increments rather than moving arbitrary line ranges:
 
-1. extract Forge catalog, Creator Studio, and moderation into `web/forge`;
-2. extract hosted Identity and campaign-host assignment into `web/identity`;
-3. split room presentation/SSE from character and combat-grid controllers under `web/room`;
-4. leave `app.js` as navigation and controller composition only.
+1. extract the small Pack and usage flows into their own controllers;
+2. split room presentation/SSE from character and combat-grid controllers under `web/room`;
+3. leave `app.js` as navigation and controller composition only.
 
 These later steps should keep the same APIs, DOM IDs, authoritative MCP boundary, and no-build
 deployment model unless a separate architecture change is approved.
