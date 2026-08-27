@@ -4,9 +4,10 @@ import asyncio
 import hashlib
 import hmac
 import json
+from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from decimal import Decimal
-from typing import Annotated, Any
+from typing import Annotated, Any, TypeVar, cast
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
@@ -55,6 +56,41 @@ from sagasmith_service.schemas import (
 )
 
 router = APIRouter(prefix="/api/campaigns/{campaign_id}/room", tags=["campaign-room"])
+
+_ROOM_PROJECTION_CONCURRENCY = 16
+_JobT = TypeVar("_JobT")
+_ResultT = TypeVar("_ResultT")
+
+
+async def _bounded_map_ordered(
+    jobs: list[_JobT],
+    worker: Callable[[_JobT], Awaitable[_ResultT]],
+    *,
+    limit: int = _ROOM_PROJECTION_CONCURRENCY,
+) -> list[_ResultT]:
+    """Run independent projection reads concurrently without changing their order."""
+
+    if limit < 1:
+        raise ValueError("projection concurrency must be positive")
+    next_index = 0
+    results: list[Any] = [None] * len(jobs)
+
+    async def run() -> None:
+        nonlocal next_index
+        while next_index < len(jobs):
+            index = next_index
+            next_index += 1
+            results[index] = await worker(jobs[index])
+
+    tasks = [asyncio.create_task(run()) for _ in range(min(limit, len(jobs)))]
+    try:
+        await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    return cast(list[_ResultT], results)
 
 
 def _membership(session: Session, campaign_id: str, user_id: str) -> CampaignMembershipProjection:
@@ -221,7 +257,7 @@ async def _resolution_index(
     runtime = _campaign_runtime(request, session, campaign_id)
     campaign = session.get(CampaignProjection, campaign_id)
     assert campaign is not None
-    indexed: dict[tuple[str, str], dict[str, Any]] = {}
+    groups: list[tuple[tuple[str, str], list[str]]] = []
     for output in submission.messages:
         identifiers = _output_resolution_ids(output)
         if not identifiers:
@@ -241,37 +277,58 @@ async def _resolution_index(
         users = [session.get(User, user_id) for user_id in sorted(target_user_ids)]
         if any(user is None for user in users):
             raise ValueError("resolution audience contains an unknown user")
-        for resolution_id in identifiers:
-            projections: list[dict[str, Any]] = []
-            for target in users:
-                assert target is not None
-                try:
-                    projection = await runtime.get_resolution_presentation(
-                        campaign_id=campaign_id,
-                        resolution_id=resolution_id,
-                        principal_id=target.principal_id,
-                    )
-                except RuntimeError as exc:
-                    raise ValueError(
-                        "resolution is not visible to the complete message audience"
-                    ) from exc
-                if (
-                    projection.get("schema") != "sagasmith.resolution-presentation/v1"
-                    or str(projection.get("resolution_id") or "") != resolution_id
-                    or str(projection.get("campaign_id") or "") != campaign_id
-                    or str(projection.get("system_id") or "") != campaign.system_id
-                ):
-                    raise ValueError("MCP returned a mismatched resolution presentation")
-                projections.append(dict(projection))
-            if not projections:
-                raise ValueError("resolution message has no audience")
-            comparison = [
-                json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-                for item in projections
-            ]
-            if len(set(comparison)) != 1:
-                raise ValueError("MCP resolution projection differs inside one message audience")
-            indexed[(output.output_id, resolution_id)] = projections[0]
+        principals = [target.principal_id for target in users if target is not None]
+        groups.extend(
+            ((output.output_id, resolution_id), principals)
+            for resolution_id in sorted(identifiers)
+        )
+
+    jobs = [
+        (key, principal_id)
+        for key, principal_ids in groups
+        for principal_id in principal_ids
+    ]
+
+    async def fetch(
+        job: tuple[tuple[str, str], str],
+    ) -> tuple[tuple[str, str], dict[str, Any]]:
+        key, principal_id = job
+        _, resolution_id = key
+        try:
+            projection = await runtime.get_resolution_presentation(
+                campaign_id=campaign_id,
+                resolution_id=resolution_id,
+                principal_id=principal_id,
+            )
+        except RuntimeError as exc:
+            raise ValueError(
+                "resolution is not visible to the complete message audience"
+            ) from exc
+        if (
+            projection.get("schema") != "sagasmith.resolution-presentation/v1"
+            or str(projection.get("resolution_id") or "") != resolution_id
+            or str(projection.get("campaign_id") or "") != campaign_id
+            or str(projection.get("system_id") or "") != campaign.system_id
+        ):
+            raise ValueError("MCP returned a mismatched resolution presentation")
+        return key, dict(projection)
+
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {key: [] for key, _ in groups}
+    for key, projection in await _bounded_map_ordered(jobs, fetch):
+        grouped[key].append(projection)
+
+    indexed: dict[tuple[str, str], dict[str, Any]] = {}
+    for key, _ in groups:
+        projections = grouped[key]
+        if not projections:
+            raise ValueError("resolution message has no audience")
+        comparison = [
+            json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+            for item in projections
+        ]
+        if len(set(comparison)) != 1:
+            raise ValueError("MCP resolution projection differs inside one message audience")
+        indexed[key] = projections[0]
     return indexed
 
 
@@ -284,7 +341,7 @@ async def _actor_presentation_index(
     trigger: CampaignMessage,
 ) -> dict[tuple[str, str], dict[str, Any]]:
     runtime = _campaign_runtime(request, session, campaign_id)
-    indexed: dict[tuple[str, str], dict[str, Any]] = {}
+    groups: list[tuple[tuple[str, str], list[str]]] = []
     for output in submission.messages:
         actor_refs = {
             str(block.speaker.actor_ref)
@@ -308,68 +365,83 @@ async def _actor_presentation_index(
             audience_user_ids,
         )
         users = [session.get(User, user_id) for user_id in sorted(target_user_ids)]
-        for actor_ref in actor_refs:
-            presentations: list[dict[str, Any]] = []
-            for target in users:
-                if target is None:
-                    raise ValueError("actor presentation audience contains an unknown user")
-                try:
-                    actor = await runtime.get_character_card(
-                        campaign_id=campaign_id,
-                        character_id=actor_ref,
-                        principal_id=target.principal_id,
-                    )
-                except RuntimeError as exc:
-                    raise ValueError(
-                        "published actor is not visible to the message audience"
-                    ) from exc
-                if (
-                    str(actor.get("id") or "") != actor_ref
-                    or str(actor.get("campaign_id") or "") != campaign_id
-                    or not str(actor.get("name") or "").strip()
-                ):
-                    raise ValueError("MCP returned a mismatched actor presentation")
-                presentations.append(
-                    {
-                        "label": str(actor["name"]),
-                        "character_type": str(actor.get("character_type") or ""),
-                        "revision": int(actor.get("revision") or 0),
-                    }
-                )
-            if not presentations or len(
-                {
-                    json.dumps(item, sort_keys=True, ensure_ascii=False)
-                    for item in presentations
-                }
-            ) != 1:
-                raise ValueError("actor presentation differs inside one message audience")
-            indexed[(output.output_id, actor_ref)] = presentations[0]
+        if any(target is None for target in users):
+            raise ValueError("actor presentation audience contains an unknown user")
+        principals = [target.principal_id for target in users if target is not None]
+        groups.extend(
+            ((output.output_id, actor_ref), principals) for actor_ref in sorted(actor_refs)
+        )
     suggestion_actor_refs = {
         str(item.actor_ref) for item in submission.suggestions if item.actor_ref
     }
     target = session.get(User, trigger.sender_user_id) if trigger.sender_user_id else None
     if suggestion_actor_refs and target is None:
         raise ValueError("suggestion actor has no triggering principal")
-    for actor_ref in suggestion_actor_refs:
-        assert target is not None
+    suggestion_keys = [("__suggestion__", actor_ref) for actor_ref in sorted(suggestion_actor_refs)]
+    jobs = [
+        (key, principal_id, False)
+        for key, principal_ids in groups
+        for principal_id in principal_ids
+    ]
+    jobs.extend(
+        (key, target.principal_id, True)
+        for key in suggestion_keys
+        if target is not None
+    )
+
+    async def fetch(
+        job: tuple[tuple[str, str], str, bool],
+    ) -> tuple[tuple[str, str], bool, dict[str, Any]]:
+        key, principal_id, suggestion = job
+        _, actor_ref = key
         try:
             actor = await runtime.get_character_card(
                 campaign_id=campaign_id,
                 character_id=actor_ref,
-                principal_id=target.principal_id,
+                principal_id=principal_id,
             )
         except RuntimeError as exc:
-            raise ValueError("suggestion actor is not visible to its target") from exc
+            message = (
+                "suggestion actor is not visible to its target"
+                if suggestion
+                else "published actor is not visible to the message audience"
+            )
+            raise ValueError(message) from exc
         if (
             str(actor.get("id") or "") != actor_ref
             or str(actor.get("campaign_id") or "") != campaign_id
+            or (not suggestion and not str(actor.get("name") or "").strip())
         ):
-            raise ValueError("MCP returned a mismatched suggestion actor")
-        indexed[("__suggestion__", actor_ref)] = {
+            message = (
+                "MCP returned a mismatched suggestion actor"
+                if suggestion
+                else "MCP returned a mismatched actor presentation"
+            )
+            raise ValueError(message)
+        return key, suggestion, {
             "label": str(actor.get("name") or ""),
             "character_type": str(actor.get("character_type") or ""),
             "revision": int(actor.get("revision") or 0),
         }
+
+    published: dict[tuple[str, str], list[dict[str, Any]]] = {key: [] for key, _ in groups}
+    suggested: dict[tuple[str, str], list[dict[str, Any]]] = {key: [] for key in suggestion_keys}
+    for key, suggestion, presentation in await _bounded_map_ordered(jobs, fetch):
+        (suggested if suggestion else published)[key].append(presentation)
+
+    indexed: dict[tuple[str, str], dict[str, Any]] = {}
+    for key, _ in groups:
+        presentations = published[key]
+        if not presentations or len(
+            {
+                json.dumps(item, sort_keys=True, ensure_ascii=False)
+                for item in presentations
+            }
+        ) != 1:
+            raise ValueError("actor presentation differs inside one message audience")
+        indexed[key] = presentations[0]
+    for key in suggestion_keys:
+        indexed[key] = suggested[key][0]
     return indexed
 
 
