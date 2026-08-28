@@ -26,18 +26,18 @@ Narrative MCP process instead of exposing a compatibility HTTP wrapper.
 ```
 
 The FastAPI lifespan owns one long-lived HTTP connection pool for each Agent, D&D, CoC and
-Narrative adapter. A browser panel refresh may group its independent reads inside one temporary,
-principal-scoped MCP transport and `ClientSession`; the session is never pooled across principals
-or requests, so signed context, authorization epoch and dynamic exposure cannot cross callers.
+Narrative adapter. Connection reuse never carries a principal, campaign, authorization decision,
+or tool exposure: modern MCP requests carry protocol version, capability, trace and target-specific
+delegation on every request. A temporary legacy `ClientSession` exists only on the documented
+dual-era compatibility path and is never pooled across principals.
 
 SagaSmith Web also owns a selective SQLAlchemy `AsyncEngine`/`AsyncSession` stack for room messages,
-panel intents and panel projection refreshes. Room messages authenticate and persist through one
-shared async session dependency, commit the message, quota reservation and Agent run before
-awaiting Agent or MCP work, then reacquire the room row for settlement and ordered projection
-writes. Panel refreshes end their membership/runtime read transaction before MCP and use a second
-short transaction for actor bindings afterward. Agent messages, authoritative panel commands,
-activity callbacks and low-frequency administration/community CRUD keep the synchronous engine;
-this is a measured hot-path migration, not a second authority or a repository-wide ORM rewrite.
+panel intents and panel projection refreshes. An action transaction commits the user message and a
+durable `RoomTurnJob`, then releases the request transaction. A leased worker creates or resumes the
+quota reservation and Agent run, performs Agent/MCP work without holding a database transaction,
+and reacquires a short per-room settlement lock only to publish ordered messages and outbox events.
+Panel refreshes follow the same read-before-await/write-after-await boundary. This is a measured
+hot-path design, not a second authority or a repository-wide ORM rewrite.
 
 ## Shared authority across local and hosted deployments
 
@@ -107,14 +107,16 @@ call.
 - Administrator status grants control-plane operations such as quota grants; it does not imply DM
   authority in a campaign.
 
-## Dynamic native tools
+## Stable native tool catalogs
 
 The browser does not receive or imitate MCP tools. It posts chat or action messages to a shared
 campaign room. Ordinary chat is persisted without invoking the Agent; an action starts a
-sender-scoped Agent run whose result is appended to the same ordered room timeline. A hosted Agent
-worker owns a real MCP client session, consumes the server's current native
-`tools/list`, listens for `tools/list_changed`, and refreshes schemas before the next call. Lobby,
-Play, Combat and checkout/restore transitions therefore change the real native tool list.
+sender-scoped Agent run whose result is appended to the same ordered room timeline. For the same
+authorization, modern `tools/list` is deterministic, sorted and cacheable with explicit TTL/cache
+scope. The Host may choose a task/phase-appropriate subset for the model, but no exposure side
+effect mutates the server catalog and every tool call revalidates role, phase and revision. Legacy
+`tools/list_changed` behavior is isolated to the compatibility path and is not an authority
+boundary.
 
 Workers are isolated by campaign and authenticated principal. The private Agent Supervisor starts
 a dedicated Nanobot subprocess for each principal's stable room conversation, giving every human
@@ -124,10 +126,15 @@ principal or actor scope. The cloud topology is:
 
 ```text
 campaign room -> principal-scoped conversation lease -> dedicated Agent worker
-                                              -> dedicated MCP session
+                                              -> per-request MCP authority context
                                               -> persisted workspace/session volume
                                               -> idle timeout -> graceful close -> resumable lease
 ```
+
+`RoomTurnJob` is a Web Host orchestration record, never an MCP Task. Its durable states are
+`queued`, `running`, `waiting`, `succeeded`, `failed`, and `cancelled`; leases, heartbeats,
+bounded retries, saved standard Agent/MCP results and stable idempotency keys recover safely after
+a worker or Web restart. MCP Tasks are negotiated only for one genuinely long-running domain tool.
 
 Room messages and room events use monotonic per-room sequence numbers in PostgreSQL. The browser
 opens an SSE stream after loading a REST snapshot. Message events append to the timeline, while
@@ -226,8 +233,10 @@ Soul/Skill/Asset releases install as library references and never mutate campaig
 - Join and actor grants write the SagaSmith Web projection only after an MCP receipt.
 - Every committed Web-visible projection change writes its outbox signal in the same transaction;
   cache rebuilding and Redis delivery happen after commit and can be retried safely.
-- Agent calls reserve quota before provider execution, settle actual tokens afterward, and release
-  on failure. Both reservation and settlement are idempotent.
+- Agent calls reserve quota before provider execution, renew the reservation with the worker lease,
+  settle actual tokens before Web publication, and explicitly expire only abandoned reservations.
+  Reservation and settlement are idempotent, and an expired timestamp alone never creates an
+  over-allocation window while a durable job remains active.
 - Pack import uses campaign, Pack id and archive checksum as its MCP idempotency key.
 - Pack activation uses a caller idempotency key scoped by campaign and immutable Pack identity.
 - PostgreSQL row locks serialize invitation use, join decisions and quota balance changes.

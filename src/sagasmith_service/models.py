@@ -363,9 +363,7 @@ class CampaignSuggestion(Base):
         ForeignKey("campaign_messages.id", ondelete="CASCADE"), index=True
     )
     suggestion_id: Mapped[str] = mapped_column(String(80))
-    target_user_id: Mapped[str | None] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE")
-    )
+    target_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     actor_ref: Mapped[str | None] = mapped_column(String(64))
     run_id: Mapped[str] = mapped_column(String(64))
     expired: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -410,9 +408,7 @@ class CampaignRoomReadCursor(Base):
     room_id: Mapped[str] = mapped_column(
         ForeignKey("campaign_rooms.id", ondelete="CASCADE"), index=True
     )
-    user_id: Mapped[str] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), index=True
-    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     last_read_sequence: Mapped[int] = mapped_column(default=0)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc, onupdate=now_utc
@@ -447,6 +443,94 @@ class AgentRun(Base):
     error_code: Mapped[str | None] = mapped_column(String(80))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class RoomTurnJob(Base):
+    """Durable Web-host work item for one player action.
+
+    This is deliberately separate from an MCP Task.  It owns Web orchestration,
+    quota and publication recovery while domain MCP calls remain ordinary
+    idempotent tool calls unless a negotiated MCP Task is returned by the domain.
+    """
+
+    __tablename__ = "room_turn_jobs"
+    __table_args__ = (
+        UniqueConstraint("user_id", "idempotency_key", name="uq_room_turn_job_retry"),
+        Index("ix_room_turn_job_queue", "status", "available_at", "created_at"),
+        Index("ix_room_turn_job_room", "room_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    room_id: Mapped[str] = mapped_column(
+        ForeignKey("campaign_rooms.id", ondelete="CASCADE"), index=True
+    )
+    campaign_id: Mapped[str] = mapped_column(
+        ForeignKey("campaign_projections.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    trigger_message_id: Mapped[str] = mapped_column(
+        ForeignKey("campaign_messages.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    agent_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="SET NULL"), unique=True, index=True
+    )
+    reservation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("quota_reservations.id", ondelete="SET NULL"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(24), default="queued", index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(160))
+    input_hash: Mapped[str] = mapped_column(String(64))
+    base_revision: Mapped[int | None] = mapped_column()
+    result_revision: Mapped[int | None] = mapped_column()
+    result_message_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    agent_result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    authority_context: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    trace_context: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
+    attempt: Mapped[int] = mapped_column(default=0)
+    max_attempts: Mapped[int] = mapped_column(default=3)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    lease_owner: Mapped[str | None] = mapped_column(String(100), index=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    retryable: Mapped[bool] = mapped_column(Boolean, default=True)
+    error_class: Mapped[str | None] = mapped_column(String(50))
+    error_code: Mapped[str | None] = mapped_column(String(80))
+    last_error: Mapped[str] = mapped_column(String(1000), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class RoomMediaArtifact(Base):
+    """Web-owned object reference derived from standard MCP content blocks."""
+
+    __tablename__ = "room_media_artifacts"
+    __table_args__ = (
+        UniqueConstraint("job_id", "content_index", name="uq_room_media_job_content"),
+        Index("ix_room_media_room_created", "room_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    job_id: Mapped[str] = mapped_column(
+        ForeignKey("room_turn_jobs.id", ondelete="CASCADE"), index=True
+    )
+    room_id: Mapped[str] = mapped_column(
+        ForeignKey("campaign_rooms.id", ondelete="CASCADE"), index=True
+    )
+    campaign_id: Mapped[str] = mapped_column(
+        ForeignKey("campaign_projections.id", ondelete="CASCADE"), index=True
+    )
+    content_index: Mapped[int] = mapped_column()
+    kind: Mapped[str] = mapped_column(String(32))
+    media_type: Mapped[str] = mapped_column(String(160))
+    storage_key: Mapped[str | None] = mapped_column(String(500), unique=True)
+    resource_uri: Mapped[str | None] = mapped_column(String(1000))
+    sha256: Mapped[str | None] = mapped_column(String(64))
+    size_bytes: Mapped[int] = mapped_column(default=0)
+    audience: Mapped[str] = mapped_column(String(24), default="public", index=True)
+    audience_user_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
 
 class PrivatePack(TimestampMixin, Base):
@@ -904,9 +988,7 @@ class UserNotification(Base):
     __table_args__ = (Index("ix_user_notification_inbox", "user_id", "read_at", "created_at"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    user_id: Mapped[str] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), index=True
-    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     notification_type: Mapped[str] = mapped_column(String(50), index=True)
     title: Mapped[str] = mapped_column(String(200))
     body: Mapped[str] = mapped_column(String(2000), default="")

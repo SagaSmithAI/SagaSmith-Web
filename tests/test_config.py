@@ -40,3 +40,12 @@ def test_production_rejects_documented_placeholder_secrets() -> None:
             object_access_key="private-access",
             object_secret_key="real-private-secret-that-is-at-least-32-bytes",
         )
+
+
+def test_room_turn_reservation_must_outlive_agent_timeout() -> None:
+    with pytest.raises(ValidationError, match="AGENT_RESERVATION_TTL_SECONDS must exceed"):
+        Settings(
+            env="test",
+            agent_completion_timeout_seconds=900,
+            agent_reservation_ttl_seconds=900,
+        )

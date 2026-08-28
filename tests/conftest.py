@@ -293,6 +293,7 @@ class FakeAgentRuntime:
         self.structured_output: dict[str, Any] | None = None
         self.structured_output_factory = None
         self.tool_receipts: tuple[dict[str, Any], ...] = ()
+        self.mcp_results: tuple[dict[str, Any], ...] = ()
 
     async def probe(self) -> None:
         if getattr(self, "fail_probe", False):
@@ -329,6 +330,7 @@ class FakeAgentRuntime:
             completion_tokens=30,
             structured_output=structured_output,
             tool_receipts=self.tool_receipts,
+            mcp_results=self.mcp_results,
         )
 
 

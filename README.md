@@ -67,12 +67,11 @@ remain compatible: the Python package is `sagasmith_service`, the distribution a
 
 ## Verified integration baseline
 
-The 2026-08-20 baseline rebuilds the hosted stack from the reviewed revisions in
-`component-versions.json`. SagaSmith Web signs short-lived `sagasmith.auth-context/v1`
-principal context, the Agent forwards session identity to dynamic native tools,
-and each domain MCP revalidates campaign, role, actor, phase, and revision at the
-call boundary. Isolated D&D and CoC reference campaigns completed concurrently
-without a reported regression gap; the D&D path recorded a legal ending.
+The hosted stack is rebuilt from reviewed revisions in `component-versions.json`.
+SagaSmith Web persists a short-lived `sagasmith.auth-context/v2` authority envelope on every
+durable room turn. Browser text remains an untrusted input, browser credentials are never stored
+in the job, and the Agent uses a target-specific delegation for each MCP request. Domain MCPs
+still revalidate campaign, role, actor, phase, revision, and idempotency at every tool boundary.
 
 The content runner preserves build revisions, per-campaign logs, gaps, discovered
 modules, and explicit exclusions as machine-readable evidence. This reference
@@ -151,6 +150,7 @@ uv run python scripts/container_e2e.py
 Architecture and operating references:
 
 - [`docs/architecture.md`](docs/architecture.md)
+- [`docs/room-turn-jobs.md`](docs/room-turn-jobs.md)
 - [`docs/threat-model.md`](docs/threat-model.md)
 - [`docs/operations.md`](docs/operations.md)
 - [`docs/test-matrix.md`](docs/test-matrix.md)
