@@ -340,7 +340,12 @@ def test_artifact_catalog_query_count_is_constant_and_paginates(client: TestClie
             params={"q": "Indexed Adventure", "limit": 10},
         )
         first_selects = sum(
-            statement.lstrip().upper().startswith("SELECT") for statement in statements
+            statement.lstrip().upper().startswith("SELECT")
+            and any(
+                table in statement.lower()
+                for table in ("artifacts", "artifact_releases", "artifact_favorites")
+            )
+            for statement in statements
         )
         statements.clear()
         second_page = client.get(
@@ -348,7 +353,12 @@ def test_artifact_catalog_query_count_is_constant_and_paginates(client: TestClie
             params={"q": "Indexed Adventure", "limit": 10, "offset": 10},
         )
         second_selects = sum(
-            statement.lstrip().upper().startswith("SELECT") for statement in statements
+            statement.lstrip().upper().startswith("SELECT")
+            and any(
+                table in statement.lower()
+                for table in ("artifacts", "artifact_releases", "artifact_favorites")
+            )
+            for statement in statements
         )
     finally:
         event.remove(client.app.state.engine, "before_cursor_execute", record_statement)
@@ -359,7 +369,7 @@ def test_artifact_catalog_query_count_is_constant_and_paginates(client: TestClie
         item["id"] for item in second_page.json()
     )
     assert first_selects == second_selects
-    assert first_selects <= 3
+    assert first_selects == 1
     assert all(item["latest_release_id"] for item in first_page.json())
     favorites_page = client.get("/api/community/artifacts", params={"favorites": True})
     assert favorites_page.status_code == 200
@@ -416,7 +426,14 @@ def test_post_query_count_does_not_grow_with_owner_only_posts(client: TestClient
     finally:
         event.remove(client.app.state.engine, "before_cursor_execute", record_statement)
 
-    select_count = sum(statement.lstrip().upper().startswith("SELECT") for statement in statements)
+    select_count = sum(
+        statement.lstrip().upper().startswith("SELECT")
+        and any(
+            table in statement.lower()
+            for table in ("artifacts", "artifact_collaborators", "community_posts")
+        )
+        for statement in statements
+    )
     assert response.status_code == 200
     assert len(response.json()) == 30
-    assert select_count <= 5
+    assert select_count <= 3
