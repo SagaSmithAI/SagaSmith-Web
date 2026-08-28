@@ -176,7 +176,38 @@ class CampaignMembershipProjection(TimestampMixin, Base):
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     role: Mapped[str] = mapped_column(String(24), index=True)
     status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    authorization_epoch: Mapped[int] = mapped_column(default=1)
     mcp_receipt: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class CampaignPanelProjection(TimestampMixin, Base):
+    """Versioned, principal-scoped read model published by the domain MCP."""
+
+    __tablename__ = "campaign_panel_projections"
+    __table_args__ = (
+        UniqueConstraint(
+            "campaign_id",
+            "audience_key",
+            name="uq_campaign_panel_projection_audience",
+        ),
+        Index(
+            "ix_campaign_panel_projection_freshness",
+            "campaign_id",
+            "audience_key",
+            "source_revision",
+            "authorization_epoch",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    campaign_id: Mapped[str] = mapped_column(
+        ForeignKey("campaign_projections.id", ondelete="CASCADE"), index=True
+    )
+    audience_key: Mapped[str] = mapped_column(String(100))
+    source_revision: Mapped[int] = mapped_column(default=0)
+    authorization_epoch: Mapped[int] = mapped_column(default=0)
+    projection_schema_version: Mapped[int] = mapped_column(default=1)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
 class JoinRequest(TimestampMixin, Base):

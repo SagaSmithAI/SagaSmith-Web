@@ -25,6 +25,7 @@ from sagasmith_service.api.dependencies import (
     AsyncDbSession,
     CurrentUser,
     DbSession,
+    StreamingCurrentUser,
 )
 from sagasmith_service.integrations.agent import AgentRuntime
 from sagasmith_service.models import (
@@ -47,6 +48,8 @@ from sagasmith_service.models import (
     now_utc,
 )
 from sagasmith_service.observability import (
+    REALTIME_DB_QUERIES,
+    REALTIME_WAKEUPS,
     ROOM_PROJECTION_BATCH_SECONDS,
     ROOM_PROJECTION_JOBS,
 )
@@ -1899,75 +1902,132 @@ def update_read_cursor(
     return {"last_read_sequence": item.last_read_sequence}
 
 
+def _room_event_batch(
+    session_factory: Any,
+    *,
+    campaign_id: str,
+    room_id: str,
+    user_id: str,
+    cursor: int,
+) -> tuple[bool, int, list[str]]:
+    """Replay one durable event page with one bulk message lookup."""
+
+    with session_factory() as poll:
+        membership = poll.scalar(
+            select(CampaignMembershipProjection).where(
+                CampaignMembershipProjection.campaign_id == campaign_id,
+                CampaignMembershipProjection.user_id == user_id,
+                CampaignMembershipProjection.status == "active",
+            )
+        )
+        if membership is None:
+            return False, cursor, []
+        events = poll.scalars(
+            select(CampaignRoomEvent)
+            .where(
+                CampaignRoomEvent.room_id == room_id,
+                CampaignRoomEvent.sequence > cursor,
+            )
+            .order_by(CampaignRoomEvent.sequence)
+            .limit(100)
+        ).all()
+        message_ids = {
+            str(message_id)
+            for event in events
+            if (message_id := (event.payload or {}).get("message_id"))
+        }
+        messages = {
+            item.id: item
+            for item in (
+                poll.scalars(select(CampaignMessage).where(CampaignMessage.id.in_(message_ids))).all()
+                if message_ids
+                else []
+            )
+        }
+        frames: list[str] = []
+        for event in events:
+            cursor = event.sequence
+            payload = dict(event.payload or {})
+            if event.event_type == "room.activity":
+                event_audience = str(payload.get("audience") or "public")
+                visible = event_audience == "public"
+                if event_audience == "dm":
+                    visible = membership.role in {"owner", "dm"}
+                elif event_audience == "private":
+                    visible = user_id in set(payload.get("audience_user_ids") or [])
+                if not visible:
+                    continue
+            message_id = payload.get("message_id")
+            if message_id:
+                message = messages.get(str(message_id))
+                if message is None or not _message_visible(message, membership, user_id):
+                    continue
+                payload["message"] = _message_view(message, user_id)
+            frames.append(
+                f"id: {event.sequence}\n"
+                f"event: {event.event_type}\n"
+                f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            )
+        return True, cursor, frames
+
+
 @router.get("/events")
 async def room_events(
     campaign_id: str,
     request: Request,
-    user: CurrentUser,
-    session: DbSession,
+    user: StreamingCurrentUser,
     after: Annotated[int, Query(ge=0)] = 0,
     last_event_id: Annotated[int | None, Header(alias="Last-Event-ID", ge=0)] = None,
 ) -> StreamingResponse:
-    _membership(session, campaign_id, user.id)
-    room_id = _room(session, campaign_id).id
-    session.commit()
     session_factory = request.app.state.session_factory
+    with session_factory() as initial:
+        _membership(initial, campaign_id, user.id)
+        room_id = _room(initial, campaign_id).id
 
     async def stream():
         cursor = max(after, last_event_id or 0)
-        idle_ticks = 0
-        while not await request.is_disconnected():
-            with session_factory() as poll:
-                membership = poll.scalar(
-                    select(CampaignMembershipProjection).where(
-                        CampaignMembershipProjection.campaign_id == campaign_id,
-                        CampaignMembershipProjection.user_id == user.id,
-                        CampaignMembershipProjection.status == "active",
-                    )
+        loop = asyncio.get_running_loop()
+        reconciliation_at = loop.time()
+        topics = {
+            f"room:{room_id}",
+            f"campaign:{campaign_id}",
+            f"principal:{user.id}",
+        }
+        async with request.app.state.realtime_hub.subscribe(topics) as notices:
+            reason = "initial"
+            while not await request.is_disconnected():
+                REALTIME_DB_QUERIES.labels("room", reason).inc()
+                active, cursor, frames = await asyncio.to_thread(
+                    _room_event_batch,
+                    session_factory,
+                    campaign_id=campaign_id,
+                    room_id=room_id,
+                    user_id=user.id,
+                    cursor=cursor,
                 )
-                if membership is None:
+                if not active:
                     yield "event: access.revoked\ndata: {}\n\n"
                     return
-                events = poll.scalars(
-                    select(CampaignRoomEvent)
-                    .where(
-                        CampaignRoomEvent.room_id == room_id,
-                        CampaignRoomEvent.sequence > cursor,
-                    )
-                    .order_by(CampaignRoomEvent.sequence)
-                    .limit(100)
-                ).all()
-                for event in events:
-                    cursor = event.sequence
-                    payload = dict(event.payload or {})
-                    if event.event_type == "room.activity":
-                        event_audience = str(payload.get("audience") or "public")
-                        visible = event_audience == "public"
-                        if event_audience == "dm":
-                            visible = membership.role in {"owner", "dm"}
-                        elif event_audience == "private":
-                            visible = user.id in set(payload.get("audience_user_ids") or [])
-                        if not visible:
-                            continue
-                    message_id = payload.get("message_id")
-                    if message_id:
-                        message = poll.get(CampaignMessage, str(message_id))
-                        if message is None or not _message_visible(message, membership, user.id):
-                            continue
-                        payload["message"] = _message_view(message, user.id)
-                    yield (
-                        f"id: {event.sequence}\n"
-                        f"event: {event.event_type}\n"
-                        f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-                    )
-            if events:
-                idle_ticks = 0
-            else:
-                idle_ticks += 1
-                if idle_ticks >= 30:
-                    yield ": keepalive\n\n"
-                    idle_ticks = 0
-            await asyncio.sleep(0.5)
+                for frame in frames:
+                    yield frame
+                reconciliation_at = loop.time() + 30
+
+                while not await request.is_disconnected():
+                    timeout = min(15.0, max(0.0, reconciliation_at - loop.time()))
+                    try:
+                        await asyncio.wait_for(notices.get(), timeout=timeout)
+                    except TimeoutError:
+                        if loop.time() >= reconciliation_at:
+                            REALTIME_WAKEUPS.labels("room", "reconciliation").inc()
+                            reason = "reconciliation"
+                            break
+                        yield ": keepalive\n\n"
+                    else:
+                        while not notices.empty():
+                            notices.get_nowait()
+                        REALTIME_WAKEUPS.labels("room", "event").inc()
+                        reason = "event"
+                        break
 
     return StreamingResponse(
         stream(),

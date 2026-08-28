@@ -66,3 +66,24 @@ def current_user(
 
 
 CurrentUser = Annotated[User, Depends(current_user)]
+
+
+def streaming_current_user(
+    request: Request,
+    token: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
+) -> User:
+    """Authenticate before a streaming response without retaining a DB dependency."""
+
+    factory = request.app.state.session_factory
+    with factory() as session:
+        authenticated = authenticate_session(session, token)
+        if authenticated is None:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "authentication required")
+        user, active_session = authenticated
+        active_session.last_seen_at = now_utc()
+        session.commit()
+        session.expunge(user)
+        return user
+
+
+StreamingCurrentUser = Annotated[User, Depends(streaming_current_user)]
