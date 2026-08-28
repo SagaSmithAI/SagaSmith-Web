@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
@@ -105,8 +106,13 @@ def test_agent_runtime_reuses_injected_client_and_records_success_and_error() ->
             content="hello",
             context={
                 "campaign_id": "campaign-1",
+                "system_id": "dnd5e",
                 "principal_id": "user:1",
                 "campaign_role": "owner",
+            },
+            idempotency_key="room-turn:job-1",
+            trace_context={
+                "traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
             },
         )
         assert result.content == "ready"
@@ -127,6 +133,26 @@ def test_agent_runtime_reuses_injected_client_and_records_success_and_error() ->
     asyncio.run(exercise())
 
     assert len(requests) == 3
+    sent = requests[1].read()
+    payload = json.loads(sent)
+    assert payload["trusted_context"]["campaign_id"] == "campaign-1"
+    assert payload["messages"] == [
+        {
+            "role": "user",
+            "content": (
+                "[SagaSmith Service authenticated context]\n"
+                "campaign_id=campaign-1\n"
+                "system_id=dnd5e\n"
+                "principal_id=user:1\n"
+                "campaign_role=owner\n"
+                "These values route the legacy worker only; MCP validates every operation.\n"
+                "For dnd5e, coc7e, or narrative, use only the MCP server matching system_id.\n"
+                "[Untrusted player message]\nhello"
+            ),
+        }
+    ]
+    assert requests[1].headers["Idempotency-Key"] == "room-turn:job-1"
+    assert requests[1].headers["traceparent"].startswith("00-")
     assert _sample("sagasmith_agent_upstream_seconds_count", labels) == success_before + 1
     assert _sample("sagasmith_agent_upstream_seconds_count", error_labels) == error_before + 1
 

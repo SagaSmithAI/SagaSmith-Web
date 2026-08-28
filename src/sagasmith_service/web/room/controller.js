@@ -275,7 +275,11 @@ export function createRoomController({
       const result = await api(`/api/campaigns/${state.campaign.id}/room/panel/actions`, {
         method: "POST",
         headers: { "Idempotency-Key": crypto.randomUUID() },
-        body: JSON.stringify({ action, payload }),
+        body: JSON.stringify({
+          action,
+          payload,
+          base_revision: state.panel?.revision ?? state.campaign?.mcp_revision ?? null,
+        }),
       });
       if (result.message) timelineController.updateMessage(result.message);
       if (result.agent_message) timelineController.updateMessage(result.agent_message);
@@ -481,6 +485,10 @@ export function createRoomController({
             mode,
             audience,
             structured_payload: structuredPayload,
+            base_revision:
+              mode === "action"
+                ? state.panel?.revision ?? state.campaign?.mcp_revision ?? null
+                : null,
           }),
         });
         $$(".suggestion-row").forEach((row) => row.remove());

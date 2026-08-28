@@ -39,3 +39,4 @@ form{display:flex;flex-direction:column;gap:1rem}label{display:flex;flex-directi
 .encounter-command-head{height:auto;min-height:64px}
 .encounter-source-option{flex-direction:row}
 @media(max-width:600px){.encounter-command-head{display:flex;flex-wrap:wrap}.encounter-command-title{flex:1 0 100%}.encounter-name{min-width:0;flex:1 1 160px}.encounter-command-head select{flex:0 0 145px}}
+.message-media{display:grid;gap:.6rem;margin-top:.7rem}.message-media img{display:block;max-width:100%;height:auto;border:1px solid var(--line);border-radius:10px}.message-media audio{width:100%}.message-media a{color:var(--gold)}

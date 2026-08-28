@@ -95,6 +95,10 @@ unbounded processes; clients should retry with backoff.
   `sagasmith_room_projection_batch_seconds` and `sagasmith_room_projection_jobs`. These series use
   only bounded `system`, `operation_class`, `status`, and `transport` labels; never add campaign,
   user, run, or tool-argument values.
+- Durable room orchestration exposes `sagasmith_room_turn_job_transitions_total`,
+  `sagasmith_room_turn_job_seconds`, `sagasmith_room_turn_job_recoveries_total`, and
+  `sagasmith_room_turn_job_queue`. Labels are bounded state/phase/reason classes; job, room,
+  campaign, user, prompt, and tool arguments are never metric labels.
 - Selective database diagnosis uses `sagasmith_event_loop_lag_seconds`,
   `sagasmith_db_statement_seconds`, `sagasmith_db_request_seconds`, and
   `sagasmith_db_statements_per_request` for room actions, Agent messages, projection refreshes, and
@@ -195,6 +199,9 @@ Narrative conversation, and waits for every idle Worker to disappear with no `/p
    content artifact into a disposable campaign.
 8. Verify Lobby -> Play -> Combat -> Play, snapshot/branch restore, undo/redo, quota idempotency and
    private Pack access before reopening traffic.
+9. Before admitting writes, verify that expired `running`/`waiting` room-turn leases were recovered,
+   active reservation heartbeats are advancing, and a queued smoke action reaches one terminal
+   state without a duplicate Agent request.
 
 `powershell -NoProfile -File scripts/restore.ps1` refuses the live project name, requires
 `RESTORE-<project>` confirmation, requires a

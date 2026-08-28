@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     auth_context_secret: SecretStr = SecretStr("development-auth-context-secret-change-me")
     service_internal_url: str = "http://127.0.0.1:8080"
     agent_completion_timeout_seconds: int = Field(default=900, ge=30, le=3600)
+    agent_reservation_ttl_seconds: int = Field(default=1200, ge=60, le=7200)
+    room_turn_worker_poll_seconds: float = Field(default=0.1, gt=0, le=60)
+    room_turn_worker_lease_seconds: int = Field(default=60, ge=15, le=900)
+    room_turn_worker_concurrency: int = Field(default=4, ge=1, le=64)
+    room_turn_worker_max_attempts: int = Field(default=3, ge=1, le=20)
+    room_turn_retry_seconds: int = Field(default=2, ge=0, le=3600)
+    room_turn_inline_wait_seconds: float = Field(default=30, ge=0, le=120)
+    room_turn_media_max_bytes: int = Field(default=16 * 1024 * 1024, ge=1024, le=128 * 1024 * 1024)
     private_storage_dir: str = "./data/private"
     exchange_dir: str = "./data/exchange"
     max_pack_bytes: int = 200 * 1024 * 1024
@@ -59,14 +67,17 @@ class Settings(BaseSettings):
     object_access_key: str = ""
     object_secret_key: SecretStr = SecretStr("")
     combat_render_cache_entries: int = Field(default=8, ge=1, le=4096)
-    combat_render_cache_max_bytes: int = Field(
-        default=64 * 1024 * 1024, ge=10 * 1024 * 1024
-    )
+    combat_render_cache_max_bytes: int = Field(default=64 * 1024 * 1024, ge=10 * 1024 * 1024)
     combat_render_concurrency: int = Field(default=2, ge=1, le=64)
     combat_render_cache_ttl_seconds: float = Field(default=30, gt=0, le=3600)
 
     @model_validator(mode="after")
     def validate_production_security(self) -> Settings:
+        if self.agent_reservation_ttl_seconds <= self.agent_completion_timeout_seconds:
+            raise ValueError(
+                "SAGASMITH_AGENT_RESERVATION_TTL_SECONDS must exceed "
+                "SAGASMITH_AGENT_COMPLETION_TIMEOUT_SECONDS"
+            )
         if self.env != "production":
             return self
         failures: list[str] = []

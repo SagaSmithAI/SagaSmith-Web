@@ -67,7 +67,7 @@ services:
       context: .
       dockerfile: infrastructure/Dockerfile.dnd-mcp
       additional_contexts:
-        core: ${SAGASMITH_CORE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-core.git#08ac611cfa8e551231028d181c5c3bf2727ee0f7}
+        core: ${SAGASMITH_CORE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-core.git#0ac316655687757203a9df1b2eb81669ec1d2d78}
         dnd_domain: ${SAGASMITH_DND_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-dnd.git#e5b87e55e1f08564d154e4d7cb568d936bc6edfe}
     environment:
       SAGASMITH_DND_MCP_TRANSPORT: streamable-http
@@ -96,7 +96,7 @@ services:
       context: .
       dockerfile: infrastructure/Dockerfile.coc-mcp
       additional_contexts:
-        core: ${SAGASMITH_CORE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-core.git#08ac611cfa8e551231028d181c5c3bf2727ee0f7}
+        core: ${SAGASMITH_CORE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-core.git#0ac316655687757203a9df1b2eb81669ec1d2d78}
         coc_domain: ${SAGASMITH_COC_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-coc.git#36ded279e27acda86609bc3c6ee0c99c568218c7}
     environment:
       SAGASMITH_COC_MCP_TRANSPORT: streamable-http
@@ -125,7 +125,7 @@ services:
       dockerfile: infrastructure/Dockerfile.agent-supervisor
       additional_contexts:
         agent_source: ${SAGASMITH_AGENT_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-agent.git#00101286bed728758da9dbddc21003cd17c8db00}
-        core: ${SAGASMITH_CORE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-core.git#08ac611cfa8e551231028d181c5c3bf2727ee0f7}
+        core: ${SAGASMITH_CORE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-core.git#0ac316655687757203a9df1b2eb81669ec1d2d78}
         dnd_domain: ${SAGASMITH_DND_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-dnd.git#e5b87e55e1f08564d154e4d7cb568d936bc6edfe}
         coc_domain: ${SAGASMITH_COC_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-coc.git#36ded279e27acda86609bc3c6ee0c99c568218c7}
         narrative_domain: ${SAGASMITH_NARRATIVE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-narrative.git#35c1510996237648298fb56d23ef4b9e5ff39a81}
@@ -135,6 +135,14 @@ services:
       SAGASMITH_AGENT_CONFIG: /config/agent-config.json
       SAGASMITH_AGENT_WORKSPACES: /workspaces
       SAGASMITH_AGENT_COMPLETION_TIMEOUT_SECONDS: ${SAGASMITH_AGENT_COMPLETION_TIMEOUT_SECONDS:-900}
+      SAGASMITH_AGENT_RESERVATION_TTL_SECONDS: ${SAGASMITH_AGENT_RESERVATION_TTL_SECONDS:-1200}
+      SAGASMITH_ROOM_TURN_WORKER_POLL_SECONDS: ${SAGASMITH_ROOM_TURN_WORKER_POLL_SECONDS:-0.1}
+      SAGASMITH_ROOM_TURN_WORKER_LEASE_SECONDS: ${SAGASMITH_ROOM_TURN_WORKER_LEASE_SECONDS:-60}
+      SAGASMITH_ROOM_TURN_WORKER_CONCURRENCY: ${SAGASMITH_ROOM_TURN_WORKER_CONCURRENCY:-4}
+      SAGASMITH_ROOM_TURN_WORKER_MAX_ATTEMPTS: ${SAGASMITH_ROOM_TURN_WORKER_MAX_ATTEMPTS:-3}
+      SAGASMITH_ROOM_TURN_RETRY_SECONDS: ${SAGASMITH_ROOM_TURN_RETRY_SECONDS:-2}
+      SAGASMITH_ROOM_TURN_INLINE_WAIT_SECONDS: ${SAGASMITH_ROOM_TURN_INLINE_WAIT_SECONDS:-30}
+      SAGASMITH_ROOM_TURN_MEDIA_MAX_BYTES: ${SAGASMITH_ROOM_TURN_MEDIA_MAX_BYTES:-16777216}
       SAGASMITH_AGENT_IDLE_SECONDS: ${SAGASMITH_AGENT_IDLE_SECONDS:-1800}
       SAGASMITH_AGENT_MAX_WORKERS: ${SAGASMITH_AGENT_MAX_WORKERS:-64}
       SAGASMITH_AGENT_SPAWN_CONCURRENCY: ${SAGASMITH_AGENT_SPAWN_CONCURRENCY:-4}

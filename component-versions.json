@@ -48,7 +48,7 @@
     {
       "repository": "sagasmith-core",
       "branch": "main",
-      "revision": "08ac611cfa8e551231028d181c5c3bf2727ee0f7",
+      "revision": "0ac316655687757203a9df1b2eb81669ec1d2d78",
       "remote": "https://github.com/SagaSmithAI/sagasmith-core.git",
       "usage": "build-shared-core",
       "enforced": true
