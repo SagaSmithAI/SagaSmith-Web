@@ -2,7 +2,7 @@
 
 ## Product boundary
 
-**SagaSmith Web** is the hosted product in the repository currently named `SagaSmith-service`.
+**SagaSmith Web** is the hosted product in `SagaSmithAI/SagaSmith-Web`.
 The control plane is one backend responsibility alongside the browser frontend, API/BFF,
 collaboration, Forge, Module Studio, Agent orchestration, and operations. The Apache-licensed
 repositories form the complete Local Agent Kit, so dependency direction is one way:

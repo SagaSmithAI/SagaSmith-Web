@@ -1,5 +1,9 @@
 {$SAGASMITH_SITE_ADDRESS::80} {
 	encode zstd gzip
+	# Prometheus scrapes the API over the private Compose network. Never expose
+	# process, dependency, or capacity metrics through the public edge.
+	@private_metrics path /metrics
+	respond @private_metrics 404
 	reverse_proxy api:8080
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"

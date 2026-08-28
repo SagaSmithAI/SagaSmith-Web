@@ -1,49 +1,37 @@
-# SagaSmith Web repository rename checklist
+# SagaSmith Web repository rename record
 
-The product is **SagaSmith Web** now. This repository deliberately remains
-`SagaSmithAI/SagaSmith-service` during the first naming phase so product language can settle
-without combining it with a deployment and import migration.
+The GitHub repository was renamed from `SagaSmithAI/SagaSmith-service` to
+`SagaSmithAI/SagaSmith-Web`. GitHub redirects the historical repository URL, but current
+documentation, release metadata, support routes, and build inputs must use the canonical Web URL.
 
-## Stable names during phase one
+## Stable implementation identifiers
 
-- Repository: `SagaSmithAI/SagaSmith-service`
+The repository rename deliberately did not change these compatibility-sensitive identifiers:
+
 - Python distribution and CLI: `sagasmith-service`
 - Python package: `sagasmith_service`
-- Existing Compose project, service, image, volume, metric, and environment identifiers
+- default Compose project: `sagasmith-service`
+- existing database schema, environment, metric, volume, image, and log identifiers
 
-Documentation should say **SagaSmith Web** for the product and use `SagaSmith-service` only when
-referring to the repository or an implementation identifier.
+These names may change only through a separately reviewed migration with a compatibility window
+and a rollback plan. Do not mechanically replace `sagasmith_service` or `sagasmith-service` in
+code and deployment configuration merely to match the repository name.
 
-## Phase two prerequisites
+## Completed rename checks
 
-Do not rename the repository until all of these are true:
+- The canonical repository and product name is SagaSmith Web.
+- Active organization and website links point to `SagaSmithAI/SagaSmith-Web`.
+- Current component locks contain only active vertical repositories.
+- Archived standalone MCP, Skills, UI, and Module Generator repositories are not release inputs.
+- Local and hosted release contracts keep the same authoritative MCP handlers and schemas.
 
-- hosted releases build only from the active revisions in `component-versions.json`;
-- local stdio, local Streamable HTTP, and hosted network contract suites agree on schemas,
-  capability discovery, errors, authority, revision, and idempotency;
-- no release, installer, Compose file, or CI workflow reads an archived standalone repository;
-- deployment owners have scheduled a maintenance window and rollback path; and
-- links and automation that cannot follow GitHub redirects have been inventoried.
+## Ongoing compatibility checks
 
-## Repository rename execution
+Before every release:
 
-1. Rename the GitHub repository from `SagaSmith-service` to `SagaSmith-web` in one scheduled
-   operation; do not rename or archive another repository in the same change.
-2. Update organization profile, website, active repository READMEs, issue/PR templates, support
-   routes, release metadata, and `component-versions.json` to the new canonical URL.
-3. Update local remotes, sibling-worktree scripts, immutable Git build contexts, Compose workspace
-   overrides, deployment checkouts, backup/restore manifests, and component audit tooling.
-4. Update branch protection, environments, webhooks, deploy keys, GitHub Apps, package metadata,
-   Pages or container settings, and external status/monitoring links that are keyed by repository
-   name.
-5. Re-run link checks, the component audit, unit tests, container configuration, hosted acceptance,
-   backup/restore, and one local/hosted MCP contract parity run.
-6. Keep a time-bounded redirect observation period and document rollback to the old repository
-   name if a release consumer cannot resolve the new location.
-
-## Deliberately deferred implementation identifiers
-
-The repository rename does **not** require changing `sagasmith_service`, `sagasmith-service`,
-database schemas, environment keys, Compose project names, container names, metrics, or log labels.
-Each may be migrated later only with a compatibility window, explicit operational value, and its
-own tested change. Avoid a mechanical global replacement.
+1. Reject new documentation or build inputs that use the historical repository URL.
+2. Run the component audit and container configuration checks.
+3. Verify issue templates, support links, repository metadata, deployment checkouts, monitoring,
+   and backup manifests still use the canonical repository URL.
+4. Keep historical implementation identifiers explicit so operators do not mistake them for stale
+   repository links.

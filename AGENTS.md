@@ -1,9 +1,10 @@
 # SagaSmith Web Development Contract
 
-This repository currently keeps the historical name `SagaSmith-service`, but the product is
-**SagaSmith Web**: browser frontend, API/BFF, hosted control plane, collaboration, Forge, Module
-Studio, Agent orchestration, and operations. The Python package remains `sagasmith_service` and
-the existing CLI names remain stable until a separately reviewed migration.
+This repository is `SagaSmithAI/SagaSmith-Web`, and the product is **SagaSmith Web**: browser
+frontend, API/BFF, hosted control plane, collaboration, Forge, Module Studio, Agent orchestration,
+and operations. Historical implementation identifiers remain stable: the Python package is
+`sagasmith_service`, the distribution and CLI are `sagasmith-service`, and the default Compose
+project is `sagasmith-service`.
 
 The sibling open-source repositories form the complete SagaSmith Local Agent Kit and must never
 depend on this repository. Local and hosted deployments must cross the same authoritative domain
