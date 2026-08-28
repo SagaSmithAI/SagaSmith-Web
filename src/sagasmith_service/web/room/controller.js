@@ -14,6 +14,15 @@ export function createRoomController({
   loadIdentityInviteOptions,
   openModuleStudio,
 }) {
+  let panelRefreshPromise = null;
+  let panelRefreshQueued = false;
+
+  function recordPanelRefresh(result) {
+    state.panelRefreshMetrics[result] += 1;
+    globalThis.dispatchEvent(
+      new CustomEvent("sagasmith:panel-refresh", { detail: { result } }),
+    );
+  }
   const timelineController = createRoomTimelineController({
     refreshPanel,
     loadUsage,
@@ -53,6 +62,7 @@ export function createRoomController({
     if (state.roomEvents) state.roomEvents.close();
     state.campaign = campaign;
     state.roomMessages = new Map();
+    state.panel = null;
     state.roomEventCursor = 0;
     state.animatedResolutions = new Set();
     state.characterCards = new Map();
@@ -276,23 +286,55 @@ export function createRoomController({
     }
   }
 
-  async function refreshPanel() {
-    if (!state.campaign) return;
-    try {
-      state.panel = await api(`/api/campaigns/${state.campaign.id}/room/panel`);
-      const phase = state.panel.phase || "—";
-      $("#room-phase").textContent = phase.toUpperCase();
-      $("#campaign-room").dataset.phase = phase;
-      await characterController.refreshCharacterSidebar();
-      renderPlayPanel();
-      combatGridController.renderCombatPanel();
-      renderModulePanel();
-      characterController.renderActionContext();
-      timelineController.refreshSuggestionValidity();
-    } catch (error) {
-      $("#room-sync").textContent = "状态读取失败";
-      toast(error.message);
+  async function fetchPanelOnce() {
+    const campaignId = state.campaign?.id;
+    if (!campaignId) return;
+    const knownRevision = state.panel?.revision;
+    const query = Number.isInteger(Number(knownRevision))
+      ? `?known_revision=${encodeURIComponent(knownRevision)}`
+      : "";
+    const panel = await api(`/api/campaigns/${campaignId}/room/panel${query}`);
+    if (state.campaign?.id !== campaignId) return;
+    if (panel.not_modified) {
+      recordPanelRefresh("not_modified");
+      return;
     }
+    recordPanelRefresh("modified");
+    state.panel = panel;
+    const phase = state.panel.phase || "—";
+    $("#room-phase").textContent = phase.toUpperCase();
+    $("#campaign-room").dataset.phase = phase;
+    await characterController.refreshCharacterSidebar();
+    renderPlayPanel();
+    combatGridController.renderCombatPanel();
+    renderModulePanel();
+    characterController.renderActionContext();
+    timelineController.refreshSuggestionValidity();
+  }
+
+  function refreshPanel() {
+    if (!state.campaign) return Promise.resolve();
+    recordPanelRefresh("requested");
+    if (panelRefreshPromise) {
+      panelRefreshQueued = true;
+      recordPanelRefresh("coalesced");
+      return panelRefreshPromise;
+    }
+    panelRefreshPromise = (async () => {
+      try {
+        do {
+          panelRefreshQueued = false;
+          await fetchPanelOnce();
+        } while (panelRefreshQueued && state.campaign);
+      } catch (error) {
+        recordPanelRefresh("error");
+        $("#room-sync").textContent = "状态读取失败";
+        toast(error.message);
+      } finally {
+        panelRefreshPromise = null;
+      }
+    })();
+    return panelRefreshPromise;
   }
 
   function renderPlayPanel() {

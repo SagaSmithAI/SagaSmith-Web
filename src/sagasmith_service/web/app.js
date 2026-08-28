@@ -125,5 +125,5 @@ setInterval(() => {
   if (state.campaign && !$("#campaign-room").hidden) {
     roomController.refreshRuntime().catch(() => {});
   }
-}, 5000);
+}, 60000);
 authController.boot();

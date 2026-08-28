@@ -10,7 +10,7 @@ from threading import Lock
 from typing import Any
 from weakref import WeakSet
 
-from prometheus_client import Counter, Histogram
+from prometheus_client import Counter, Gauge, Histogram
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 
@@ -52,6 +52,16 @@ MCP_TOOL_SECONDS = Histogram(
     "Latency of authoritative MCP tool operations",
     _UPSTREAM_LABELS,
 )
+PANEL_SNAPSHOT_SECONDS = Histogram(
+    "sagasmith_panel_snapshot_seconds",
+    "Latency of one principal-scoped authoritative panel snapshot",
+    _UPSTREAM_LABELS,
+)
+PANEL_SNAPSHOT_RESULTS = Counter(
+    "sagasmith_panel_snapshot_results_total",
+    "Authoritative panel snapshot results",
+    ["system", "result"],
+)
 ROOM_PROJECTION_BATCH_SECONDS = Histogram(
     "sagasmith_room_projection_batch_seconds",
     "Latency of bounded room projection batches",
@@ -62,6 +72,30 @@ ROOM_PROJECTION_JOBS = Histogram(
     "Number of jobs submitted in one bounded room projection batch",
     _UPSTREAM_LABELS,
     buckets=(0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512),
+)
+
+REALTIME_SUBSCRIPTIONS = Gauge(
+    "sagasmith_realtime_subscriptions",
+    "Active process-local realtime subscriptions",
+)
+REALTIME_DB_QUERIES = Counter(
+    "sagasmith_realtime_db_queries_total",
+    "Database replay or reconciliation queries made by realtime streams",
+    ["stream", "reason"],
+)
+REALTIME_WAKEUPS = Counter(
+    "sagasmith_realtime_wakeups_total",
+    "Realtime stream wake-ups by source",
+    ["stream", "source"],
+)
+OUTBOX_DELIVERIES = Counter(
+    "sagasmith_outbox_deliveries_total",
+    "Transactional outbox delivery attempts",
+    ["status"],
+)
+OUTBOX_PENDING = Gauge(
+    "sagasmith_outbox_pending",
+    "Pending transactional outbox rows observed in the latest dispatcher batch",
 )
 
 _HOT_PATH_LABELS = ["operation_class", "status"]

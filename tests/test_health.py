@@ -62,6 +62,8 @@ def test_readiness_metrics_and_request_id(dnd_runtime, agent_runtime, tmp_path) 
         "sagasmith_mcp_initialize_seconds",
         "sagasmith_mcp_exposure_seconds",
         "sagasmith_mcp_tool_seconds",
+        "sagasmith_panel_snapshot_seconds",
+        "sagasmith_panel_snapshot_results_total",
         "sagasmith_room_projection_batch_seconds",
         "sagasmith_room_projection_jobs",
         "sagasmith_event_loop_lag_seconds",

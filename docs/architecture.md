@@ -26,9 +26,9 @@ Narrative MCP process instead of exposing a compatibility HTTP wrapper.
 ```
 
 The FastAPI lifespan owns one long-lived HTTP connection pool for each Agent, D&D, CoC and
-Narrative adapter. D&D and CoC still create a fresh MCP transport and `ClientSession` for every
-operation so principal context, authorization epoch and dynamic exposure never cross calls; only
-the lower-level TCP/TLS pool is reused.
+Narrative adapter. A browser panel refresh may group its independent reads inside one temporary,
+principal-scoped MCP transport and `ClientSession`; the session is never pooled across principals
+or requests, so signed context, authorization epoch and dynamic exposure cannot cross callers.
 
 SagaSmith Web also owns a selective SQLAlchemy `AsyncEngine`/`AsyncSession` stack for room messages,
 panel intents and panel projection refreshes. Room messages authenticate and persist through one
@@ -136,6 +136,19 @@ the same authenticated room action path or a narrow SagaSmith Web-to-MCP facade;
 tables or reproduce rules. A periodic projection refresh is only recovery for a lost stream, not a
 second authority.
 
+Committed room, campaign-access, actor-binding and Module changes also create a transactional
+outbox row in the same PostgreSQL transaction. One process-level dispatcher publishes those rows
+through Redis and one process-level subscription fans them out to local SSE clients. A stream
+subscribes before its initial database replay, then queries only after an event wake-up or a
+30-second reconciliation deadline. Redis is a wake-up and fan-out layer, never the recovery
+authority; reconnecting clients replay the durable room sequence from PostgreSQL.
+
+Panel cache entries are versioned principal/audience projections, not copies of MCP tables. Their
+identity includes campaign, audience, source revision, authorization epoch and projection schema
+version. A relevant MCP receipt invalidates or replaces only the affected projection; a write does
+not synchronously rebuild every user's cache. Membership or actor-authority changes increment or
+invalidate the affected authorization scope before an old projection can be reused.
+
 The live room uses one shared, persistent composer with three synchronized surfaces: a collapsible
 left character drawer, the central room timeline, and right scene/combat/module/member panels. The
 character drawer switches between the full private card, spells, equipment/inventory and an
@@ -165,6 +178,7 @@ exception is granted.
 |---|---|---|
 | users, sessions, quotas, invitations, applications | SagaSmith Web PostgreSQL | PostgreSQL backup |
 | campaign/member/actor display projection | SagaSmith Web cache | MCP reconciliation |
+| principal-scoped panel projection | SagaSmith Web cache keyed by MCP revision and authorization epoch | MCP snapshot + outbox reconciliation |
 | campaign world and mechanic state | D&D/CoC MCP | per-system state backup/snapshot |
 | room message/event/read cursor and Agent run/usage receipt | SagaSmith Web + Agent workspace | both backups |
 | private Pack archive | private object storage | versioned object backup |
@@ -210,6 +224,8 @@ Soul/Skill/Asset releases install as library references and never mutate campaig
 - Campaign creation passes a SagaSmith Web-derived idempotency key to MCP. Retrying after a projection
   write failure receives the same authoritative campaign and repairs the projection.
 - Join and actor grants write the SagaSmith Web projection only after an MCP receipt.
+- Every committed Web-visible projection change writes its outbox signal in the same transaction;
+  cache rebuilding and Redis delivery happen after commit and can be retried safely.
 - Agent calls reserve quota before provider execution, settle actual tokens afterward, and release
   on failure. Both reservation and settlement are idempotent.
 - Pack import uses campaign, Pack id and archive checksum as its MCP idempotency key.

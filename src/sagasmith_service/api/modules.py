@@ -11,7 +11,7 @@ from fastapi import APIRouter, File, Form, Header, HTTPException, Request, Uploa
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
-from sagasmith_service.api.dependencies import CurrentUser, DbSession
+from sagasmith_service.api.dependencies import CurrentUser, DbSession, StreamingCurrentUser
 from sagasmith_service.models import (
     Artifact,
     ArtifactRelease,
@@ -26,6 +26,7 @@ from sagasmith_service.models import (
     UserNotification,
     now_utc,
 )
+from sagasmith_service.observability import REALTIME_DB_QUERIES, REALTIME_WAKEUPS
 from sagasmith_service.schemas import (
     ArtifactReleaseView,
     ModuleFinalizeRequest,
@@ -705,42 +706,88 @@ def retry_run(
     return ModuleRunView.model_validate(item)
 
 
+def _module_event_snapshot(
+    factory: Any, *, project_id: str, user_id: str
+) -> tuple[str | None, bool]:
+    with factory() as session:
+        project = session.scalar(
+            select(ModuleProject).where(
+                ModuleProject.id == project_id,
+                ModuleProject.owner_user_id == user_id,
+            )
+        )
+        if project is None:
+            return None, True
+        run = session.scalar(
+            select(ModuleRun)
+            .where(ModuleRun.project_id == project.id)
+            .order_by(ModuleRun.created_at.desc())
+            .limit(1)
+        )
+        payload = {
+            "project": ModuleProjectView.model_validate(project).model_dump(mode="json"),
+            "run": ModuleRunView.model_validate(run).model_dump(mode="json") if run else None,
+        }
+        terminal = bool(run and run.status in {"succeeded", "failed", "canceled"})
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":")), terminal
+
+
 @router.get("/{project_id}/events")
-async def project_events(project_id: str, request: Request, user: CurrentUser):
+async def project_events(
+    project_id: str, request: Request, user: StreamingCurrentUser
+) -> StreamingResponse:
     factory = request.app.state.session_factory
     with factory() as session:
         _project(session, project_id, user.id)
 
     async def stream():
         last = ""
-        for _ in range(600):
-            if await request.is_disconnected():
-                return
-            with factory() as session:
-                project = _project(session, project_id, user.id)
-                run = session.scalar(
-                    select(ModuleRun)
-                    .where(ModuleRun.project_id == project.id)
-                    .order_by(ModuleRun.created_at.desc())
-                    .limit(1)
+        loop = asyncio.get_running_loop()
+        reconciliation_at = loop.time()
+        async with request.app.state.realtime_hub.subscribe(
+            {f"module:{project_id}", f"principal:{user.id}"}
+        ) as notices:
+            reason = "initial"
+            while not await request.is_disconnected():
+                REALTIME_DB_QUERIES.labels("module", reason).inc()
+                encoded, terminal = await asyncio.to_thread(
+                    _module_event_snapshot,
+                    factory,
+                    project_id=project_id,
+                    user_id=user.id,
                 )
-                payload = {
-                    "project": ModuleProjectView.model_validate(project).model_dump(mode="json"),
-                    "run": ModuleRunView.model_validate(run).model_dump(mode="json")
-                    if run
-                    else None,
-                }
-            encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-            if encoded != last:
-                yield f"event: module\ndata: {encoded}\n\n"
-                last = encoded
-            else:
-                yield ": keep-alive\n\n"
-            if run and run.status in {"succeeded", "failed", "canceled"}:
-                return
-            await asyncio.sleep(1)
+                if encoded is None:
+                    yield "event: access.revoked\ndata: {}\n\n"
+                    return
+                if encoded != last:
+                    yield f"event: module\ndata: {encoded}\n\n"
+                    last = encoded
+                if terminal:
+                    return
+                reconciliation_at = loop.time() + 30
 
-    return StreamingResponse(stream(), media_type="text/event-stream")
+                while not await request.is_disconnected():
+                    timeout = min(15.0, max(0.0, reconciliation_at - loop.time()))
+                    try:
+                        await asyncio.wait_for(notices.get(), timeout=timeout)
+                    except TimeoutError:
+                        if loop.time() >= reconciliation_at:
+                            REALTIME_WAKEUPS.labels("module", "reconciliation").inc()
+                            reason = "reconciliation"
+                            break
+                        yield ": keep-alive\n\n"
+                    else:
+                        while not notices.empty():
+                            notices.get_nowait()
+                        REALTIME_WAKEUPS.labels("module", "event").inc()
+                        reason = "event"
+                        break
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @NOTIFICATION_ROUTER.get("", response_model=list[NotificationView])

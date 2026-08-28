@@ -74,6 +74,12 @@ Only ports 80/443 are public. SagaSmith Web starts with `alembic upgrade head`. 
   evidence-gated, while activity callbacks stay in worker threads. Follow the
   [async database hot-path runbook](async-database-hotpaths.md) and never benchmark against
   production campaign data.
+- Realtime delivery exposes `sagasmith_realtime_subscriptions`,
+  `sagasmith_realtime_db_queries_total`, `sagasmith_realtime_wakeups_total`,
+  `sagasmith_outbox_deliveries_total`, and `sagasmith_outbox_pending`. Room and Module SSE use
+  Redis wake-ups plus PostgreSQL cursor replay; a 30-second database reconciliation is the
+  missed-event safety net, not the normal update loop. Alert when pending outbox rows grow or
+  delivery errors persist. These metrics use only bounded stream/reason/status labels.
 - `module-worker:9101/metrics`: Module task outcomes and expired-lease recovery counters on the
   private network.
 - `X-Request-ID`: accepted only in a safe shape or generated, echoed, and logged.

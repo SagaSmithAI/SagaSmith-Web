@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from typing import Any
 
 from sagasmith_service.integrations.coc_mcp import StreamableHttpCocRuntime
@@ -57,6 +58,16 @@ def test_coc_runtime_unwraps_audience_safe_host_projections(monkeypatch) -> None
             }
         raise AssertionError(name)
 
+    @asynccontextmanager
+    async def fake_request_session(**_arguments: Any):
+        yield lambda name, arguments: fake_call(
+            name,
+            arguments,
+            principal_id="user:player",
+            campaign_id="campaign-coc",
+        )
+
+    monkeypatch.setattr(runtime, "_request_session", fake_request_session)
     monkeypatch.setattr(runtime, "_call", fake_call)
 
     async def exercise() -> None:
@@ -67,6 +78,12 @@ def test_coc_runtime_unwraps_audience_safe_host_projections(monkeypatch) -> None
         assert panel["revision"] == 9
         assert panel["characters"][0]["id"] == "investigator-1"
         assert panel["combat"] == {"active": True}
+        unchanged = await runtime.get_panel_state(
+            campaign_id="campaign-coc",
+            principal_id="user:player",
+            known_revision=9,
+        )
+        assert unchanged == {"not_modified": True, "revision": 9}
         actor = await runtime.get_character_card(
             campaign_id="campaign-coc",
             character_id="investigator-1",

@@ -66,6 +66,11 @@ from sagasmith_service.rate_limit import (
     RedisRateLimiter,
     opaque_rate_key,
 )
+from sagasmith_service.realtime import (
+    OutboxDispatcher,
+    RealtimeHub,
+    install_transactional_outbox,
+)
 from sagasmith_service.security import SESSION_COOKIE
 from sagasmith_service.storage import LocalPrivateStorage, S3PrivateStorage
 
@@ -93,6 +98,12 @@ def create_app(
     install_database_observability(async_engine.sync_engine)
     if settings.env in {"development", "test"}:
         Base.metadata.create_all(engine)
+    install_transactional_outbox()
+    session_factory = make_session_factory(engine)
+    realtime_hub = RealtimeHub(
+        settings.redis_url if settings.rate_limit_backend == "redis" else None
+    )
+    outbox_dispatcher = OutboxDispatcher(session_factory, realtime_hub)
     managed_http_clients: dict[str, httpx.AsyncClient] = {}
 
     def managed_http_client(name: str, **kwargs: Any) -> httpx.AsyncClient:
@@ -102,9 +113,13 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        await realtime_hub.start()
+        outbox_dispatcher.start()
         try:
             yield
         finally:
+            await outbox_dispatcher.close()
+            await realtime_hub.close()
             results = await asyncio.gather(
                 *(client.aclose() for client in managed_http_clients.values()),
                 return_exceptions=True,
@@ -130,7 +145,7 @@ def create_app(
     )
     app.state.settings = settings
     app.state.engine = engine
-    app.state.session_factory = make_session_factory(engine)
+    app.state.session_factory = session_factory
     app.state.async_engine = async_engine
     app.state.async_session_factory = make_async_session_factory(async_engine)
     auth_context_secret = settings.auth_context_secret.get_secret_value()
@@ -174,6 +189,8 @@ def create_app(
         ),
     )
     app.state.outbound_http_clients = managed_http_clients
+    app.state.realtime_hub = realtime_hub
+    app.state.outbox_dispatcher = outbox_dispatcher
     app.state.rate_limiter = rate_limiter or (
         RedisRateLimiter(settings.redis_url)
         if settings.rate_limit_backend == "redis"

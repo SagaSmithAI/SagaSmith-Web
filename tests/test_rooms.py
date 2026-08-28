@@ -18,6 +18,7 @@ from sagasmith_service.api.rooms import _activity_token
 from sagasmith_service.models import (
     AgentRun,
     AuditEvent,
+    CampaignMembershipProjection,
     CampaignMessage,
     CampaignRoomEvent,
     CampaignSuggestion,
@@ -380,6 +381,59 @@ def test_async_projection_refresh_releases_database_when_mcp_fails(
     assert response.status_code == 502
     assert response.json() == {"detail": "projection unavailable"}
     assert client.app.state.async_engine.sync_engine.pool.checkedout() == 0
+
+
+def test_panel_revision_short_circuit_skips_binding_projection(
+    client: TestClient,
+    dnd_runtime: FakeDndRuntime,
+) -> None:
+    register(client, "projection-revision@example.com", "Projection revision DM")
+    create_campaign(client)
+
+    response = client.get(
+        "/api/campaigns/campaign-1/room/panel?known_revision=7"
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"not_modified": True, "revision": 7}
+    call_name, arguments = dnd_runtime.calls[-1]
+    assert call_name == "panel_state"
+    assert arguments["campaign_id"] == "campaign-1"
+    assert arguments["principal_id"].startswith("user:")
+    assert arguments["known_revision"] == 7
+
+
+def test_panel_projection_cache_is_revision_and_authorization_scoped(
+    client: TestClient,
+    dnd_runtime: FakeDndRuntime,
+) -> None:
+    register(client, "projection-cache@example.com", "Projection cache DM")
+    create_campaign(client)
+
+    first = client.get("/api/campaigns/campaign-1/room/panel")
+    assert first.status_code == 200, first.text
+    assert first.json()["revision"] == 7
+    assert len([call for call in dnd_runtime.calls if call[0] == "panel_state"]) == 1
+
+    cached = client.get("/api/campaigns/campaign-1/room/panel")
+    assert cached.status_code == 200, cached.text
+    assert cached.json() == first.json()
+    unchanged = client.get(
+        "/api/campaigns/campaign-1/room/panel?known_revision=7"
+    )
+    assert unchanged.status_code == 200, unchanged.text
+    assert unchanged.json() == {"not_modified": True, "revision": 7}
+    assert len([call for call in dnd_runtime.calls if call[0] == "panel_state"]) == 1
+
+    with client.app.state.session_factory.begin() as session:
+        membership = session.scalar(select(CampaignMembershipProjection))
+        assert membership is not None
+        membership.authorization_epoch += 1
+
+    refreshed = client.get("/api/campaigns/campaign-1/room/panel")
+    assert refreshed.status_code == 200, refreshed.text
+    assert refreshed.json()["revision"] == 7
+    assert len([call for call in dnd_runtime.calls if call[0] == "panel_state"]) == 2
 
 
 def test_invalid_async_room_action_rolls_back_staged_room_work(

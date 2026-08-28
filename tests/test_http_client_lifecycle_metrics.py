@@ -14,6 +14,7 @@ from sagasmith_service.api.rooms import _observed_projection_batch
 from sagasmith_service.config import Settings
 from sagasmith_service.database import make_engine
 from sagasmith_service.integrations.agent import HttpAgentRuntime
+from sagasmith_service.integrations.coc_mcp import StreamableHttpCocRuntime
 from sagasmith_service.integrations.dnd_mcp import StreamableHttpDndRuntime
 from sagasmith_service.main import create_app
 from sagasmith_service.observability import (
@@ -22,6 +23,7 @@ from sagasmith_service.observability import (
     MCP_INITIALIZE_SECONDS,
     MCP_TOOL_SECONDS,
     MCP_TRANSPORT_SETUP_SECONDS,
+    PANEL_SNAPSHOT_SECONDS,
     ROOM_PROJECTION_BATCH_SECONDS,
     ROOM_PROJECTION_JOBS,
 )
@@ -209,7 +211,164 @@ def test_mcp_calls_reuse_http_pool_but_keep_sessions_isolated(monkeypatch) -> No
     assert len(seen_clients) == 2
     assert seen_clients[0] is seen_clients[1]
     for name in metric_names:
-        assert _sample(name, base_labels) == before[name] + 2
+        expected = 4 if name == "sagasmith_mcp_exposure_seconds_count" else 2
+        assert _sample(name, base_labels) == before[name] + expected
+
+
+@pytest.mark.parametrize(
+    ("module_name", "runtime_type", "system", "campaign_arguments"),
+    [
+        (
+            "dnd_mcp",
+            StreamableHttpDndRuntime,
+            "dnd5e",
+            {"view": "get", "payload": {"campaign_id": "campaign-1"}},
+        ),
+        (
+            "coc_mcp",
+            StreamableHttpCocRuntime,
+            "coc7e",
+            {"action": "get", "campaign_id": "campaign-1"},
+        ),
+    ],
+)
+def test_panel_snapshot_uses_one_principal_scoped_session_and_revision_short_circuit(
+    monkeypatch,
+    module_name: str,
+    runtime_type: type[StreamableHttpDndRuntime] | type[StreamableHttpCocRuntime],
+    system: str,
+    campaign_arguments: dict[str, Any],
+) -> None:
+    transports: list[httpx.AsyncClient] = []
+    sessions: list[Any] = []
+    signed_contexts: list[dict[str, Any]] = []
+    actual_calls: list[tuple[str, dict[str, Any]]] = []
+
+    @asynccontextmanager
+    async def fake_transport(_url: str, *, http_client: httpx.AsyncClient):
+        transports.append(http_client)
+        yield object(), object(), lambda: None
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.visible = {"campaign_query"}
+            self.epoch = 1
+
+        async def __aenter__(self):
+            sessions.append(self)
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def initialize(self) -> None:
+            return None
+
+        async def list_tools(self):
+            return SimpleNamespace(
+                tools=[SimpleNamespace(name=name) for name in sorted(self.visible)]
+            )
+
+        async def call_tool(
+            self,
+            name: str,
+            *,
+            arguments: dict[str, Any],
+            **kwargs: object,
+        ):
+            metadata = kwargs.get("meta")
+            if isinstance(metadata, dict):
+                signed_contexts.append(dict(metadata["sagasmith_auth_context"]))
+            if name == "exposure":
+                action = arguments.get("action")
+                if action == "search":
+                    requested = str(arguments.get("query") or "")
+                    return SimpleNamespace(
+                        isError=False,
+                        content=[],
+                        structuredContent={
+                            "matches": [{"tool_id": requested}],
+                            "visible_tools": sorted(self.visible),
+                        },
+                    )
+                if action == "set":
+                    self.visible.update(arguments.get("add_tool_ids") or [])
+                    self.epoch += 1
+                return SimpleNamespace(
+                    isError=False,
+                    content=[],
+                    structuredContent={"result": {"revision": self.epoch}},
+                )
+            actual_calls.append((name, dict(arguments)))
+            if name == "campaign_query":
+                payload = {
+                    "id": "campaign-1",
+                    "revision": 7,
+                    "effective_game_phase": "play",
+                    "state": {"game_phase": "play"},
+                }
+            elif name == "character_query":
+                payload = {"characters": []}
+            elif name == "module_query" and arguments.get("view") == "list":
+                payload = {"modules": []}
+            elif name == "module_query":
+                payload = {"scene": {"id": "scene-1"}}
+            else:
+                payload = {"members": []}
+            return SimpleNamespace(
+                isError=False,
+                content=[
+                    SimpleNamespace(
+                        meta={
+                            "sagasmith_auth_context_receipt": {
+                                "revision": self.epoch
+                            }
+                        }
+                    )
+                ],
+                structuredContent={"result": payload},
+            )
+
+    module_path = f"sagasmith_service.integrations.{module_name}"
+    monkeypatch.setattr(f"{module_path}.streamable_http_client", fake_transport)
+    monkeypatch.setattr(f"{module_path}.ClientSession", lambda *_args: FakeSession())
+
+    async def exercise() -> None:
+        client = httpx.AsyncClient()
+        runtime = runtime_type(
+            "http://domain.test/mcp",
+            http_client=client,
+            auth_context_secret="x" * 32,
+        )
+        panel = await runtime.get_panel_state(
+            campaign_id="campaign-1", principal_id="user:one"
+        )
+        assert panel["revision"] == 7
+        assert panel["not_modified"] is False
+        first_call_count = len(actual_calls)
+        unchanged = await runtime.get_panel_state(
+            campaign_id="campaign-1",
+            principal_id="user:two",
+            known_revision=7,
+        )
+        assert unchanged == {"not_modified": True, "revision": 7}
+        assert len(actual_calls) == first_call_count + 1
+        await client.aclose()
+
+    asyncio.run(exercise())
+
+    assert len(transports) == len(sessions) == 2
+    assert transports[0] is transports[1]
+    assert {context["actor_principal"] for context in signed_contexts} == {
+        "user:one",
+        "user:two",
+    }
+    assert len({context["session_id"] for context in signed_contexts}) == 2
+    assert all(context["authorization_epoch"] < 7 for context in signed_contexts)
+    assert any(
+        all(arguments.get(key) == value for key, value in campaign_arguments.items())
+        for _, arguments in actual_calls
+    )
 
 
 def test_room_projection_metrics_record_batch_size() -> None:
@@ -247,6 +406,7 @@ def test_upstream_metric_labels_are_bounded() -> None:
         MCP_INITIALIZE_SECONDS,
         MCP_EXPOSURE_SECONDS,
         MCP_TOOL_SECONDS,
+        PANEL_SNAPSHOT_SECONDS,
         ROOM_PROJECTION_BATCH_SECONDS,
         ROOM_PROJECTION_JOBS,
     )

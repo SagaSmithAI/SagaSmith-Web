@@ -25,6 +25,7 @@ from sagasmith_service.api.dependencies import (
     AsyncDbSession,
     CurrentUser,
     DbSession,
+    StreamingCurrentUser,
 )
 from sagasmith_service.integrations.agent import AgentRuntime
 from sagasmith_service.models import (
@@ -47,8 +48,14 @@ from sagasmith_service.models import (
     now_utc,
 )
 from sagasmith_service.observability import (
+    REALTIME_DB_QUERIES,
+    REALTIME_WAKEUPS,
     ROOM_PROJECTION_BATCH_SECONDS,
     ROOM_PROJECTION_JOBS,
+)
+from sagasmith_service.projection_cache import (
+    load_panel_projection,
+    store_panel_projection,
 )
 from sagasmith_service.quota import QuotaExceededError, release, reserve, settle
 from sagasmith_service.room_activity import RoomActivitySubmission, room_activity_contract
@@ -73,6 +80,7 @@ from sagasmith_service.schemas import (
 router = APIRouter(prefix="/api/campaigns/{campaign_id}/room", tags=["campaign-room"])
 
 _ROOM_PROJECTION_CONCURRENCY = 16
+_PANEL_PROJECTION_MAX_AGE_SECONDS = 30
 _JobT = TypeVar("_JobT")
 _ResultT = TypeVar("_ResultT")
 
@@ -1899,75 +1907,132 @@ def update_read_cursor(
     return {"last_read_sequence": item.last_read_sequence}
 
 
+def _room_event_batch(
+    session_factory: Any,
+    *,
+    campaign_id: str,
+    room_id: str,
+    user_id: str,
+    cursor: int,
+) -> tuple[bool, int, list[str]]:
+    """Replay one durable event page with one bulk message lookup."""
+
+    with session_factory() as poll:
+        membership = poll.scalar(
+            select(CampaignMembershipProjection).where(
+                CampaignMembershipProjection.campaign_id == campaign_id,
+                CampaignMembershipProjection.user_id == user_id,
+                CampaignMembershipProjection.status == "active",
+            )
+        )
+        if membership is None:
+            return False, cursor, []
+        events = poll.scalars(
+            select(CampaignRoomEvent)
+            .where(
+                CampaignRoomEvent.room_id == room_id,
+                CampaignRoomEvent.sequence > cursor,
+            )
+            .order_by(CampaignRoomEvent.sequence)
+            .limit(100)
+        ).all()
+        message_ids = {
+            str(message_id)
+            for event in events
+            if (message_id := (event.payload or {}).get("message_id"))
+        }
+        messages = {
+            item.id: item
+            for item in (
+                poll.scalars(select(CampaignMessage).where(CampaignMessage.id.in_(message_ids))).all()
+                if message_ids
+                else []
+            )
+        }
+        frames: list[str] = []
+        for event in events:
+            cursor = event.sequence
+            payload = dict(event.payload or {})
+            if event.event_type == "room.activity":
+                event_audience = str(payload.get("audience") or "public")
+                visible = event_audience == "public"
+                if event_audience == "dm":
+                    visible = membership.role in {"owner", "dm"}
+                elif event_audience == "private":
+                    visible = user_id in set(payload.get("audience_user_ids") or [])
+                if not visible:
+                    continue
+            message_id = payload.get("message_id")
+            if message_id:
+                message = messages.get(str(message_id))
+                if message is None or not _message_visible(message, membership, user_id):
+                    continue
+                payload["message"] = _message_view(message, user_id)
+            frames.append(
+                f"id: {event.sequence}\n"
+                f"event: {event.event_type}\n"
+                f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            )
+        return True, cursor, frames
+
+
 @router.get("/events")
 async def room_events(
     campaign_id: str,
     request: Request,
-    user: CurrentUser,
-    session: DbSession,
+    user: StreamingCurrentUser,
     after: Annotated[int, Query(ge=0)] = 0,
     last_event_id: Annotated[int | None, Header(alias="Last-Event-ID", ge=0)] = None,
 ) -> StreamingResponse:
-    _membership(session, campaign_id, user.id)
-    room_id = _room(session, campaign_id).id
-    session.commit()
     session_factory = request.app.state.session_factory
+    with session_factory() as initial:
+        _membership(initial, campaign_id, user.id)
+        room_id = _room(initial, campaign_id).id
 
     async def stream():
         cursor = max(after, last_event_id or 0)
-        idle_ticks = 0
-        while not await request.is_disconnected():
-            with session_factory() as poll:
-                membership = poll.scalar(
-                    select(CampaignMembershipProjection).where(
-                        CampaignMembershipProjection.campaign_id == campaign_id,
-                        CampaignMembershipProjection.user_id == user.id,
-                        CampaignMembershipProjection.status == "active",
-                    )
+        loop = asyncio.get_running_loop()
+        reconciliation_at = loop.time()
+        topics = {
+            f"room:{room_id}",
+            f"campaign:{campaign_id}",
+            f"principal:{user.id}",
+        }
+        async with request.app.state.realtime_hub.subscribe(topics) as notices:
+            reason = "initial"
+            while not await request.is_disconnected():
+                REALTIME_DB_QUERIES.labels("room", reason).inc()
+                active, cursor, frames = await asyncio.to_thread(
+                    _room_event_batch,
+                    session_factory,
+                    campaign_id=campaign_id,
+                    room_id=room_id,
+                    user_id=user.id,
+                    cursor=cursor,
                 )
-                if membership is None:
+                if not active:
                     yield "event: access.revoked\ndata: {}\n\n"
                     return
-                events = poll.scalars(
-                    select(CampaignRoomEvent)
-                    .where(
-                        CampaignRoomEvent.room_id == room_id,
-                        CampaignRoomEvent.sequence > cursor,
-                    )
-                    .order_by(CampaignRoomEvent.sequence)
-                    .limit(100)
-                ).all()
-                for event in events:
-                    cursor = event.sequence
-                    payload = dict(event.payload or {})
-                    if event.event_type == "room.activity":
-                        event_audience = str(payload.get("audience") or "public")
-                        visible = event_audience == "public"
-                        if event_audience == "dm":
-                            visible = membership.role in {"owner", "dm"}
-                        elif event_audience == "private":
-                            visible = user.id in set(payload.get("audience_user_ids") or [])
-                        if not visible:
-                            continue
-                    message_id = payload.get("message_id")
-                    if message_id:
-                        message = poll.get(CampaignMessage, str(message_id))
-                        if message is None or not _message_visible(message, membership, user.id):
-                            continue
-                        payload["message"] = _message_view(message, user.id)
-                    yield (
-                        f"id: {event.sequence}\n"
-                        f"event: {event.event_type}\n"
-                        f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-                    )
-            if events:
-                idle_ticks = 0
-            else:
-                idle_ticks += 1
-                if idle_ticks >= 30:
-                    yield ": keepalive\n\n"
-                    idle_ticks = 0
-            await asyncio.sleep(0.5)
+                for frame in frames:
+                    yield frame
+                reconciliation_at = loop.time() + 30
+
+                while not await request.is_disconnected():
+                    timeout = min(15.0, max(0.0, reconciliation_at - loop.time()))
+                    try:
+                        await asyncio.wait_for(notices.get(), timeout=timeout)
+                    except TimeoutError:
+                        if loop.time() >= reconciliation_at:
+                            REALTIME_WAKEUPS.labels("room", "reconciliation").inc()
+                            reason = "reconciliation"
+                            break
+                        yield ": keepalive\n\n"
+                    else:
+                        while not notices.empty():
+                            notices.get_nowait()
+                        REALTIME_WAKEUPS.labels("room", "event").inc()
+                        reason = "event"
+                        break
 
     return StreamingResponse(
         stream(),
@@ -1996,6 +2061,7 @@ async def panel_state(
     request: Request,
     user: AsyncCurrentUser,
     session: AsyncDbSession,
+    known_revision: Annotated[int | None, Query(ge=0)] = None,
 ) -> dict[str, Any]:
     user_id = user.id
     principal_id = user.principal_id
@@ -2012,12 +2078,58 @@ async def panel_state(
     if campaign is None:
         raise ValueError("campaign projection not found")
     membership_role = membership.role
+    authorization_epoch = membership.authorization_epoch
+    audience_key = principal_id
+    cached_value = await load_panel_projection(
+        session,
+        campaign_id=campaign_id,
+        audience_key=audience_key,
+        source_revision=campaign.mcp_revision,
+        authorization_epoch=authorization_epoch,
+        max_age_seconds=_PANEL_PROJECTION_MAX_AGE_SECONDS,
+    )
+    if cached_value is not None:
+        if known_revision == campaign.mcp_revision:
+            return {"not_modified": True, "revision": campaign.mcp_revision}
+        return cached_value
     runtime = _runtime_for_system(request, campaign.system_id)
     await session.rollback()
     try:
-        value = await runtime.get_panel_state(campaign_id=campaign_id, principal_id=principal_id)
+        value = await runtime.get_panel_state(
+            campaign_id=campaign_id,
+            principal_id=principal_id,
+            known_revision=known_revision,
+        )
     except RuntimeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    if value.get("not_modified"):
+        current_revision = int(value.get("revision") or known_revision or 0)
+        campaign = await session.get(CampaignProjection, campaign_id)
+        if campaign is not None and current_revision > campaign.mcp_revision:
+            campaign.mcp_revision = current_revision
+            await session.commit()
+        else:
+            await session.rollback()
+        return {
+            "not_modified": True,
+            "revision": current_revision,
+        }
+    refreshed_membership = await session.scalar(
+        select(CampaignMembershipProjection).where(
+            CampaignMembershipProjection.campaign_id == campaign_id,
+            CampaignMembershipProjection.user_id == user_id,
+            CampaignMembershipProjection.status == "active",
+        )
+    )
+    if (
+        refreshed_membership is None
+        or refreshed_membership.authorization_epoch != authorization_epoch
+    ):
+        await session.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "campaign authorization changed; retry the panel refresh",
+        )
     bindings = (
         await session.scalars(
             select(ActorBindingProjection).where(
@@ -2040,17 +2152,30 @@ async def panel_state(
         }
         for item in visible_bindings
     ]
-    await session.rollback()
     if membership_role not in {"owner", "dm"}:
         value = dict(value)
         value["current_module"] = _without_encounter_map_authority(
             value.get("current_module")
         )
-    return {
+    projected_value = {
         **value,
         "membership": {"role": membership_role, "user_id": user_id},
         "actor_bindings": binding_views,
     }
+    source_revision = int(value.get("revision") or campaign.mcp_revision)
+    campaign = await session.get(CampaignProjection, campaign_id)
+    if campaign is not None:
+        campaign.mcp_revision = source_revision
+    await store_panel_projection(
+        session,
+        campaign_id=campaign_id,
+        audience_key=audience_key,
+        source_revision=source_revision,
+        authorization_epoch=authorization_epoch,
+        payload=projected_value,
+    )
+    await session.commit()
+    return projected_value
 
 
 @router.get("/combat/render")
@@ -2200,6 +2325,10 @@ async def panel_action(
     if membership.role not in {"owner", "dm"}:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "DM role required")
     runtime = _campaign_runtime(request, session, campaign_id)
+    # MCP is authoritative and accepts both expected_revision and an idempotency key.
+    # Release the Web row lock before network I/O; a retry can replay the MCP receipt
+    # and the second locked idempotency check below serializes local finalization.
+    session.commit()
     panel = await runtime.get_panel_state(campaign_id=campaign_id, principal_id=user.principal_id)
     revision = int(panel.get("revision") or 0)
     try:
@@ -2303,6 +2432,21 @@ async def panel_action(
     except RuntimeError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     next_revision = _receipt_revision(receipt, revision)
+    room = _room(session, campaign_id)
+    existing = session.scalar(
+        select(CampaignMessage).where(
+            CampaignMessage.room_id == room.id,
+            CampaignMessage.client_message_id == f"panel:{idempotency_key}",
+        )
+    )
+    if existing is not None:
+        recorded = dict(existing.structured_payload or {})
+        if (
+            recorded.get("panel_action") != payload.action
+            or recorded.get("payload") != payload.payload
+        ):
+            raise HTTPException(status.HTTP_409_CONFLICT, "idempotency key payload mismatch")
+        return {"message": _message_view(existing, user.id), "receipt": existing.mcp_receipt}
     campaign = session.get(CampaignProjection, campaign_id)
     if campaign is not None:
         campaign.mcp_revision = next_revision

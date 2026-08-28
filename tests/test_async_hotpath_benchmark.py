@@ -55,7 +55,7 @@ def test_benchmark_covers_remaining_hot_paths_and_transaction_boundaries(tmp_pat
         "mcp.panel_state": {"in_transaction": 0, "released": 2, "samples": 2}
     }
     assert scenarios["panel_action"]["upstream_transaction_probes"] == {
-        "mcp.panel_state": {"in_transaction": 2, "released": 0, "samples": 2},
-        "mcp.phase.set": {"in_transaction": 2, "released": 0, "samples": 2},
+        "mcp.panel_state": {"in_transaction": 0, "released": 2, "samples": 2},
+        "mcp.phase.set": {"in_transaction": 0, "released": 2, "samples": 2},
     }
     assert scenarios["activity_callback"]["upstream_transaction_probes"] == {}

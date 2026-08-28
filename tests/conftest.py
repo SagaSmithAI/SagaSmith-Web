@@ -41,7 +41,10 @@ class FakeDndRuntime:
 
     async def get_panel_state(self, **arguments: Any) -> dict[str, Any]:
         self.calls.append(("panel_state", arguments))
+        if arguments.get("known_revision") == 7:
+            return {"not_modified": True, "revision": 7}
         return {
+            "not_modified": False,
             "campaign": {
                 "id": arguments["campaign_id"],
                 "revision": 7,
