@@ -540,6 +540,13 @@ class ArtifactRelease(TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint("artifact_id", "version", name="uq_artifact_release_version"),
         Index("ix_artifact_release_catalog", "status", "published_at"),
+        Index(
+            "ix_artifact_release_latest",
+            "artifact_id",
+            "status",
+            "published_at",
+            "created_at",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)

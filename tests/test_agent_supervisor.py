@@ -8,6 +8,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sagasmith_service.agent_supervisor import (
+    Worker,
+    WorkerCapacityError,
     WorkerManager,
     conversation_matches_principal,
     create_supervisor_app,
@@ -137,6 +139,23 @@ def test_supervisor_maps_worker_failure() -> None:
     assert response.status_code == 502
 
 
+def test_supervisor_maps_worker_capacity_to_retryable_unavailability() -> None:
+    class CapacityManager(FakeManager):
+        async def complete(self, key: str, payload: dict[str, Any]) -> dict[str, Any]:
+            raise WorkerCapacityError("Agent worker capacity is full")
+
+    manager = CapacityManager()
+    with TestClient(
+        create_supervisor_app(manager, "internal-secret")  # type: ignore[arg-type]
+    ) as client:
+        response = client.post(
+            "/v1/conversations/campaign:test-user:conversation/completions",
+            headers={"Authorization": "Bearer internal-secret"},
+            json={"messages": [], "principal_id": "user:test-user"},
+        )
+    assert response.status_code == 503
+
+
 def test_supervisor_authenticates_narrative_health_and_fixed_operations() -> None:
     manager = FakeManager()
     with TestClient(
@@ -255,6 +274,9 @@ def test_worker_manager_isolates_and_reuses_conversation_processes(
         async def __aexit__(self, *_args: Any) -> None:
             return None
 
+        async def aclose(self) -> None:
+            return None
+
         async def get(self, _url: str) -> FakeResponse:
             return FakeResponse()
 
@@ -302,6 +324,7 @@ def test_worker_manager_isolates_and_reuses_conversation_processes(
 
     asyncio.run(scenario())
     assert all(process.terminated for process in processes)
+    assert len(client_timeouts) == 2
     assert any(getattr(timeout, "read", None) == 777 for timeout in client_timeouts)
 
 
@@ -337,6 +360,9 @@ def test_worker_manager_does_not_reuse_port_until_idle_worker_exits(
             return self
 
         async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def aclose(self) -> None:
             return None
 
         async def get(self, _url: str) -> FakeResponse:
@@ -383,3 +409,133 @@ def test_worker_runtime_config_uses_exact_trusted_host_cidrs(monkeypatch, tmp_pa
     config = tmp_path / "config.json"
     config.write_text(json.dumps({"tools": {"ssrfWhitelist": ["127.0.0.1/32"]}}))
     assert json.loads(config.read_text())["tools"]["ssrfWhitelist"] == ["127.0.0.1/32"]
+
+
+def test_worker_manager_singleflights_keys_and_bounds_parallel_spawns(tmp_path: Path) -> None:
+    class FakeProcess:
+        returncode: int | None = None
+        pid: int | None = None
+
+        def terminate(self) -> None:
+            self.returncode = 0
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            return self.returncode or 0
+
+    manager = WorkerManager(
+        config_path=str(tmp_path / "config.json"),
+        workspace_root=str(tmp_path / "workspaces"),
+        worker_api_key="secret",
+        max_workers=4,
+        spawn_concurrency=2,
+    )
+    release_spawns = asyncio.Event()
+    two_started = asyncio.Event()
+    calls: list[str] = []
+    active_spawns = 0
+    maximum_active_spawns = 0
+
+    async def fake_spawn(key: str, port: int) -> Worker:
+        nonlocal active_spawns, maximum_active_spawns
+        calls.append(key)
+        active_spawns += 1
+        maximum_active_spawns = max(maximum_active_spawns, active_spawns)
+        if active_spawns == 2:
+            two_started.set()
+        await release_spawns.wait()
+        active_spawns -= 1
+        return Worker(
+            key=key,
+            port=port,
+            process=FakeProcess(),  # type: ignore[arg-type]
+            last_used=0,
+            runtime_config_path=tmp_path / f"{port}.json",
+        )
+
+    manager._spawn = fake_spawn  # type: ignore[method-assign]
+
+    async def scenario() -> None:
+        tasks = [
+            asyncio.create_task(manager.get("campaign-a:user-a:conversation-a")),
+            asyncio.create_task(manager.get("campaign-a:user-a:conversation-a")),
+            asyncio.create_task(manager.get("campaign-b:user-b:conversation-b")),
+            asyncio.create_task(manager.get("campaign-c:user-c:conversation-c")),
+        ]
+        await asyncio.wait_for(two_started.wait(), timeout=1)
+        assert maximum_active_spawns == 2
+        release_spawns.set()
+        first, repeated, *_others = await asyncio.gather(*tasks)
+        assert first is repeated
+        assert calls.count("campaign-a:user-a:conversation-a") == 1
+        assert len(calls) == 3
+        await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_worker_manager_rejects_busy_capacity_then_evicts_lru(tmp_path: Path) -> None:
+    class FakeProcess:
+        returncode: int | None = None
+        pid: int | None = None
+
+        def __init__(self) -> None:
+            self.terminated = False
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = 0
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            return self.returncode or 0
+
+    manager = WorkerManager(
+        config_path=str(tmp_path / "config.json"),
+        workspace_root=str(tmp_path / "workspaces"),
+        worker_api_key="secret",
+        max_workers=1,
+    )
+    processes: list[FakeProcess] = []
+
+    async def fake_spawn(key: str, port: int) -> Worker:
+        process = FakeProcess()
+        processes.append(process)
+        return Worker(
+            key=key,
+            port=port,
+            process=process,  # type: ignore[arg-type]
+            last_used=0,
+            runtime_config_path=tmp_path / f"{port}.json",
+        )
+
+    manager._spawn = fake_spawn  # type: ignore[method-assign]
+
+    async def scenario() -> None:
+        first = await manager.get("campaign-a:user-a:conversation-a")
+        first.active_requests = 1
+        with pytest.raises(WorkerCapacityError, match="capacity is full"):
+            await manager.get("campaign-b:user-b:conversation-b")
+        first.active_requests = 0
+        second = await manager.get("campaign-b:user-b:conversation-b")
+        assert second.key == "campaign-b:user-b:conversation-b"
+        assert first.process.terminated is True
+        assert list(manager.workers) == ["campaign-b:user-b:conversation-b"]
+        await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_supervisor_exposes_worker_metrics() -> None:
+    manager = FakeManager()
+    with TestClient(
+        create_supervisor_app(manager, "internal-secret")  # type: ignore[arg-type]
+    ) as client:
+        response = client.get("/metrics")
+    assert response.status_code == 200
+    assert "sagasmith_agent_workers" in response.text
+    assert "sagasmith_agent_worker_rss_bytes" in response.text

@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import exists, func, literal_column, or_, select
 
 from sagasmith_service.api.dependencies import CurrentUser, DbSession
 from sagasmith_service.integrations.agent import AgentRuntime
@@ -152,6 +152,102 @@ def _artifact_view(session: DbSession, artifact: Artifact) -> ArtifactView:
     )
 
 
+def _artifact_catalog_statement():
+    favorite_count = (
+        select(func.count(ArtifactFavorite.id))
+        .where(ArtifactFavorite.artifact_id == Artifact.id)
+        .correlate(Artifact)
+        .scalar_subquery()
+    )
+    latest_release_id = (
+        select(ArtifactRelease.id)
+        .where(
+            ArtifactRelease.artifact_id == Artifact.id,
+            ArtifactRelease.status == "published",
+        )
+        .order_by(
+            ArtifactRelease.published_at.desc(),
+            ArtifactRelease.created_at.desc(),
+            ArtifactRelease.id.desc(),
+        )
+        .limit(1)
+        .correlate(Artifact)
+        .scalar_subquery()
+    )
+    latest_version = (
+        select(ArtifactRelease.version)
+        .where(
+            ArtifactRelease.artifact_id == Artifact.id,
+            ArtifactRelease.status == "published",
+        )
+        .order_by(
+            ArtifactRelease.published_at.desc(),
+            ArtifactRelease.created_at.desc(),
+            ArtifactRelease.id.desc(),
+        )
+        .limit(1)
+        .correlate(Artifact)
+        .scalar_subquery()
+    )
+    return (
+        select(
+            Artifact,
+            User.display_name.label("owner_display_name"),
+            favorite_count.label("favorite_count"),
+            latest_release_id.label("latest_release_id"),
+            latest_version.label("latest_version"),
+        )
+        .outerjoin(User, User.id == Artifact.owner_user_id)
+    )
+
+
+def _artifact_catalog_view(row: Any) -> ArtifactView:
+    artifact = row.Artifact
+    return ArtifactView(
+        **{
+            column: getattr(artifact, column)
+            for column in (
+                "id",
+                "owner_user_id",
+                "slug",
+                "artifact_type",
+                "title",
+                "summary",
+                "system_id",
+                "visibility",
+                "status",
+                "license_code",
+                "rights_attested",
+                "source_kind",
+                "provenance",
+                "tags",
+                "forked_from_artifact_id",
+                "discussion_enabled",
+            )
+        },
+        owner_display_name=row.owner_display_name or "Deleted user",
+        favorite_count=int(row.favorite_count),
+        latest_release_id=row.latest_release_id,
+        latest_version=row.latest_version,
+    )
+
+
+def _artifact_search_filter(session: DbSession, query: str):
+    normalized = query.strip()
+    if session.bind is not None and session.bind.dialect.name == "postgresql":
+        document = func.to_tsvector(
+            literal_column("'simple'::regconfig"),
+            func.coalesce(Artifact.title, literal_column("''"))
+            + literal_column("' '")
+            + func.coalesce(Artifact.summary, literal_column("''")),
+        )
+        return document.op("@@")(
+            func.websearch_to_tsquery(literal_column("'simple'::regconfig"), normalized)
+        )
+    term = f"%{normalized.casefold()}%"
+    return or_(func.lower(Artifact.title).like(term), func.lower(Artifact.summary).like(term))
+
+
 def _release(session: DbSession, artifact_id: str, release_id: str) -> ArtifactRelease:
     item = session.scalar(
         select(ArtifactRelease).where(
@@ -241,8 +337,10 @@ def list_artifacts(
     system_id: Annotated[str | None, Query()] = None,
     mine: bool = False,
     favorites: bool = False,
+    limit: Annotated[int, Query(ge=1, le=100)] = 100,
+    offset: Annotated[int, Query(ge=0, le=100_000)] = 0,
 ) -> list[ArtifactView]:
-    statement = select(Artifact)
+    statement = _artifact_catalog_statement()
     if mine:
         statement = statement.where(Artifact.owner_user_id == user.id)
     else:
@@ -253,18 +351,22 @@ def list_artifacts(
             )
         )
     if favorites:
-        statement = statement.join(ArtifactFavorite).where(ArtifactFavorite.user_id == user.id)
+        statement = statement.join(
+            ArtifactFavorite,
+            ArtifactFavorite.artifact_id == Artifact.id,
+        ).where(ArtifactFavorite.user_id == user.id)
     if artifact_type:
         statement = statement.where(Artifact.artifact_type == artifact_type)
     if system_id:
         statement = statement.where(Artifact.system_id == system_id)
     if q.strip():
-        term = f"%{q.strip().casefold()}%"
-        statement = statement.where(
-            or_(func.lower(Artifact.title).like(term), func.lower(Artifact.summary).like(term))
-        )
-    items = session.scalars(statement.order_by(Artifact.updated_at.desc()).limit(100)).all()
-    return [_artifact_view(session, item) for item in items]
+        statement = statement.where(_artifact_search_filter(session, q))
+    rows = session.execute(
+        statement.order_by(Artifact.updated_at.desc(), Artifact.id.desc())
+        .offset(offset)
+        .limit(limit)
+    ).all()
+    return [_artifact_catalog_view(row) for row in rows]
 
 
 @router.post("/artifacts", response_model=ArtifactView, status_code=status.HTTP_201_CREATED)
@@ -1044,23 +1146,27 @@ def list_installations(user: CurrentUser, session: DbSession) -> list[ArtifactIn
     ]
 
 
-def _can_read_owner_post(session: DbSession, post: CommunityPost, user: User) -> bool:
-    if post.audience == "public" or post.author_user_id == user.id or user.is_admin:
+def _has_artifact_owner_access(session: DbSession, artifact: Artifact, user: User) -> bool:
+    if user.is_admin or artifact.owner_user_id == user.id:
         return True
-    if post.target_type == "artifact":
-        artifact = session.get(Artifact, post.target_id)
-        if artifact and _can_edit(session, artifact, user.id):
-            return True
-        return (
-            session.scalar(
-                select(ArtifactInstallation.id).where(
-                    ArtifactInstallation.artifact_id == post.target_id,
-                    ArtifactInstallation.installed_by_user_id == user.id,
+    return bool(
+        session.scalar(
+            select(
+                or_(
+                    exists().where(
+                        ArtifactCollaborator.artifact_id == artifact.id,
+                        ArtifactCollaborator.user_id == user.id,
+                        ArtifactCollaborator.status == "active",
+                        ArtifactCollaborator.role == "editor",
+                    ),
+                    exists().where(
+                        ArtifactInstallation.artifact_id == artifact.id,
+                        ArtifactInstallation.installed_by_user_id == user.id,
+                    ),
                 )
             )
-            is not None
         )
-    return False
+    )
 
 
 def _post_view(session: DbSession, item: CommunityPost) -> CommunityPostView:
@@ -1087,25 +1193,65 @@ def _post_view(session: DbSession, item: CommunityPost) -> CommunityPostView:
     )
 
 
+def _post_catalog_view(item: CommunityPost, author_display_name: str | None) -> CommunityPostView:
+    return CommunityPostView(
+        **{
+            column: getattr(item, column)
+            for column in (
+                "id",
+                "author_user_id",
+                "target_type",
+                "target_id",
+                "release_id",
+                "parent_id",
+                "category",
+                "audience",
+                "spoiler",
+                "body",
+                "status",
+                "created_at",
+            )
+        },
+        author_display_name=author_display_name or "Deleted user",
+    )
+
+
 @router.get("/posts", response_model=list[CommunityPostView])
 def list_posts(
-    target_type: str, target_id: str, user: CurrentUser, session: DbSession
+    target_type: str,
+    target_id: str,
+    user: CurrentUser,
+    session: DbSession,
+    limit: Annotated[int, Query(ge=1, le=100)] = 100,
+    offset: Annotated[int, Query(ge=0, le=100_000)] = 0,
 ) -> list[CommunityPostView]:
+    can_read_owners = user.is_admin
     if target_type == "artifact":
         artifact = _visible_artifact(session, target_id, user)
         if not artifact.discussion_enabled:
             return []
-    items = session.scalars(
-        select(CommunityPost)
+        can_read_owners = _has_artifact_owner_access(session, artifact, user)
+    visibility = or_(
+        CommunityPost.audience == "public",
+        CommunityPost.author_user_id == user.id,
+    )
+    if can_read_owners:
+        visibility = CommunityPost.id.is_not(None)
+    rows = session.execute(
+        select(CommunityPost, User.display_name.label("author_display_name"))
+        .outerjoin(User, User.id == CommunityPost.author_user_id)
         .where(
             CommunityPost.target_type == target_type,
             CommunityPost.target_id == target_id,
             CommunityPost.status == "visible",
+            visibility,
         )
-        .order_by(CommunityPost.created_at)
+        .order_by(CommunityPost.created_at, CommunityPost.id)
+        .offset(offset)
+        .limit(limit)
     ).all()
     return [
-        _post_view(session, item) for item in items if _can_read_owner_post(session, item, user)
+        _post_catalog_view(row.CommunityPost, row.author_display_name) for row in rows
     ]
 
 
