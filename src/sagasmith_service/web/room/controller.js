@@ -63,6 +63,7 @@ export function createRoomController({
     state.gridDestination = null;
     state.gridCursor = null;
     state.gridExpanded = false;
+    if (state.encounterDraft?.campaignId !== campaign.id) state.encounterDraft = null;
     state.characterPage =
       localStorage.getItem(`sagasmith:character-page:${campaign.id}`) || "character";
     state.characterCollapsed =
@@ -249,6 +250,7 @@ export function createRoomController({
     combatGridController.setGridExpanded(false);
     state.roomEvents = null;
     state.campaign = null;
+    state.encounterDraft = null;
     $("#campaign-room").hidden = true;
     $("#campaign-list").hidden = false;
     $("#invite-accept-form").hidden = false;
