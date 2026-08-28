@@ -1,4 +1,4 @@
-const CACHE="sagasmith-shell-v9";
+const CACHE="sagasmith-shell-v10";
 const SHELL=[
   "/",
   "/styles.css",
@@ -19,6 +19,7 @@ const SHELL=[
   "/assets/room/characters.js",
   "/assets/room/combat-grid.js",
   "/assets/room/combat-grid-state.js",
+  "/assets/room/encounter-planner-state.js",
   "/assets/room/controller.js",
   "/assets/room/model.js",
   "/assets/room/timeline.js",

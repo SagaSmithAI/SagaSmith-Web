@@ -25,8 +25,8 @@ jobs:
         run: >-
           find src/sagasmith_service/web -type f \( -name '*.js' -o -name '*.mjs' \)
           -print0 | xargs -0 -n1 node --check
-      - name: Test combat grid browser state
-        run: node --test tests/web/combat-grid-state.test.mjs
+      - name: Test browser grid state modules
+        run: node --test tests/web/*.test.mjs
       - run: uv run alembic upgrade head
         env:
           SAGASMITH_DATABASE_URL: sqlite:///./migration-ci.db

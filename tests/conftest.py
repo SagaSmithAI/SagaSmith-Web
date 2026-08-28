@@ -59,7 +59,23 @@ class FakeDndRuntime:
                 }
             ],
             "modules": [{"id": "module-1", "title": "Test Module"}],
-            "current_module": {"scene": {"id": "scene-1", "title": "Gate"}},
+            "current_module": {
+                "scene": {
+                    "id": "scene-1",
+                    "title": "Gate",
+                    "profile_data": {
+                        "combat_grid_templates": [
+                            {
+                                "id": "gate-ambush",
+                                "title": "Gate Ambush",
+                                "grid": {"kind": "square", "cell_ft": 5},
+                                "bounds": {"width_cells": 6, "height_cells": 4},
+                                "blocked_cells": [{"x": 3, "y": 1}],
+                            }
+                        ]
+                    },
+                }
+            },
             "combat": None,
         }
 

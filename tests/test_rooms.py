@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import hashlib
+import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -512,6 +513,7 @@ def test_room_audience_and_panel_actions_are_authorized_and_refreshable(
     assert panel.status_code == 200
     assert panel.json()["phase"] == "play"
     assert panel.json()["characters"][0]["name"] == "Aria"
+    assert "combat_grid_templates" not in json.dumps(panel.json()["current_module"])
 
     forbidden = client.post(
         "/api/campaigns/campaign-1/room/panel/actions",
@@ -523,6 +525,10 @@ def test_room_audience_and_panel_actions_are_authorized_and_refreshable(
     login(client, "room-owner@example.com")
     dm_messages = client.get("/api/campaigns/campaign-1/room/messages").json()
     assert any(item["content"] == "只告诉 DM。" for item in dm_messages)
+    dm_panel = client.get("/api/campaigns/campaign-1/room/panel").json()
+    assert dm_panel["current_module"]["scene"]["profile_data"][
+        "combat_grid_templates"
+    ][0]["id"] == "gate-ambush"
     changed = client.post(
         "/api/campaigns/campaign-1/room/panel/actions",
         headers={"Idempotency-Key": "dm-phase-change"},
@@ -589,11 +595,67 @@ def test_room_audience_and_panel_actions_are_authorized_and_refreshable(
     assert grid_call["positioning_mode"] == "grid"
     assert grid_call["participant_config"][0]["position"] == {"x": 2, "y": 3}
     assert grid_call["battle_map"]["width_cells"] == 20
+    template_started = client.post(
+        "/api/campaigns/campaign-1/room/panel/actions",
+        headers={"Idempotency-Key": "dm-template-combat-start"},
+        json={
+            "action": "combat.start",
+            "payload": {
+                "participant_ids": ["actor-1"],
+                "participant_config": [
+                    {"actor_id": "actor-1", "position": {"x": 4, "y": 2}}
+                ],
+                "positioning_mode": "grid",
+                "name": "Template Ambush",
+                "battle_map_template_id": "gate-ambush",
+            },
+        },
+    )
+    assert template_started.status_code == 200, template_started.text
+    template_call = [item for item in dnd_runtime.calls if item[0] == "combat_start"][-1][1]
+    assert template_call["battle_map_template_id"] == "gate-ambush"
+    assert template_call["battle_map"] is None
+
+    map_authority_conflict = client.post(
+        "/api/campaigns/campaign-1/room/panel/actions",
+        headers={"Idempotency-Key": "dm-conflicting-map-authority"},
+        json={
+            "action": "combat.start",
+            "payload": {
+                "participant_ids": ["actor-1"],
+                "participant_config": [
+                    {"actor_id": "actor-1", "position": {"x": 0, "y": 0}}
+                ],
+                "positioning_mode": "grid",
+                "battle_map_template_id": "gate-ambush",
+                "battle_map": {"width_cells": 6, "height_cells": 4},
+            },
+        },
+    )
+    assert map_authority_conflict.status_code == 422
+    assert "mutually exclusive" in map_authority_conflict.text
+
+    missing_map_authority = client.post(
+        "/api/campaigns/campaign-1/room/panel/actions",
+        headers={"Idempotency-Key": "dm-missing-map-authority"},
+        json={
+            "action": "combat.start",
+            "payload": {
+                "participant_ids": ["actor-1"],
+                "participant_config": [
+                    {"actor_id": "actor-1", "position": {"x": 0, "y": 0}}
+                ],
+                "positioning_mode": "grid",
+            },
+        },
+    )
+    assert missing_map_authority.status_code == 422
+    assert "one map authority" in missing_map_authority.text
     with client.app.state.session_factory() as session:
         event_types = session.scalars(
             select(CampaignRoomEvent.event_type).order_by(CampaignRoomEvent.sequence)
         ).all()
-    assert event_types.count("state.changed") == 3
+    assert event_types.count("state.changed") == 4
 
     login(client, "room-private@example.com")
     assert client.put(

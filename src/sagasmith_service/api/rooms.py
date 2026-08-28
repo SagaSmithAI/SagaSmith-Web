@@ -1976,6 +1976,20 @@ async def room_events(
     )
 
 
+def _without_encounter_map_authority(value: Any) -> Any:
+    """Defence-in-depth: map authoring evidence never enters a player Web projection."""
+
+    if isinstance(value, dict):
+        return {
+            key: _without_encounter_map_authority(item)
+            for key, item in value.items()
+            if key not in {"combat_grid_templates", "battle_map_templates"}
+        }
+    if isinstance(value, list):
+        return [_without_encounter_map_authority(item) for item in value]
+    return value
+
+
 @router.get("/panel")
 async def panel_state(
     campaign_id: str,
@@ -2027,6 +2041,11 @@ async def panel_state(
         for item in visible_bindings
     ]
     await session.rollback()
+    if membership_role not in {"owner", "dm"}:
+        value = dict(value)
+        value["current_module"] = _without_encounter_map_authority(
+            value.get("current_module")
+        )
     return {
         **value,
         "membership": {"role": membership_role, "user_id": user_id},
@@ -2219,10 +2238,34 @@ async def panel_action(
                 raise HTTPException(
                     status.HTTP_422_UNPROCESSABLE_CONTENT, "battle_map must be an object"
                 )
-            if mode == "grid" and (not raw_map or len(raw_config) != len(participant_ids)):
+            raw_template_id = payload.payload.get("battle_map_template_id")
+            if raw_template_id is not None and (
+                not isinstance(raw_template_id, str)
+                or not raw_template_id.strip()
+                or len(raw_template_id.strip()) > 128
+            ):
                 raise HTTPException(
                     status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    "grid combat requires a battle map and one participant config per actor",
+                    "battle_map_template_id must be a non-empty string of at most 128 characters",
+                )
+            template_id = raw_template_id.strip() if isinstance(raw_template_id, str) else None
+            if raw_map is not None and template_id is not None:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    "battle_map and battle_map_template_id are mutually exclusive",
+                )
+            if mode == "agent" and (raw_map is not None or template_id is not None):
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    "agent combat does not accept battle-map authority",
+                )
+            if mode == "grid" and (
+                (raw_map is None and template_id is None)
+                or len(raw_config) != len(participant_ids)
+            ):
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    "grid combat requires one map authority and one participant config per actor",
                 )
             receipt = await runtime.start_combat(
                 campaign_id=campaign_id,
@@ -2231,7 +2274,8 @@ async def panel_action(
                 positioning_mode=mode,
                 name=str(payload.payload.get("name") or "Combat")[:160],
                 participant_config=list(raw_config),
-                battle_map=(dict(raw_map) if mode == "grid" else None),
+                battle_map=(dict(raw_map) if mode == "grid" and raw_map is not None else None),
+                battle_map_template_id=(template_id if mode == "grid" else None),
                 battle_map_override_reason=(
                     str(payload.payload.get("battle_map_override_reason") or "")[:2000]
                     if mode == "grid"

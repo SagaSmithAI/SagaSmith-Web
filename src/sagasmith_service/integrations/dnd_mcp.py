@@ -173,6 +173,7 @@ class DndRuntime(Protocol):
         name: str,
         participant_config: list[dict[str, Any]],
         battle_map: dict[str, Any] | None,
+        battle_map_template_id: str | None,
         battle_map_override_reason: str | None,
         expected_revision: int,
         idempotency_key: str,
@@ -788,6 +789,8 @@ class StreamableHttpDndRuntime:
         }
         if arguments.get("battle_map") is not None:
             call_arguments["battle_map"] = arguments["battle_map"]
+        if arguments.get("battle_map_template_id"):
+            call_arguments["battle_map_template_id"] = arguments["battle_map_template_id"]
         if arguments.get("battle_map_override_reason"):
             call_arguments["battle_map_override_reason"] = arguments[
                 "battle_map_override_reason"

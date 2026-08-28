@@ -31,6 +31,19 @@ import {
   movementIntentSegment,
   terrainAt,
 } from "/assets/room/combat-grid-state.js";
+import {
+  buildEncounterPayload,
+  createEncounterDraft,
+  encounterValidation,
+  encounterPlacementFeedback,
+  extractEncounterTemplates,
+  mapForEncounter,
+  moveEncounterCursor,
+  placeEncounterActor,
+  reconcileEncounterDraft,
+  seedEncounterPlacements,
+  toggleEncounterActor,
+} from "/assets/room/encounter-planner-state.js";
 
 const gridTexture = new Image();
 gridTexture.decoding = "async";
@@ -161,86 +174,689 @@ export function createCombatGridController({
 
   function buildCombatStartForm(visible) {
     const form = document.createElement("form");
-    form.className = "combat-start-form";
-    form.append(text("p", "选择参战者", "small muted"));
-    for (const actor of visible) {
+    form.className = "combat-start-form combat-command-table";
+    form.onsubmit = (event) => event.preventDefault();
+    const templates = extractEncounterTemplates(state.panel?.current_module);
+    const actors = visible.map((actor) => ({ id: actorId(actor), name: actorName(actor) }));
+    if (!state.encounterDraft || state.encounterDraft.campaignId !== state.campaign.id) {
+      state.encounterDraft = createEncounterDraft({
+        campaignId: state.campaign.id,
+        revision: state.panel?.revision,
+        actors,
+        templates,
+      });
+    } else {
+      reconcileEncounterDraft(state.encounterDraft, { actors, templates });
+    }
+    const draft = state.encounterDraft;
+
+    const render = () => {
+      form.replaceChildren();
+      form.classList.toggle(
+        "planner-open",
+        draft.mode === "grid" && draft.plannerOpen,
+      );
+      const header = text("header", "", "encounter-command-head");
+      const title = text("div", "", "encounter-command-title");
+      title.append(
+        text("span", "ENCOUNTER // DEPLOYMENT", "encounter-kicker"),
+        text("strong", "遭遇部署台"),
+        text("span", `草稿基于 MCP revision ${draft.revisionAtDraft}`, "small muted"),
+      );
+      const nameLabel = text("label", "", "encounter-name");
+      nameLabel.append(text("span", "战斗名称", "small muted"));
+      const name = document.createElement("input");
+      name.name = "encounter_name";
+      name.maxLength = 160;
+      name.value = draft.name;
+      name.oninput = () => {
+        draft.name = name.value;
+        draft.submitError = "";
+      };
+      nameLabel.append(name);
+      const mode = document.createElement("select");
+      mode.name = "positioning_mode";
+      mode.setAttribute("aria-label", "定位模式");
+      for (const [value, label] of [
+        ["agent", "Agent 叙事距离"],
+        ["grid", "Grid 战术部署"],
+      ]) {
+        const option = text("option", label);
+        option.value = value;
+        option.selected = draft.mode === value;
+        mode.append(option);
+      }
+      mode.onchange = () => {
+        draft.mode = mode.value;
+        if (draft.mode === "grid") {
+          draft.plannerOpen = true;
+          seedEncounterPlacements(draft, templates);
+        }
+        draft.submitError = "";
+        render();
+      };
+      header.append(title, nameLabel, mode);
+      form.append(header);
+
+      if (draft.mode === "agent") {
+        form.append(buildAgentEncounterStart(draft, render));
+        return;
+      }
+      if (!draft.plannerOpen) {
+        const resume = text("div", "", "encounter-resume");
+        resume.append(
+          text("strong", "Grid 部署草稿已保留"),
+          text(
+            "p",
+            `${draft.selectedIds.length} 名参战者 · ${Object.keys(draft.placements).length} 个坐标`,
+            "small muted",
+          ),
+          button("继续部署", () => {
+            draft.plannerOpen = true;
+            render();
+          }, "primary"),
+        );
+        form.append(resume);
+        return;
+      }
+      form.append(buildGridEncounterPlanner(draft, templates, render));
+    };
+    render();
+    return form;
+  }
+
+  function buildAgentEncounterStart(draft, rerender) {
+    const section = text("section", "", "encounter-agent-start");
+    section.append(
+      text("p", "选择参战者；定位、距离与遮挡由 Agent 依据场景证据交给 MCP 裁定。", "small muted"),
+    );
+    const roster = text("div", "", "encounter-agent-roster");
+    for (const actor of draft.actors) {
       const label = text("label", "", "check combatant-choice");
       const input = document.createElement("input");
       input.type = "checkbox";
-      input.name = "participant";
-      input.value = actorId(actor);
-      label.append(input, document.createTextNode(actorName(actor)));
-      form.append(label);
+      input.checked = draft.selectedIds.includes(actor.id);
+      input.onchange = () => {
+        toggleEncounterActor(draft, actor.id, input.checked);
+      };
+      label.append(input, document.createTextNode(actor.name));
+      roster.append(label);
     }
-    const mode = document.createElement("select");
-    mode.name = "positioning_mode";
-    for (const [value, label] of [
-      ["agent", "Agent 叙事距离"],
-      ["grid", "Grid 网格"],
-    ]) {
-      const option = text("option", label);
-      option.value = value;
-      mode.append(option);
+    const start = button(
+      "开始叙事战斗",
+      async () => {
+        if (!draft.selectedIds.length) return toast("请选择参战者");
+        if (!draft.name.trim()) return toast("请输入战斗名称");
+        draft.submitError = "";
+        try {
+          await sendPanelAction("combat.start", {
+            participant_ids: [...draft.selectedIds],
+            positioning_mode: "agent",
+            name: draft.name.trim(),
+          });
+          state.encounterDraft = null;
+        } catch (error) {
+          draft.submitError = error.message;
+          rerender();
+        }
+      },
+      "primary",
+    );
+    section.append(roster, start);
+    if (draft.submitError) {
+      const error = text("p", `MCP 拒绝：${draft.submitError}`, "error encounter-submit-error");
+      error.setAttribute("role", "alert");
+      section.append(error);
     }
-    form.append(
-      mode,
-      button(
-        "开始战斗",
-        async () => {
-          const ids = [...form.querySelectorAll('input[name="participant"]:checked')].map(
-            (item) => item.value,
-          );
-          if (!ids.length) return toast("请选择参战者");
-          const payload = {
-            participant_ids: ids,
-            positioning_mode: mode.value,
-            name: prompt("战斗名称", "遭遇战") || "遭遇战",
-          };
-          if (mode.value === "grid") {
-            const width = Number(prompt("网格宽度（格）", "20"));
-            const height = Number(prompt("网格高度（格）", "14"));
-            if (
-              !Number.isInteger(width) ||
-              !Number.isInteger(height) ||
-              width < 1 ||
-              height < 1 ||
-              width > 200 ||
-              height > 200
-            ) {
-              return toast("网格尺寸必须是 1 到 200 的整数");
-            }
-            payload.battle_map = {
-              width_cells: width,
-              height_cells: height,
-              blocked_cells: [],
-              difficult_cells: [],
+    return section;
+  }
+
+  function buildGridEncounterPlanner(draft, templates, rerender) {
+    const planner = text("section", "", "encounter-planner");
+    const source = buildEncounterMapSource(draft, templates, rerender);
+    const validation = encounterValidation(draft, templates);
+    const workspace = text("div", "", "encounter-workspace");
+    const board = buildEncounterBoard(draft, templates, validation, rerender);
+    const rail = buildEncounterReadinessRail(draft, templates, validation, rerender);
+    workspace.append(board, rail);
+    const foot = text("footer", "", "encounter-command-foot");
+    const readiness = text(
+      "span",
+      validation.ready
+        ? `${draft.selectedIds.length}/${draft.selectedIds.length} READY`
+        : `${draft.selectedIds.filter((id) => !(validation.byActor[id] || []).length).length}/${draft.selectedIds.length} READY`,
+      validation.ready ? "encounter-readiness ready" : "encounter-readiness",
+    );
+    const review = button("检查 MCP 载荷", () => {
+      draft.reviewOpen = true;
+      draft.submitError = "";
+      rerender();
+    }, "primary");
+    review.disabled = !validation.ready;
+    review.title = validation.ready ? "查看将提交的精确载荷" : "先处理全部部署错误";
+    foot.append(
+      button("取消并保留草稿", () => {
+        draft.plannerOpen = false;
+        draft.reviewOpen = false;
+        rerender();
+      }),
+      text(
+        "span",
+        "本地提示不裁定移动或落点合法性；最终结果始终由 D&D MCP 校验。",
+        "small muted encounter-authority-note",
+      ),
+      readiness,
+      review,
+    );
+    planner.append(source, workspace, foot);
+    if (draft.reviewOpen) planner.append(buildEncounterReview(draft, templates, rerender));
+    return planner;
+  }
+
+  function buildEncounterMapSource(draft, templates, rerender) {
+    const section = text("fieldset", "", "encounter-map-source");
+    section.append(text("legend", "地图权威 / 五尺方格"));
+    const templateLabel = text("label", "", "encounter-source-option");
+    const templateRadio = document.createElement("input");
+    templateRadio.type = "radio";
+    templateRadio.name = "map_authority";
+    templateRadio.value = "template";
+    templateRadio.checked = draft.sourceKind === "template";
+    templateRadio.disabled = templates.length === 0;
+    templateRadio.onchange = () => {
+      draft.sourceKind = "template";
+      draft.templateId = draft.templateId || templates[0]?.id || "";
+      seedEncounterPlacements(draft, templates, { reset: true });
+      draft.submitError = "";
+      rerender();
+    };
+    const templateSelect = document.createElement("select");
+    templateSelect.setAttribute("aria-label", "模块战斗地图模板");
+    templateSelect.disabled = !templateRadio.checked || templates.length === 0;
+    if (!templates.length) {
+      const option = text("option", "当前场景没有可用模板");
+      option.value = "";
+      templateSelect.append(option);
+    }
+    for (const template of templates) {
+      const option = text(
+        "option",
+        `${template.title} · ${template.width}×${template.height} 格`,
+      );
+      option.value = template.id;
+      option.selected = template.id === draft.templateId;
+      templateSelect.append(option);
+    }
+    templateSelect.onchange = () => {
+      draft.templateId = templateSelect.value;
+      draft.cursor = { x: 0, y: 0 };
+      seedEncounterPlacements(draft, templates, { reset: true });
+      draft.submitError = "";
+      rerender();
+    };
+    templateLabel.append(templateRadio, text("span", "模块模板"), templateSelect);
+
+    const overrideLabel = text("label", "", "encounter-source-option");
+    const overrideRadio = document.createElement("input");
+    overrideRadio.type = "radio";
+    overrideRadio.name = "map_authority";
+    overrideRadio.value = "override";
+    overrideRadio.checked = draft.sourceKind === "override";
+    overrideRadio.onchange = () => {
+      draft.sourceKind = "override";
+      draft.cursor = { x: 0, y: 0 };
+      seedEncounterPlacements(draft, templates, { reset: true });
+      draft.submitError = "";
+      rerender();
+    };
+    const dimensions = text("span", "", "encounter-dimensions");
+    for (const [field, label] of [["width", "宽"], ["height", "高"]]) {
+      const input = document.createElement("input");
+      input.type = "number";
+      input.min = "1";
+      input.max = "200";
+      input.step = "1";
+      input.value = draft.override[field];
+      input.disabled = !overrideRadio.checked;
+      input.setAttribute("aria-label", `${label}度（格）`);
+      input.onchange = () => {
+        draft.override[field] = Number(input.value);
+        draft.cursor = { x: 0, y: 0 };
+        seedEncounterPlacements(draft, templates, { reset: true });
+        draft.submitError = "";
+        rerender();
+      };
+      dimensions.append(text("span", label, "small muted"), input);
+    }
+    dimensions.append(text("span", "格 · 5 ft/格", "small muted"));
+    overrideLabel.append(overrideRadio, text("span", "临时空白图"), dimensions);
+    const map = mapForEncounter(draft, templates);
+    const context = text(
+      "p",
+      map && Number.isInteger(map.width) && Number.isInteger(map.height)
+        ? `${map.width}×${map.height} 格 · ${map.width * 5}×${map.height * 5} ft · 当前 MCP revision ${state.panel?.revision ?? "—"}`
+        : `尺寸待修正 · 当前 MCP revision ${state.panel?.revision ?? "—"}`,
+      "small muted encounter-map-context",
+    );
+    section.append(templateLabel, overrideLabel, context);
+    return section;
+  }
+
+  function buildEncounterReadinessRail(draft, templates, validation, rerender) {
+    const rail = text("aside", "", "encounter-readiness-rail");
+    rail.append(
+      text("span", "ROSTER // READINESS", "encounter-kicker"),
+      text("p", "选择角色，再拖动、点按方格或直接输入坐标。", "small muted"),
+    );
+    for (const actor of draft.actors) {
+      const selected = draft.selectedIds.includes(actor.id);
+      const issues = validation.byActor[actor.id] || [];
+      const position = draft.placements[actor.id];
+      const row = text(
+        "div",
+        "",
+        `encounter-roster-row${draft.activeActorId === actor.id ? " active" : ""}${issues.length ? " invalid" : ""}`,
+      );
+      const head = text("div", "", "encounter-roster-head");
+      const check = document.createElement("input");
+      check.type = "checkbox";
+      check.checked = selected;
+      check.setAttribute("aria-label", `${actor.name} 参战`);
+      check.onchange = () => {
+        toggleEncounterActor(draft, actor.id, check.checked);
+        if (check.checked) seedEncounterPlacements(draft, templates);
+        rerender();
+      };
+      const choose = button(actor.name, () => {
+        draft.activeActorId = actor.id;
+        draft.submitError = "";
+        rerender();
+      }, "encounter-actor-select");
+      choose.setAttribute("aria-label", `选择 ${actor.name} 进行部署`);
+      choose.title = "选择后可点按、拖放或使用键盘部署";
+      choose.disabled = !selected;
+      const stateLabel = text(
+        "span",
+        !selected ? "STANDBY" : issues.length ? "ERROR" : "PLACED",
+        issues.length ? "encounter-actor-state error" : "encounter-actor-state",
+      );
+      head.append(check, choose, stateLabel);
+      row.append(head);
+      if (selected) {
+        const coords = text("div", "", "encounter-coordinate-inputs");
+        for (const axis of ["x", "y"]) {
+          const label = text("label", axis.toUpperCase());
+          const input = document.createElement("input");
+          input.type = "number";
+          input.step = "1";
+          input.min = "0";
+          input.value = position?.[axis] ?? "";
+          input.setAttribute("aria-label", `${actor.name} ${axis.toUpperCase()} 坐标`);
+          input.onchange = () => {
+            const next = {
+              x: axis === "x" ? input.value : draft.placements[actor.id]?.x,
+              y: axis === "y" ? input.value : draft.placements[actor.id]?.y,
             };
-            payload.battle_map_override_reason = "由 DM 在 Web 战斗面板创建的临时空白网格";
-            payload.participant_config = [];
-            for (let index = 0; index < ids.length; index++) {
-              const id = ids[index];
-              const raw = prompt(`${combatantName(id)} 的起始坐标 x,y`, `${index},0`);
-              if (raw === null) return;
-              const [x, y] = raw.split(",").map(Number);
-              if (
-                !Number.isInteger(x) ||
-                !Number.isInteger(y) ||
-                x < 0 ||
-                y < 0 ||
-                x >= width ||
-                y >= height
-              ) {
-                return toast(`${combatantName(id)} 的坐标无效`);
-              }
-              payload.participant_config.push({ actor_id: id, position: { x, y } });
-            }
+            placeEncounterActor(draft, actor.id, next.x, next.y);
+            rerender();
+          };
+          label.append(input);
+          coords.append(label);
+        }
+        const clear = button("撤下", () => {
+          delete draft.placements[actor.id];
+          draft.submitError = "";
+          rerender();
+        });
+        clear.disabled = !position;
+        coords.append(clear);
+        row.append(coords);
+        row.append(
+          text(
+            "p",
+            issues.length ? issues.join("；") : `已部署于 ${position.x},${position.y}`,
+            issues.length ? "encounter-actor-issues error" : "encounter-actor-issues small muted",
+          ),
+        );
+      }
+      rail.append(row);
+    }
+    for (const message of validation.global) {
+      rail.append(text("p", message, "error encounter-global-error"));
+    }
+    return rail;
+  }
+
+  function buildEncounterBoard(draft, templates, validation, rerender) {
+    const section = text("section", "", "encounter-deployment-board");
+    const head = text("header", "", "encounter-board-head");
+    head.append(
+      text("span", "DEPLOYMENT BOARD", "encounter-kicker"),
+      text(
+        "span",
+        draft.activeActorId
+          ? `当前部署：${draft.actors.find((actor) => actor.id === draft.activeActorId)?.name || draft.activeActorId}`
+          : "请在右侧选择参战者",
+        "small muted",
+      ),
+    );
+    const wrap = text("div", "", "encounter-board-wrap");
+    const canvas = document.createElement("canvas");
+    canvas.className = "encounter-board";
+    canvas.tabIndex = 0;
+    canvas.setAttribute("role", "application");
+    canvas.setAttribute("aria-label", "遭遇部署坐标网格");
+    canvas.setAttribute("aria-describedby", "encounter-board-status");
+    canvas.style.touchAction = "none";
+    const status = text(
+      "p",
+      "方向键移动光标，Enter 部署当前角色；Delete 撤下。",
+      "encounter-board-status",
+    );
+    status.id = "encounter-board-status";
+    status.setAttribute("aria-live", "polite");
+    wrap.append(canvas);
+    section.append(head, wrap, status);
+    let dragPreview = null;
+    const draw = () => drawEncounterBoard(canvas, draft, validation, dragPreview);
+    requestAnimationFrame(draw);
+    let draggingActor = "";
+    const updateDragPreview = (event) => {
+      const pointer = encounterBoardPointer(event, canvas, validation.map);
+      if (!pointer || !draggingActor) return null;
+      const feedback = encounterPlacementFeedback(
+        draft,
+        templates,
+        draggingActor,
+        pointer,
+      );
+      dragPreview = { actorId: draggingActor, cell: pointer, feedback };
+      if (pointer.inBounds) draft.cursor = { x: pointer.x, y: pointer.y };
+      const actor = draft.actors.find((item) => item.id === draggingActor);
+      status.textContent = feedback.valid
+        ? `${actor?.name || draggingActor} → ${pointer.x},${pointer.y} · 松开以部署`
+        : `${actor?.name || draggingActor} → ${pointer.x},${pointer.y} · ${feedback.issues.join("；")}（本地非权威提示）`;
+      draw();
+      return pointer;
+    };
+    canvas.onpointerdown = (event) => {
+      const cell = encounterBoardPointer(event, canvas, validation.map);
+      if (!cell?.inBounds) return;
+      const placed = draft.selectedIds.find((id) => {
+        const position = draft.placements[id];
+        return position?.x === cell.x && position?.y === cell.y;
+      });
+      draggingActor = placed || draft.activeActorId;
+      if (draggingActor) draft.activeActorId = draggingActor;
+      draft.cursor = { x: cell.x, y: cell.y };
+      canvas.setPointerCapture?.(event.pointerId);
+      if (draggingActor) updateDragPreview(event);
+      else status.textContent = `坐标 ${cell.x},${cell.y}；请先从 readiness rail 选择参战者`;
+    };
+    canvas.onpointermove = (event) => {
+      if (draggingActor) updateDragPreview(event);
+    };
+    canvas.onpointerup = (event) => {
+      const cell = updateDragPreview(event);
+      const actorIdValue = draggingActor;
+      const feedback = dragPreview?.feedback;
+      if (cell && actorIdValue && feedback?.valid) {
+        placeEncounterActor(draft, actorIdValue, cell.x, cell.y);
+        status.textContent = `已将 ${draft.actors.find((actor) => actor.id === actorIdValue)?.name || actorIdValue} 部署于 ${cell.x},${cell.y}`;
+      }
+      draggingActor = "";
+      dragPreview = null;
+      if (cell && actorIdValue && feedback?.valid) rerender();
+      else draw();
+    };
+    canvas.onpointercancel = () => {
+      draggingActor = "";
+      dragPreview = null;
+      status.textContent = "拖动已取消；原部署坐标保持不变。";
+      draw();
+    };
+    canvas.onfocus = () => {
+      if (!draft.cursor) draft.cursor = { x: 0, y: 0 };
+      draw();
+    };
+    canvas.onkeydown = (event) => {
+      const navigation = new Set([
+        "ArrowLeft",
+        "ArrowRight",
+        "ArrowUp",
+        "ArrowDown",
+        "Home",
+        "End",
+      ]);
+      if (navigation.has(event.key) && validation.map) {
+        event.preventDefault();
+        draft.cursor = moveEncounterCursor(draft.cursor, event.key, validation.map);
+        status.textContent = `坐标 ${draft.cursor.x},${draft.cursor.y}`;
+        draw();
+      } else if ((event.key === "Enter" || event.key === " ") && draft.activeActorId) {
+        event.preventDefault();
+        const feedback = encounterPlacementFeedback(
+          draft,
+          templates,
+          draft.activeActorId,
+          draft.cursor,
+        );
+        if (feedback.valid) {
+          placeEncounterActor(draft, draft.activeActorId, draft.cursor.x, draft.cursor.y);
+          rerender();
+        } else {
+          status.textContent = `${feedback.issues.join("；")}（本地非权威提示，最终由 MCP 校验）`;
+          draw();
+        }
+      } else if ((event.key === "Delete" || event.key === "Backspace") && draft.activeActorId) {
+        event.preventDefault();
+        delete draft.placements[draft.activeActorId];
+        draft.submitError = "";
+        rerender();
+      }
+    };
+    return section;
+  }
+
+  function encounterBoardMetrics(canvas, map) {
+    if (!map || !Number.isInteger(map.width) || !Number.isInteger(map.height)) return null;
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const width = Math.max(1, Math.round(rect.width * dpr));
+    const height = Math.max(1, Math.round(rect.height * dpr));
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
+    const cell = Math.max(3, Math.min(canvas.width / map.width, canvas.height / map.height));
+    return {
+      dpr,
+      cell,
+      offsetX: (canvas.width - cell * map.width) / 2,
+      offsetY: (canvas.height - cell * map.height) / 2,
+    };
+  }
+
+  function encounterBoardPointer(event, canvas, map) {
+    const metrics = encounterBoardMetrics(canvas, map);
+    if (!metrics) return null;
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.floor(
+      ((event.clientX - rect.left) * metrics.dpr - metrics.offsetX) / metrics.cell,
+    );
+    const y = Math.floor(
+      ((event.clientY - rect.top) * metrics.dpr - metrics.offsetY) / metrics.cell,
+    );
+    return {
+      x,
+      y,
+      inBounds: x >= 0 && y >= 0 && x < map.width && y < map.height,
+    };
+  }
+
+  function drawEncounterToken(context, metrics, actor, position, options = {}) {
+    const centerX = metrics.offsetX + (position.x + 0.5) * metrics.cell;
+    const centerY = metrics.offsetY + (position.y + 0.5) * metrics.cell;
+    const radius = Math.max(4, metrics.cell * 0.34);
+    context.save();
+    context.globalAlpha = options.ghost ? 0.72 : 1;
+    context.beginPath();
+    context.arc(centerX, centerY, radius, 0, Math.PI * 2);
+    context.fillStyle = options.invalid ? "#a55043" : "#2f9a5c";
+    context.fill();
+    context.strokeStyle = options.active ? "#f1c66e" : "#e9eee9";
+    context.lineWidth = Math.max(1.5, metrics.dpr * 1.3);
+    if (options.ghost) context.setLineDash([4 * metrics.dpr, 3 * metrics.dpr]);
+    context.stroke();
+    if (metrics.cell >= 18) {
+      context.fillStyle = "#ffffff";
+      context.font = `${Math.max(9, Math.floor(metrics.cell * 0.28))}px system-ui`;
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      context.fillText(actor.name.slice(0, 2), centerX, centerY);
+    }
+    context.restore();
+  }
+
+  function drawEncounterBoard(canvas, draft, validation, dragPreview = null) {
+    const map = validation.map;
+    const metrics = encounterBoardMetrics(canvas, map);
+    if (!metrics) return;
+    const context = canvas.getContext("2d");
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = "#090d0b";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    const blocked = new Set((map.blockedCells || []).map((cell) => `${cell.x},${cell.y}`));
+    const difficult = new Set((map.difficultCells || []).map((cell) => `${cell.x},${cell.y}`));
+    for (let y = 0; y < map.height; y += 1) {
+      for (let x = 0; x < map.width; x += 1) {
+        const left = metrics.offsetX + x * metrics.cell;
+        const top = metrics.offsetY + y * metrics.cell;
+        const key = `${x},${y}`;
+        context.fillStyle = blocked.has(key)
+          ? "#513531"
+          : difficult.has(key)
+            ? "#5b542d"
+            : (x + y) % 2
+              ? "#101713"
+              : "#0d130f";
+        context.fillRect(left, top, metrics.cell, metrics.cell);
+        context.strokeStyle = "rgba(118, 154, 127, .34)";
+        context.lineWidth = Math.max(1, metrics.dpr * 0.55);
+        context.strokeRect(left, top, metrics.cell, metrics.cell);
+      }
+    }
+    for (const actor of draft.actors.filter((item) => draft.selectedIds.includes(item.id))) {
+      if (actor.id === dragPreview?.actorId) continue;
+      const position = draft.placements[actor.id];
+      if (!position || !Number.isInteger(position.x) || !Number.isInteger(position.y)) continue;
+      if (position.x < 0 || position.y < 0 || position.x >= map.width || position.y >= map.height) continue;
+      drawEncounterToken(context, metrics, actor, position, {
+        active: actor.id === draft.activeActorId,
+        invalid: (validation.byActor[actor.id] || []).length > 0,
+      });
+    }
+    if (dragPreview?.cell?.inBounds) {
+      const cell = dragPreview.cell;
+      const valid = dragPreview.feedback.valid;
+      context.save();
+      context.fillStyle = valid ? "rgba(80, 181, 111, .2)" : "rgba(191, 75, 62, .28)";
+      context.fillRect(
+        metrics.offsetX + cell.x * metrics.cell,
+        metrics.offsetY + cell.y * metrics.cell,
+        metrics.cell,
+        metrics.cell,
+      );
+      context.strokeStyle = valid ? "#70d18c" : "#ef7768";
+      context.lineWidth = Math.max(2, metrics.dpr * 1.5);
+      context.setLineDash([5 * metrics.dpr, 3 * metrics.dpr]);
+      context.strokeRect(
+        metrics.offsetX + cell.x * metrics.cell + 1,
+        metrics.offsetY + cell.y * metrics.cell + 1,
+        metrics.cell - 2,
+        metrics.cell - 2,
+      );
+      context.restore();
+      const actor = draft.actors.find((item) => item.id === dragPreview.actorId);
+      if (actor) {
+        drawEncounterToken(context, metrics, actor, cell, {
+          active: true,
+          ghost: true,
+          invalid: !valid,
+        });
+      }
+    }
+    if (draft.cursor && draft.cursor.x < map.width && draft.cursor.y < map.height) {
+      context.strokeStyle = "#f1c66e";
+      context.lineWidth = Math.max(2, metrics.dpr * 1.5);
+      context.strokeRect(
+        metrics.offsetX + draft.cursor.x * metrics.cell + 1,
+        metrics.offsetY + draft.cursor.y * metrics.cell + 1,
+        metrics.cell - 2,
+        metrics.cell - 2,
+      );
+    }
+  }
+
+  function buildEncounterReview(draft, templates, rerender) {
+    const drawer = text("section", "", "encounter-review-drawer");
+    drawer.setAttribute("role", "dialog");
+    drawer.setAttribute("aria-modal", "true");
+    drawer.setAttribute("aria-label", "检查遭遇 MCP 载荷");
+    const payload = buildEncounterPayload(draft, templates);
+    drawer.append(
+      text("span", "FINAL CHECK // SERVICE ACTION", "encounter-kicker"),
+      text("h3", "提交前精确载荷"),
+      text(
+        "p",
+        `草稿 revision ${draft.revisionAtDraft}；当前投影 revision ${state.panel?.revision ?? "—"}。服务会在提交时读取最新 revision，并由 MCP 最终校验。`,
+        "small muted",
+      ),
+    );
+    const preview = text(
+      "pre",
+      JSON.stringify({ action: "combat.start", payload }, null, 2),
+      "encounter-payload-preview",
+    );
+    drawer.append(preview);
+    if (draft.submitError) {
+      const error = text(
+        "p",
+        `D&D MCP 拒绝：${draft.submitError}。草稿未丢失，可返回修改后重试。`,
+        "error encounter-submit-error",
+      );
+      error.setAttribute("role", "alert");
+      drawer.append(error);
+    }
+    const actions = text("div", "", "encounter-review-actions");
+    actions.append(
+      button("返回部署", () => {
+        draft.reviewOpen = false;
+        rerender();
+      }),
+      button(
+        "确认并交给 D&D MCP",
+        async () => {
+          draft.submitError = "";
+          try {
+            await sendPanelAction("combat.start", payload);
+            state.encounterDraft = null;
+          } catch (error) {
+            draft.submitError = error.message;
+            draft.reviewOpen = true;
+            rerender();
           }
-          await sendPanelAction("combat.start", payload);
         },
         "primary",
       ),
     );
-    return form;
+    drawer.append(actions);
+    drawer.onkeydown = (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      draft.reviewOpen = false;
+      rerender();
+    };
+    requestAnimationFrame(() => drawer.querySelector("button")?.focus());
+    return drawer;
   }
 
   function buildGridShell() {
