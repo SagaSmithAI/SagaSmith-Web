@@ -41,6 +41,7 @@ def test_release_workflow_publishes_only_immutable_evidence():
 
     assert 'tags: ["v*"]' in workflow
     assert "--require-main" in workflow
+    assert "audit_components.py --remote --scope build --strict" in workflow
     assert "--provenance=mode=max" in workflow
     assert "--sbom=true" in workflow
     assert 'docker push "${IMAGE,,}:latest"' not in workflow

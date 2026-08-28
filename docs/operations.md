@@ -50,6 +50,11 @@ Verify downloaded Python artifacts with `SHA256SUMS`, verify their GitHub attest
 the container by digest recorded in `release-manifest.env`, not by a mutable tag. Keep environment
 secrets and deployment-specific configuration outside every release asset.
 
+The local `--fetch --strict` audit diagnoses sibling-worktree drift. The release workflow instead
+uses `--remote --scope build --strict`, which fetches commit history without blobs into temporary
+bare repositories and verifies that every enforced locked SHA is an ancestor of its declared
+remote branch. This keeps release evidence independent of developer checkout state.
+
 ## Single-server installation
 
 The server checks out this private repository beside the required open repositories. Copy

@@ -26,7 +26,7 @@ jobs:
         run: |
           uv sync --frozen --all-extras
           git fetch origin main:refs/remotes/origin/main
-          uv run python scripts/audit_components.py --fetch --strict
+          uv run python scripts/audit_components.py --remote --scope build --strict
           uv run python scripts/prepare_release.py \
             --tag "$GITHUB_REF_NAME" \
             --require-main \

@@ -6,6 +6,7 @@ import argparse
 import json
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -92,12 +93,78 @@ def inspect_component(
     return result
 
 
+def inspect_remote_component(component: dict[str, Any]) -> dict[str, Any]:
+    """Verify that a locked revision exists in the declared remote branch history."""
+    result = {
+        "repository": component["repository"],
+        "usage": component["usage"],
+        "enforced": bool(component["enforced"]),
+        "expected_branch": component["branch"],
+        "expected_revision": component["revision"],
+        "remote": component["remote"],
+        "status": "ok",
+        "problems": [],
+    }
+    problems: list[str] = result["problems"]
+    revision = component["revision"]
+    if revision == "self":
+        problems.append("self revisions cannot be verified remotely")
+        result["status"] = "drift"
+        return result
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="sagasmith-component-") as temporary:
+            checkout = Path(temporary)
+            subprocess.run(
+                ["git", "init", "--bare", "--quiet", str(checkout)],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "fetch",
+                    "--quiet",
+                    "--filter=blob:none",
+                    "--no-tags",
+                    component["remote"],
+                    f"refs/heads/{component['branch']}",
+                ],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            branch_head = _git(checkout, "rev-parse", "FETCH_HEAD")
+            subprocess.run(
+                ["git", "merge-base", "--is-ancestor", revision, branch_head],
+                cwd=checkout,
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            result["branch_head"] = branch_head
+    except (OSError, subprocess.CalledProcessError, ValueError) as exc:
+        problems.append(f"locked revision is not in the declared remote branch: {exc}")
+        result["status"] = "drift"
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
     parser.add_argument("--lock", type=Path, default=DEFAULT_LOCK)
     parser.add_argument("--scope", choices=("all", "build"), default="all")
     parser.add_argument("--fetch", action="store_true")
+    parser.add_argument(
+        "--remote",
+        action="store_true",
+        help="verify locked revisions against remote branch history without sibling clones",
+    )
     parser.add_argument("--strict", action="store_true")
     parser.add_argument("--json", action="store_true", dest="as_json")
     args = parser.parse_args()
@@ -106,10 +173,13 @@ def main() -> int:
     components = lock["components"]
     if args.scope == "build":
         components = [component for component in components if component["enforced"]]
-    rows = [
-        inspect_component(component, args.workspace.resolve(), fetch=args.fetch)
-        for component in components
-    ]
+    if args.remote:
+        rows = [inspect_remote_component(component) for component in components]
+    else:
+        rows = [
+            inspect_component(component, args.workspace.resolve(), fetch=args.fetch)
+            for component in components
+        ]
     summary = {
         "schema": lock["schema"],
         "audited_at": lock["audited_at"],
