@@ -1,0 +1,83 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+  packages: write
+  attestations: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          prune-cache: true
+      - name: Validate release inputs
+        run: |
+          uv sync --frozen --all-extras
+          git fetch origin main:refs/remotes/origin/main
+          uv run python scripts/audit_components.py --remote --scope build --strict
+          uv run python scripts/prepare_release.py \
+            --tag "$GITHUB_REF_NAME" \
+            --require-main \
+            --output release/release-manifest.json
+      - name: Build Python artifacts
+        run: SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" uv build
+      - name: Record artifact checksums
+        run: sha256sum dist/* > release/SHA256SUMS
+      - name: Build and push immutable container
+        id: image
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REGISTRY: ghcr.io
+          IMAGE: ghcr.io/${{ github.repository }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          echo "$GITHUB_TOKEN" | docker login "$REGISTRY" -u "$GITHUB_ACTOR" --password-stdin
+          docker buildx build \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.version=${version}" \
+            --metadata-file release/image-metadata.json \
+            --provenance=mode=max \
+            --sbom=true \
+            --tag "${IMAGE,,}:${version}" \
+            --tag "${IMAGE,,}:sha-${GITHUB_SHA}" \
+            --push \
+            .
+          digest="$(python -c 'import json; print(json.load(open("release/image-metadata.json"))["containerimage.digest"])')"
+          printf 'container=%s@%s\n' "${IMAGE,,}" "$digest" >> release/release-manifest.env
+          printf 'name=%s\n' "${IMAGE,,}" >> "$GITHUB_OUTPUT"
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+      - name: Attest Python artifacts
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: "dist/*"
+      - name: Attest container image
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+      - name: Publish immutable GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          dist/*
+          release/SHA256SUMS
+          release/release-manifest.json
+          release/release-manifest.env
+          --verify-tag
+          --generate-notes
+          --title "SagaSmith Web $GITHUB_REF_NAME"

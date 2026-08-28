@@ -167,6 +167,11 @@ Before a release, fetch and verify every sibling repository with:
 uv run python scripts/audit_components.py --fetch --strict
 ```
 
+Tagged releases are built only from protected `main` commits whose `v<version>` tag matches
+`pyproject.toml`. Each release includes Python artifacts, SHA-256 checksums, a machine-readable
+manifest, provenance, and an immutable GHCR image. The complete operator procedure is in
+[`docs/operations.md`](docs/operations.md#tagged-release-procedure).
+
 ## Non-negotiable boundary
 
 The hosted control-plane layer inside SagaSmith Web stores cloud workflow and projections only.

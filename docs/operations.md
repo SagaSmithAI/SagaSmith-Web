@@ -31,6 +31,30 @@ developer machine's absolute Agent checkout path. It also resolves through the e
 dependency cutoff declared in `component-versions.json`, so later package releases cannot silently
 change a regeneration.
 
+## Tagged release procedure
+
+SagaSmith Web releases use `v<project.version>` tags on commits already contained in `main`.
+The release workflow refuses a mismatched version, a non-main commit, a dirty candidate, a missing
+release input, or a component lock that fails strict remote verification. A successful release
+publishes the Python wheel and source distribution, SHA-256 checksums, a machine-readable release
+manifest, and two immutable GHCR image references (semantic version and commit SHA). GitHub records
+build provenance for the Python artifacts and container, while BuildKit attaches a software bill
+of materials and maximum-mode provenance to the registry image.
+
+Before creating the tag, merge the version bump and current component lock through the protected
+branch, confirm the required CI and CodeQL checks, and review the generated dependency lock. Create
+an annotated tag from the clean `main` checkout; never reuse or move a published tag. The workflow
+builds release artifacts from the tagged commit and does not deploy them to a live environment.
+
+Verify downloaded Python artifacts with `SHA256SUMS`, verify their GitHub attestation, and deploy
+the container by digest recorded in `release-manifest.env`, not by a mutable tag. Keep environment
+secrets and deployment-specific configuration outside every release asset.
+
+The local `--fetch --strict` audit diagnoses sibling-worktree drift. The release workflow instead
+uses `--remote --scope build --strict`, which fetches commit history without blobs into temporary
+bare repositories and verifies that every enforced locked SHA is an ancestor of its declared
+remote branch. This keeps release evidence independent of developer checkout state.
+
 ## Single-server installation
 
 The server checks out this private repository beside the required open repositories. Copy
