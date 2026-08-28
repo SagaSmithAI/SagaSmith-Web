@@ -2,8 +2,8 @@
 
 [Website](https://sagasmithai.github.io) · [Platform overview](https://github.com/SagaSmithAI/.github/blob/main/profile/README.md) · [Public content repository](https://github.com/SagaSmithAI/SagaSmith-dnd-content-library) · [All repositories](https://github.com/orgs/SagaSmithAI/repositories)
 
-Publicly visible source for **SagaSmith Web**, the hosted browser product. The repository keeps the
-name `SagaSmith-service` for now; repository visibility does not change the proprietary terms in
+Publicly visible source for **SagaSmith Web**, the hosted browser product, in
+`SagaSmithAI/SagaSmith-Web`. Repository visibility does not change the proprietary terms in
 [LICENSE](LICENSE). The product includes:
 
 ```text
@@ -60,10 +60,10 @@ MinIO/S3, hosted accounts, quota/billing, or Forge. Discord, QQ, and Telegram bo
 SagaSmith Agent, while Codex, Claude Code, OpenClaw, and other MCP-capable agents can connect
 directly to the selected domain MCP.
 
-The public product name is now SagaSmith Web. The repository remains `SagaSmith-service`, the
-Python package remains `sagasmith_service`, and the CLI remains `sagasmith-service`. See the
-[staged repository rename checklist](docs/repository-rename-checklist.md) before changing any of
-those implementation identifiers.
+The public product and repository name are SagaSmith Web. Historical implementation identifiers
+remain compatible: the Python package is `sagasmith_service`, the distribution and CLI are
+`sagasmith-service`, and the default Compose project is `sagasmith-service`. See the
+[repository rename record](docs/repository-rename-checklist.md) before changing those identifiers.
 
 ## Verified integration baseline
 

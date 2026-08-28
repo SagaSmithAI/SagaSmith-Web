@@ -211,4 +211,4 @@ while the latter still needs a separate quantitative gate before changing author
 ordering. `activity_callback` should remain synchronous unless its worker-pool saturation, rather
 than event-loop lag, is independently demonstrated. Low-frequency admin/community CRUD remains on
 the sync engine. The remaining acceptance criteria are tracked in
-[#22](https://github.com/SagaSmithAI/SagaSmith-service/issues/22).
+[#22](https://github.com/SagaSmithAI/SagaSmith-Web/issues/22).
