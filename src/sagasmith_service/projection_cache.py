@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sagasmith_service.models import CampaignPanelProjection
+from sagasmith_service.models import CampaignPanelProjection, now_utc
 
 PANEL_PROJECTION_SCHEMA_VERSION = 1
 
@@ -17,9 +18,9 @@ async def load_panel_projection(
     audience_key: str,
     source_revision: int,
     authorization_epoch: int,
+    max_age_seconds: int | None = None,
 ) -> dict[str, Any] | None:
-    item = await session.scalar(
-        select(CampaignPanelProjection).where(
+    statement = select(CampaignPanelProjection).where(
             CampaignPanelProjection.campaign_id == campaign_id,
             CampaignPanelProjection.audience_key == audience_key,
             CampaignPanelProjection.source_revision == source_revision,
@@ -27,7 +28,12 @@ async def load_panel_projection(
             CampaignPanelProjection.projection_schema_version
             == PANEL_PROJECTION_SCHEMA_VERSION,
         )
-    )
+    if max_age_seconds is not None:
+        statement = statement.where(
+            CampaignPanelProjection.updated_at
+            >= now_utc() - timedelta(seconds=max_age_seconds)
+        )
+    item = await session.scalar(statement)
     return dict(item.payload) if item is not None else None
 
 

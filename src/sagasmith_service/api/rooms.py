@@ -53,6 +53,10 @@ from sagasmith_service.observability import (
     ROOM_PROJECTION_BATCH_SECONDS,
     ROOM_PROJECTION_JOBS,
 )
+from sagasmith_service.projection_cache import (
+    load_panel_projection,
+    store_panel_projection,
+)
 from sagasmith_service.quota import QuotaExceededError, release, reserve, settle
 from sagasmith_service.room_activity import RoomActivitySubmission, room_activity_contract
 from sagasmith_service.room_turn import (
@@ -76,6 +80,7 @@ from sagasmith_service.schemas import (
 router = APIRouter(prefix="/api/campaigns/{campaign_id}/room", tags=["campaign-room"])
 
 _ROOM_PROJECTION_CONCURRENCY = 16
+_PANEL_PROJECTION_MAX_AGE_SECONDS = 30
 _JobT = TypeVar("_JobT")
 _ResultT = TypeVar("_ResultT")
 
@@ -2073,6 +2078,20 @@ async def panel_state(
     if campaign is None:
         raise ValueError("campaign projection not found")
     membership_role = membership.role
+    authorization_epoch = membership.authorization_epoch
+    audience_key = principal_id
+    cached_value = await load_panel_projection(
+        session,
+        campaign_id=campaign_id,
+        audience_key=audience_key,
+        source_revision=campaign.mcp_revision,
+        authorization_epoch=authorization_epoch,
+        max_age_seconds=_PANEL_PROJECTION_MAX_AGE_SECONDS,
+    )
+    if cached_value is not None:
+        if known_revision == campaign.mcp_revision:
+            return {"not_modified": True, "revision": campaign.mcp_revision}
+        return cached_value
     runtime = _runtime_for_system(request, campaign.system_id)
     await session.rollback()
     try:
@@ -2084,10 +2103,33 @@ async def panel_state(
     except RuntimeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     if value.get("not_modified"):
+        current_revision = int(value.get("revision") or known_revision or 0)
+        campaign = await session.get(CampaignProjection, campaign_id)
+        if campaign is not None and current_revision > campaign.mcp_revision:
+            campaign.mcp_revision = current_revision
+            await session.commit()
+        else:
+            await session.rollback()
         return {
             "not_modified": True,
-            "revision": int(value.get("revision") or known_revision or 0),
+            "revision": current_revision,
         }
+    refreshed_membership = await session.scalar(
+        select(CampaignMembershipProjection).where(
+            CampaignMembershipProjection.campaign_id == campaign_id,
+            CampaignMembershipProjection.user_id == user_id,
+            CampaignMembershipProjection.status == "active",
+        )
+    )
+    if (
+        refreshed_membership is None
+        or refreshed_membership.authorization_epoch != authorization_epoch
+    ):
+        await session.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "campaign authorization changed; retry the panel refresh",
+        )
     bindings = (
         await session.scalars(
             select(ActorBindingProjection).where(
@@ -2110,17 +2152,30 @@ async def panel_state(
         }
         for item in visible_bindings
     ]
-    await session.rollback()
     if membership_role not in {"owner", "dm"}:
         value = dict(value)
         value["current_module"] = _without_encounter_map_authority(
             value.get("current_module")
         )
-    return {
+    projected_value = {
         **value,
         "membership": {"role": membership_role, "user_id": user_id},
         "actor_bindings": binding_views,
     }
+    source_revision = int(value.get("revision") or campaign.mcp_revision)
+    campaign = await session.get(CampaignProjection, campaign_id)
+    if campaign is not None:
+        campaign.mcp_revision = source_revision
+    await store_panel_projection(
+        session,
+        campaign_id=campaign_id,
+        audience_key=audience_key,
+        source_revision=source_revision,
+        authorization_epoch=authorization_epoch,
+        payload=projected_value,
+    )
+    await session.commit()
+    return projected_value
 
 
 @router.get("/combat/render")
