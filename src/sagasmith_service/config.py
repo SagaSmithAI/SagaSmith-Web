@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     module_worker_poll_seconds: float = 1.0
     module_worker_lease_seconds: int = 900
     module_worker_concurrency: int = 2
+    module_worker_io_concurrency: int = Field(default=2, ge=1, le=64)
     module_worker_metrics_port: int = Field(default=9101, ge=1024, le=65_535)
     module_run_retry_seconds: int = 15
     bootstrap_admin_email: str = ""
@@ -57,6 +58,12 @@ class Settings(BaseSettings):
     object_bucket: str = "sagasmith-private"
     object_access_key: str = ""
     object_secret_key: SecretStr = SecretStr("")
+    combat_render_cache_entries: int = Field(default=8, ge=1, le=4096)
+    combat_render_cache_max_bytes: int = Field(
+        default=64 * 1024 * 1024, ge=10 * 1024 * 1024
+    )
+    combat_render_concurrency: int = Field(default=2, ge=1, le=64)
+    combat_render_cache_ttl_seconds: float = Field(default=30, gt=0, le=3600)
 
     @model_validator(mode="after")
     def validate_production_security(self) -> Settings:

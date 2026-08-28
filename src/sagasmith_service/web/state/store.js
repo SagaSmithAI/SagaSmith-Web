@@ -31,6 +31,8 @@ export const state = {
   selectedTargetId: null,
   gridDestination: null,
   gridCursor: null,
+  gridZoom: 1,
+  gridViewportCenter: null,
   encounterDraft: null,
   animatedResolutions: new Set(),
   hydratingRoom: false,

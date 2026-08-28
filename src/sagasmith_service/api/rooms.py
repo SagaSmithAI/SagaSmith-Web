@@ -27,6 +27,7 @@ from sagasmith_service.api.dependencies import (
     DbSession,
     StreamingCurrentUser,
 )
+from sagasmith_service.combat_render_cache import CombatRenderKey
 from sagasmith_service.integrations.agent import AgentRuntime
 from sagasmith_service.models import (
     ActorBindingProjection,
@@ -83,6 +84,17 @@ _ROOM_PROJECTION_CONCURRENCY = 16
 _PANEL_PROJECTION_MAX_AGE_SECONDS = 30
 _JobT = TypeVar("_JobT")
 _ResultT = TypeVar("_ResultT")
+
+
+class _InvalidCombatRenderError(RuntimeError):
+    pass
+
+
+def _etag_matches(value: str | None, current: str) -> bool:
+    if not value:
+        return False
+    candidates = {item.strip() for item in value.split(",")}
+    return "*" in candidates or current in candidates or f"W/{current}" in candidates
 
 
 async def _bounded_map_ordered(
@@ -2194,17 +2206,37 @@ async def public_combat_render(
     if campaign.system_id != "dnd5e":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "combat render unavailable")
     runtime = _campaign_runtime(request, session, campaign_id)
-    try:
+    render_key = CombatRenderKey(
+        campaign_id=campaign_id,
+        source_revision=campaign.mcp_revision,
+    )
+    # The runtime call can take seconds. End the read transaction before waiting
+    # so rendering never pins a database connection or snapshot.
+    session.rollback()
+
+    async def render_party_public():
         rendered = await runtime.render_public_combat(
             campaign_id=campaign_id,
             principal_id=user.principal_id,
         )
+        if rendered.metadata.get("audience_projection") != "party_public":
+            raise _InvalidCombatRenderError("invalid combat render projection")
+        return rendered
+
+    try:
+        cached = await request.app.state.combat_render_cache.get_or_render(
+            render_key,
+            render_party_public,
+        )
+    except _InvalidCombatRenderError as exc:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY, "invalid combat render projection"
+        ) from exc
     except (AttributeError, RuntimeError) as exc:
         raise HTTPException(
             status.HTTP_409_CONFLICT, "public combat render unavailable"
         ) from exc
-    if rendered.metadata.get("audience_projection") != "party_public":
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "invalid combat render projection")
+    rendered = cached.render
     checksum = rendered.metadata["image_checksum"]
     public_text_headers = {}
     for field, header, limit in (
@@ -2219,17 +2251,20 @@ async def public_combat_render(
             public_text_headers[header] = base64.urlsafe_b64encode(
                 value.encode("utf-8")
             ).decode("ascii").rstrip("=")
-    return Response(
-        content=rendered.content,
-        media_type="image/png",
-        headers={
-            "Cache-Control": "no-store",
-            "Content-Disposition": 'inline; filename="sagasmith-party-combat.png"',
-            "ETag": f'"{checksum}"',
-            "X-Content-Type-Options": "nosniff",
-            **public_text_headers,
-        },
-    )
+    headers = {
+        "Cache-Control": "private, max-age=0, must-revalidate",
+        "Content-Disposition": 'inline; filename="sagasmith-party-combat.png"',
+        "ETag": f'"{checksum}"',
+        "X-Content-Type-Options": "nosniff",
+        "X-SagaSmith-Combat-Artifact": cached.key.artifact_key,
+        "X-SagaSmith-Combat-Revision": str(cached.key.source_revision),
+        "X-SagaSmith-Combat-Projection": cached.key.visibility,
+        "X-SagaSmith-Combat-Renderer": cached.key.renderer_version,
+        **public_text_headers,
+    }
+    if _etag_matches(request.headers.get("If-None-Match"), headers["ETag"]):
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
+    return Response(content=rendered.content, media_type="image/png", headers=headers)
 
 
 @router.get("/characters/{actor_id}")

@@ -376,6 +376,44 @@ class StreamableHttpCocRuntime:
             raise RuntimeError("CoC MCP returned a character outside the campaign")
         return character
 
+    async def get_character_cards(
+        self,
+        *,
+        campaign_id: str,
+        character_ids: list[str],
+        principal_id: str,
+    ) -> list[dict[str, Any]]:
+        """Resolve a bounded combat roster with one audience-scoped MCP query."""
+
+        requested = list(dict.fromkeys(str(item) for item in character_ids if str(item)))
+        if len(requested) != len(character_ids):
+            raise RuntimeError("CoC combat participants must be unique character ids")
+        receipt = await self._call(
+            "character_query",
+            {
+                "action": "list",
+                "campaign_id": campaign_id,
+                "principal_id": principal_id,
+            },
+            principal_id=principal_id,
+            campaign_id=campaign_id,
+        )
+        result = self._result(receipt)
+        visible = {
+            str(item.get("id") or item.get("character_id") or ""): item
+            for item in result.get("characters") or []
+            if isinstance(item, dict)
+        }
+        missing = [character_id for character_id in requested if character_id not in visible]
+        if missing:
+            raise RuntimeError("CoC MCP did not return every requested combat participant")
+        cards = [dict(visible[character_id]) for character_id in requested]
+        if any(
+            str(card.get("campaign_id") or campaign_id) != campaign_id for card in cards
+        ):
+            raise RuntimeError("CoC MCP returned a character outside the campaign")
+        return cards
+
     async def get_resolution_presentation(self, **arguments: Any) -> dict[str, Any]:
         receipt = await self._call(
             "resolution_presentation",
@@ -473,14 +511,14 @@ class StreamableHttpCocRuntime:
             str(item.get("actor_id") or ""): dict(item)
             for item in arguments.get("participant_config") or []
         }
+        cards = await self.get_character_cards(
+            campaign_id=arguments["campaign_id"],
+            character_ids=arguments["participant_ids"],
+            principal_id=arguments["principal_id"],
+        )
         participants: list[dict[str, Any]] = []
         revisions: dict[str, int] = {}
-        for actor_id in arguments["participant_ids"]:
-            card = await self.get_character_card(
-                campaign_id=arguments["campaign_id"],
-                character_id=actor_id,
-                principal_id=arguments["principal_id"],
-            )
+        for actor_id, card in zip(arguments["participant_ids"], cards, strict=True):
             revisions[actor_id] = int(card.get("revision") or 0)
             config = configs.get(actor_id, {})
             participant = {

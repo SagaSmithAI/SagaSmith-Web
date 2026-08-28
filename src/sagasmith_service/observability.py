@@ -73,6 +73,21 @@ ROOM_PROJECTION_JOBS = Histogram(
     _UPSTREAM_LABELS,
     buckets=(0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512),
 )
+COMBAT_RENDER_SECONDS = Histogram(
+    "sagasmith_combat_render_seconds",
+    "Latency of authoritative party-public combat render generation",
+    ["status"],
+)
+COMBAT_RENDER_CACHE_REQUESTS = Counter(
+    "sagasmith_combat_render_cache_requests_total",
+    "Combat render cache outcomes",
+    ["result"],
+)
+MODULE_BLOCKING_IO_SECONDS = Histogram(
+    "sagasmith_module_blocking_io_seconds",
+    "Module worker blocking storage and filesystem operation latency",
+    ["operation", "status"],
+)
 
 REALTIME_SUBSCRIPTIONS = Gauge(
     "sagasmith_realtime_subscriptions",
@@ -398,3 +413,18 @@ def observe_latency(
             status=status,
             transport=transport,
         ).observe(time.perf_counter() - started)
+
+
+@contextmanager
+def observe_combat_render(metric: Histogram) -> Iterator[None]:
+    """Observe render latency without adding campaign-sized metric labels."""
+
+    started = time.perf_counter()
+    status = "success"
+    try:
+        yield
+    except BaseException:
+        status = "error"
+        raise
+    finally:
+        metric.labels(status=status).observe(time.perf_counter() - started)

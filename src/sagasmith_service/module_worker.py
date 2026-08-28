@@ -7,10 +7,11 @@ import io
 import json
 import logging
 import socket
+from collections.abc import Callable
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from prometheus_client import Counter, start_http_server
 from sqlalchemy import select
@@ -31,8 +32,10 @@ from sagasmith_service.models import (
     UserNotification,
     now_utc,
 )
+from sagasmith_service.observability import MODULE_BLOCKING_IO_SECONDS
 from sagasmith_service.quota import QuotaExceededError, reserve, settle
 from sagasmith_service.quota import release as release_quota
+from sagasmith_service.realtime import install_transactional_outbox
 from sagasmith_service.storage import LocalPrivateStorage, S3PrivateStorage
 
 logger = logging.getLogger("sagasmith_service.module_worker")
@@ -53,6 +56,38 @@ RUNNING_PROJECT_STATUS = {
     "finalize": "finalizing",
     "install": "compiled",
 }
+_IoResult = TypeVar("_IoResult")
+
+
+class BoundedBlockingIo:
+    """Run storage/filesystem calls off-loop with process-local backpressure."""
+
+    def __init__(self, concurrency: int) -> None:
+        if concurrency < 1:
+            raise ValueError("module worker IO concurrency must be positive")
+        self._slots = asyncio.Semaphore(concurrency)
+
+    async def run(
+        self,
+        operation: str,
+        function: Callable[..., _IoResult],
+        /,
+        *args: Any,
+        **kwargs: Any,
+    ) -> _IoResult:
+        async with self._slots:
+            started = asyncio.get_running_loop().time()
+            status = "success"
+            try:
+                return await asyncio.to_thread(function, *args, **kwargs)
+            except BaseException:
+                status = "error"
+                raise
+            finally:
+                MODULE_BLOCKING_IO_SECONDS.labels(
+                    operation=operation,
+                    status=status,
+                ).observe(asyncio.get_running_loop().time() - started)
 
 
 def _unwrap(value: Any) -> Any:
@@ -144,6 +179,7 @@ class ModuleJobProcessor:
         settings: Settings,
         *,
         worker_id: str | None = None,
+        blocking_io: BoundedBlockingIo | None = None,
     ) -> None:
         self.factory = factory
         self.dnd = dnd_runtime
@@ -151,6 +187,9 @@ class ModuleJobProcessor:
         self.storage = storage
         self.settings = settings
         self.worker_id = worker_id or f"{socket.gethostname()}-{id(self)}"
+        self.blocking_io = blocking_io or BoundedBlockingIo(
+            settings.module_worker_io_concurrency
+        )
 
     def recover_expired(self) -> int:
         now = now_utc()
@@ -347,14 +386,22 @@ class ModuleJobProcessor:
             source_name = source.name
             storage_key = source.storage_key
             source_id = source.id
-            source_text = _source_text(self.storage, source)
+        source_text = await self.blocking_io.run(
+            "source.read", _source_text, self.storage, source
+        )
         payload: dict[str, Any] = {"title": project.title, "source_key": source_key}
         materialized: Path | None = None
         try:
             if source_text:
                 payload.update({"name": source_name, "content": source_text})
             else:
-                materialized = self.storage.materialize_source(storage_key, source_id, source_name)
+                materialized = await self.blocking_io.run(
+                    "source.materialize",
+                    self.storage.materialize_source,
+                    storage_key,
+                    source_id,
+                    source_name,
+                )
                 payload["source_path"] = str(materialized)
             receipt = await self.dnd.module_draft(
                 campaign_id=campaign_id,
@@ -365,7 +412,9 @@ class ModuleJobProcessor:
             )
         finally:
             if materialized is not None:
-                materialized.unlink(missing_ok=True)
+                await self.blocking_io.run(
+                    "source.cleanup", materialized.unlink, missing_ok=True
+                )
         with self.factory() as session:
             _, project, _ = self._entities(session, run_id)
             _sync_draft(project, receipt)
@@ -405,7 +454,9 @@ class ModuleJobProcessor:
             )
         return {"chunks": bounded_chunks, "package": _unwrap(package)}
 
-    def _store_generated_source(self, run_id: str, content: str, name: str) -> ModuleSource:
+    async def _store_generated_source(
+        self, run_id: str, content: str, name: str
+    ) -> ModuleSource:
         raw = content.encode("utf-8")
         with self.factory() as session:
             _, project, _ = self._entities(session, run_id)
@@ -430,12 +481,20 @@ class ModuleJobProcessor:
             )
             source_id = hashlib.sha256(f"{project.id}:{generation}".encode()).hexdigest()[:32]
             key = f"modules/{project.owner_user_id}/{project.id}/{source_id}.md"
-            digest, size = self.storage.put(
-                key,
-                io.BytesIO(raw),
-                max_bytes=self.settings.max_module_source_bytes,
-                content_type="text/markdown; charset=utf-8",
-            )
+            project_id = project.id
+            prior_source_ids = [item.id for item in prior_sources]
+        digest, size = await self.blocking_io.run(
+            "source.write",
+            self.storage.put,
+            key,
+            io.BytesIO(raw),
+            max_bytes=self.settings.max_module_source_bytes,
+            content_type="text/markdown; charset=utf-8",
+        )
+        with self.factory() as session:
+            _, project, _ = self._entities(session, run_id)
+            if project.id != project_id:
+                raise RuntimeError("Module run changed projects while storing generated source")
             item = ModuleSource(
                 id=source_id,
                 project_id=project.id,
@@ -452,7 +511,7 @@ class ModuleJobProcessor:
                 public_eligible=rights_basis != "reference_only",
                 metadata_json={
                     "run_id": run_id,
-                    "derived_from_source_ids": [item.id for item in prior_sources],
+                    "derived_from_source_ids": prior_source_ids,
                 },
             )
             session.add(item)
@@ -538,7 +597,9 @@ class ModuleJobProcessor:
         with self.factory() as session:
             _, project, _ = self._entities(session, run_id)
             source = self._current_source(session, project)
-            source_text = _source_text(self.storage, source)
+        source_text = await self.blocking_io.run(
+            "source.read", _source_text, self.storage, source
+        )
         evidence = {"current_source": source_text[:1_000_000]} if source_text else {}
         decision = await self._agent_json(
             run_id,
@@ -549,7 +610,7 @@ class ModuleJobProcessor:
         content = decision.get("canonical_source")
         if not isinstance(content, str) or len(content.strip()) < 200:
             raise RuntimeError("Generation decision is missing a complete canonical_source")
-        self._store_generated_source(run_id, content, "module.md")
+        await self._store_generated_source(run_id, content, "module.md")
         receipt = await self._start_current_source(run_id)
         decisions = decision.get("package_decisions")
         if isinstance(decisions, dict):
@@ -643,7 +704,7 @@ class ModuleJobProcessor:
                 project.final_checksum = None
                 project.finalization = {}
                 session.commit()
-        self._store_generated_source(run_id, content, "module-revision.md")
+        await self._store_generated_source(run_id, content, "module-revision.md")
         receipt = await self._start_current_source(run_id)
         decisions = decision.get("package_decisions")
         if isinstance(decisions, dict):
@@ -891,6 +952,7 @@ def _storage(settings: Settings) -> Any:
 
 async def run_workers(settings: Settings) -> None:
     start_http_server(settings.module_worker_metrics_port)
+    install_transactional_outbox()
     factory = make_session_factory(make_engine(settings.database_url))
     dnd = StreamableHttpDndRuntime(
         settings.dnd_mcp_url,
@@ -901,9 +963,17 @@ async def run_workers(settings: Settings) -> None:
         settings.agent_api_key.get_secret_value(),
         timeout_seconds=settings.agent_completion_timeout_seconds,
     )
+    storage = await asyncio.to_thread(_storage, settings)
+    blocking_io = BoundedBlockingIo(settings.module_worker_io_concurrency)
     processors = [
         ModuleJobProcessor(
-            factory, dnd, agent, _storage(settings), settings, worker_id=f"module-{i}"
+            factory,
+            dnd,
+            agent,
+            storage,
+            settings,
+            worker_id=f"module-{i}",
+            blocking_io=blocking_io,
         )
         for i in range(settings.module_worker_concurrency)
     ]

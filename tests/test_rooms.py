@@ -64,7 +64,7 @@ def add_player(client: TestClient, email: str, name: str) -> dict[str, Any]:
     return player
 
 
-def test_combat_render_is_party_public_no_store_and_membership_scoped(
+def test_combat_render_is_revision_cached_revalidated_and_membership_scoped(
     client: TestClient, dnd_runtime: FakeDndRuntime
 ) -> None:
     owner = register(client, "room-owner@example.com", "DM")
@@ -76,9 +76,15 @@ def test_combat_render_is_party_public_no_store_and_membership_scoped(
     assert rendered.status_code == 200
     assert rendered.content == expected
     assert rendered.headers["content-type"] == "image/png"
-    assert rendered.headers["cache-control"] == "no-store"
+    assert rendered.headers["cache-control"] == "private, max-age=0, must-revalidate"
     assert rendered.headers["x-content-type-options"] == "nosniff"
     assert rendered.headers["etag"] == f'"{hashlib.sha256(expected).hexdigest()}"'
+    assert rendered.headers["x-sagasmith-combat-revision"] == "1"
+    assert rendered.headers["x-sagasmith-combat-projection"] == "party_public"
+    assert rendered.headers["x-sagasmith-combat-renderer"] == "dnd-party-public-v1"
+    assert rendered.headers["x-sagasmith-combat-artifact"].startswith(
+        "campaign-1:1:party_public:default:native:"
+    )
     assert base64.urlsafe_b64decode(
         rendered.headers["x-sagasmith-combat-alt"] + "=="
     ).decode() == "石厅战斗网格；Aria 当前行动。"
@@ -90,6 +96,13 @@ def test_combat_render_is_party_public_no_store_and_membership_scoped(
         "campaign_id": "campaign-1",
         "principal_id": f"user:{owner['id']}",
     }
+    not_modified = client.get(
+        "/api/campaigns/campaign-1/room/combat/render",
+        headers={"If-None-Match": f'"unrelated", W/{rendered.headers["etag"]}'},
+    )
+    assert not_modified.status_code == 304
+    assert not not_modified.content
+    assert len([item for item in dnd_runtime.calls if item[0] == "combat_render_public"]) == 1
 
     register(client, "room-outsider@example.com", "Outsider")
     forbidden = client.get("/api/campaigns/campaign-1/room/combat/render")

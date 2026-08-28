@@ -1,14 +1,42 @@
 from __future__ import annotations
 
+import asyncio
+import threading
+import time
 from datetime import timedelta
 
 from conftest import FakeAgentRuntime, FakeDndRuntime
 from fastapi.testclient import TestClient
 
 from sagasmith_service.models import ArtifactRelease, ModuleRun, now_utc
-from sagasmith_service.module_worker import ModuleJobProcessor
+from sagasmith_service.module_worker import BoundedBlockingIo, ModuleJobProcessor
 
 PASSWORD = "correct horse battery staple"
+
+
+def test_module_blocking_io_runs_off_loop_with_bounded_concurrency() -> None:
+    async def exercise() -> None:
+        runner = BoundedBlockingIo(1)
+        event_loop_thread = threading.get_ident()
+        active = 0
+        maximum = 0
+
+        def blocking() -> int:
+            nonlocal active, maximum
+            active += 1
+            maximum = max(maximum, active)
+            time.sleep(0.01)
+            active -= 1
+            return threading.get_ident()
+
+        threads = await asyncio.gather(
+            runner.run("test.read", blocking),
+            runner.run("test.read", blocking),
+        )
+        assert all(thread_id != event_loop_thread for thread_id in threads)
+        assert maximum == 1
+
+    asyncio.run(exercise())
 
 
 def register(client: TestClient) -> dict:

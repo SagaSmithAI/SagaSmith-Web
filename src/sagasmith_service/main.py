@@ -36,6 +36,7 @@ from sagasmith_service.api.packs import router as packs_router
 from sagasmith_service.api.rooms import router as rooms_router
 from sagasmith_service.api.usage import router as usage_router
 from sagasmith_service.audit import bind_request_id, reset_request_id
+from sagasmith_service.combat_render_cache import CombatRenderCache
 from sagasmith_service.config import Settings, get_settings
 from sagasmith_service.database import (
     Base,
@@ -118,6 +119,7 @@ def create_app(
         try:
             yield
         finally:
+            await _app.state.combat_render_cache.aclose()
             await outbox_dispatcher.close()
             await realtime_hub.close()
             results = await asyncio.gather(
@@ -148,6 +150,12 @@ def create_app(
     app.state.session_factory = session_factory
     app.state.async_engine = async_engine
     app.state.async_session_factory = make_async_session_factory(async_engine)
+    app.state.combat_render_cache = CombatRenderCache(
+        max_entries=settings.combat_render_cache_entries,
+        max_bytes=settings.combat_render_cache_max_bytes,
+        concurrency=settings.combat_render_concurrency,
+        ttl_seconds=settings.combat_render_cache_ttl_seconds,
+    )
     auth_context_secret = settings.auth_context_secret.get_secret_value()
     app.state.dnd_runtime = dnd_runtime or StreamableHttpDndRuntime(
         settings.dnd_mcp_url,
