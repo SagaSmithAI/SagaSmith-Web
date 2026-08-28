@@ -2,7 +2,7 @@
 
 | Area | Required evidence |
 |---|---|
-| account | register/login/logout; duplicate email; revoked/expired session; admin separation |
+| account | register/current legal acceptance/login/logout; duplicate email; revoked/expired session; profile and password change; session inventory/revoke-others; non-admin deactivation; admin separation; desktop/mobile Chromium flow |
 | admission | owner campaign creation; idempotent retry; application approve/reject; invite expire/revoke/limit |
 | authority | MCP receipt before projection; player cannot review; actor bind/revoke; stale revision rejected |
 | room + Agent | shared ordered timeline; audience filtering; authenticated sender scope; per-principal session; chat without Agent; action quota settlement; retry same payload; payload mismatch conflict |
@@ -25,6 +25,11 @@
 Unit/API coverage in this repository is the fast gate. The dynamic-tool, phase, restore and native
 call rows require the real hosted Agent plus both system MCPs and cannot be replaced with fabricated tool
 results.
+
+The account browser smoke is hermetic: CI starts the test-mode FastAPI app with a temporary SQLite
+database and uses headless Chromium to exercise the shipped HTML, JavaScript, cookies, legal pages,
+password rotation, responsive account layout, and deactivation. It does not use a production host,
+real account, external model, or domain MCP.
 
 The container acceptance provider is deterministic but the host is real: it opens exposure as a
 authenticated principal, selects only the MCP matching the campaign `system_id`, searches and

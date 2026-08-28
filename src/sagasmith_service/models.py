@@ -46,6 +46,9 @@ class User(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(24), default="active", index=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    terms_accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    terms_version: Mapped[str | None] = mapped_column(String(24))
+    privacy_version: Mapped[str | None] = mapped_column(String(24))
 
     sessions: Mapped[list[UserSession]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
