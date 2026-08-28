@@ -50,6 +50,11 @@ def exposure_revision(payload: Any, fallback: int) -> int:
 
     if not isinstance(payload, dict):
         return fallback
+    receipt = payload.get(AUTH_CONTEXT_RECEIPT_META_KEY)
+    if isinstance(receipt, dict):
+        revision = receipt.get("revision")
+        if isinstance(revision, int) and not isinstance(revision, bool) and revision >= 0:
+            return revision
     current = payload.get("result", payload)
     if isinstance(current, dict):
         revision = current.get("revision")

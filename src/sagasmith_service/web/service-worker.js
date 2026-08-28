@@ -1,4 +1,4 @@
-const CACHE="sagasmith-shell-v10";
+const CACHE="sagasmith-shell-v11";
 const SHELL=[
   "/",
   "/styles.css",

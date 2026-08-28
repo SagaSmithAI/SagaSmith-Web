@@ -5,8 +5,8 @@ import binascii
 import hashlib
 import json
 import uuid
-from collections.abc import Callable, Mapping
-from contextlib import AsyncExitStack
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol, TypeVar
 
@@ -25,6 +25,8 @@ from sagasmith_service.observability import (
     MCP_INITIALIZE_SECONDS,
     MCP_TOOL_SECONDS,
     MCP_TRANSPORT_SETUP_SECONDS,
+    PANEL_SNAPSHOT_RESULTS,
+    PANEL_SNAPSHOT_SECONDS,
     observe_latency,
 )
 
@@ -138,7 +140,11 @@ class DndRuntime(Protocol):
     ) -> dict[str, Any]: ...
 
     async def get_panel_state(
-        self, *, campaign_id: str, principal_id: str
+        self,
+        *,
+        campaign_id: str,
+        principal_id: str,
+        known_revision: int | None = None,
     ) -> dict[str, Any]: ...
 
     async def render_public_combat(
@@ -358,21 +364,24 @@ class StreamableHttpDndRuntime:
         if missing:
             raise RuntimeError(f"D&D MCP is missing required tools: {', '.join(missing)}")
 
-    async def _call(
+    @asynccontextmanager
+    async def _request_session(
         self,
-        name: str,
-        arguments: dict[str, Any],
         *,
         exposure_principal: str,
         campaign_id: str | None,
-        result_parser: Callable[[Any], _ResultT] = _tool_payload,
-    ) -> _ResultT:
+        operation_class: str,
+    ) -> AsyncIterator[
+        Callable[[str, dict[str, Any], Callable[[Any], Any]], Awaitable[Any]]
+    ]:
+        """Open one request-local MCP session without sharing principal state."""
+
         try:
             async with AsyncExitStack() as stack:
                 with observe_latency(
                     MCP_TRANSPORT_SETUP_SECONDS,
                     system="dnd5e",
-                    operation_class="request",
+                    operation_class=operation_class,
                     transport="streamable_http",
                 ):
                     read, write, _ = await stack.enter_async_context(
@@ -382,7 +391,7 @@ class StreamableHttpDndRuntime:
                 with observe_latency(
                     MCP_INITIALIZE_SECONDS,
                     system="dnd5e",
-                    operation_class="request",
+                    operation_class=operation_class,
                     transport="streamable_http",
                 ):
                     await session.initialize()
@@ -392,11 +401,11 @@ class StreamableHttpDndRuntime:
                 )
                 authorization_epoch = 0
 
-                async def call(
+                async def raw_call(
                     tool_name: str,
                     tool_arguments: dict[str, Any],
                     parser: Callable[[Any], Any] = _tool_payload,
-                ):
+                ) -> Any:
                     nonlocal authorization_epoch
                     metadata = None
                     if self.auth_context_secret:
@@ -416,18 +425,21 @@ class StreamableHttpDndRuntime:
                         **({"meta": metadata} if metadata is not None else {}),
                     )
                     payload = parser(result)
-                    if isinstance(payload, DndCombatRender):
+                    epoch_payload = (
+                        payload.metadata if isinstance(payload, DndCombatRender) else payload
+                    )
+                    if tool_name == "exposure" or isinstance(
+                        epoch_payload.get(AUTH_CONTEXT_RECEIPT_META_KEY), Mapping
+                    ):
                         authorization_epoch = exposure_revision(
-                            payload.metadata, authorization_epoch
+                            epoch_payload, authorization_epoch
                         )
-                    else:
-                        authorization_epoch = exposure_revision(payload, authorization_epoch)
                     return payload
 
                 with observe_latency(
                     MCP_EXPOSURE_SECONDS,
                     system="dnd5e",
-                    operation_class="request",
+                    operation_class=operation_class,
                     transport="streamable_http",
                 ):
                     exposure_args: dict[str, Any] = {
@@ -436,48 +448,82 @@ class StreamableHttpDndRuntime:
                     }
                     if campaign_id is not None:
                         exposure_args["campaign_id"] = campaign_id
-                    await call("exposure", exposure_args)
-                    search = await call(
-                        "exposure",
-                        {
-                            "action": "search",
-                            "campaign_id": campaign_id,
-                            "principal_id": exposure_principal,
-                            "query": name,
-                        },
-                    )
-                    matched_tools = {
-                        str(item.get("tool_id") or "") for item in search.get("matches", [])
-                    }
-                    visible_tools = {str(item) for item in search.get("visible_tools", [])}
-                    if name not in matched_tools and name not in visible_tools:
-                        raise RuntimeError(
-                            f"D&D MCP does not expose {name!r} in the current context: {search}"
-                        )
-                    if name not in visible_tools:
-                        await call(
+                    await raw_call("exposure", exposure_args)
+
+                async def call(
+                    name: str,
+                    arguments: dict[str, Any],
+                    parser: Callable[[Any], Any] = _tool_payload,
+                ) -> Any:
+                    with observe_latency(
+                        MCP_EXPOSURE_SECONDS,
+                        system="dnd5e",
+                        operation_class=operation_class,
+                        transport="streamable_http",
+                    ):
+                        search = await raw_call(
                             "exposure",
                             {
-                                "action": "set",
+                                "action": "search",
                                 "campaign_id": campaign_id,
                                 "principal_id": exposure_principal,
-                                "add_tool_ids": [name],
+                                "query": name,
                             },
                         )
-                    listed = await session.list_tools()
-                    if name not in {tool.name for tool in listed.tools}:
-                        raise RuntimeError(
-                            f"D&D MCP did not publish {name!r} after exposure update"
-                        )
-                with observe_latency(
-                    MCP_TOOL_SECONDS,
-                    system="dnd5e",
-                    operation_class="request",
-                    transport="streamable_http",
-                ):
-                    return await call(name, arguments, result_parser)
+                        matched_tools = {
+                            str(item.get("tool_id") or "")
+                            for item in search.get("matches", [])
+                        }
+                        visible_tools = {
+                            str(item) for item in search.get("visible_tools", [])
+                        }
+                        if name not in matched_tools and name not in visible_tools:
+                            raise RuntimeError(
+                                f"D&D MCP does not expose {name!r} in the current context: "
+                                f"{search}"
+                            )
+                        if name not in visible_tools:
+                            await raw_call(
+                                "exposure",
+                                {
+                                    "action": "set",
+                                    "campaign_id": campaign_id,
+                                    "principal_id": exposure_principal,
+                                    "add_tool_ids": [name],
+                                },
+                            )
+                        listed = await session.list_tools()
+                        if name not in {tool.name for tool in listed.tools}:
+                            raise RuntimeError(
+                                f"D&D MCP did not publish {name!r} after exposure update"
+                            )
+                    with observe_latency(
+                        MCP_TOOL_SECONDS,
+                        system="dnd5e",
+                        operation_class=operation_class,
+                        transport="streamable_http",
+                    ):
+                        return await raw_call(name, arguments, parser)
+
+                yield call
         except Exception as exc:
             raise _runtime_error(exc) from exc
+
+    async def _call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        exposure_principal: str,
+        campaign_id: str | None,
+        result_parser: Callable[[Any], _ResultT] = _tool_payload,
+    ) -> _ResultT:
+        async with self._request_session(
+            exposure_principal=exposure_principal,
+            campaign_id=campaign_id,
+            operation_class="request",
+        ) as call:
+            return await call(name, arguments, result_parser)
 
     async def create_campaign(self, **arguments: Any) -> dict[str, Any]:
         return await self._call(
@@ -644,67 +690,97 @@ class StreamableHttpDndRuntime:
     async def get_panel_state(self, **arguments: Any) -> dict[str, Any]:
         campaign_id = arguments["campaign_id"]
         principal_id = arguments["principal_id"]
-        campaign_receipt = await self.get_campaign(
-            campaign_id=campaign_id, principal_id=principal_id
-        )
-        campaign = self._result(campaign_receipt)
-        phase = str(campaign.get("effective_game_phase") or "lobby")
-        party_receipt = await self._call(
-            "campaign_query",
-            {
-                "view": "party",
-                "payload": {"campaign_id": campaign_id},
-                "principal_id": principal_id,
-            },
-            exposure_principal=principal_id,
-            campaign_id=campaign_id,
-        )
-        characters_receipt = await self._call(
-            "character_query",
-            {
-                "view": "list",
-                "payload": {"campaign_id": campaign_id},
-                "principal_id": principal_id,
-            },
-            exposure_principal=principal_id,
-            campaign_id=campaign_id,
-        )
-        modules_receipt = await self._call(
-            "module_query",
-            {"campaign_id": campaign_id, "view": "list", "principal_id": principal_id},
-            exposure_principal=principal_id,
-            campaign_id=campaign_id,
-        )
-        current_module: Any = None
-        try:
-            current_receipt = await self._call(
-                "module_query",
-                {"campaign_id": campaign_id, "view": "current", "principal_id": principal_id},
+        known_revision = arguments.get("known_revision")
+        result_kind = "modified"
+        with observe_latency(
+            PANEL_SNAPSHOT_SECONDS,
+            system="dnd5e",
+            operation_class="panel_snapshot",
+            transport="streamable_http",
+        ):
+            async with self._request_session(
                 exposure_principal=principal_id,
                 campaign_id=campaign_id,
-            )
-            current_module = self._result(current_receipt)
-        except RuntimeError:
-            current_module = None
-        combat: Any = None
-        if phase == "combat":
-            combat_receipt = await self._call(
-                "combat_query",
-                {"campaign_id": campaign_id, "view": "status", "principal_id": principal_id},
-                exposure_principal=principal_id,
-                campaign_id=campaign_id,
-            )
-            combat = self._result(combat_receipt)
-        return {
-            "campaign": campaign,
-            "phase": phase,
-            "revision": int(campaign.get("revision") or campaign.get("campaign_revision") or 0),
-            "party": self._result(party_receipt),
-            "characters": self._result(characters_receipt),
-            "modules": self._result(modules_receipt),
-            "current_module": current_module,
-            "combat": combat,
-        }
+                operation_class="panel_snapshot",
+            ) as call:
+                campaign_receipt = await call(
+                    "campaign_query",
+                    {
+                        "view": "get",
+                        "payload": {"campaign_id": campaign_id},
+                        "principal_id": principal_id,
+                    },
+                )
+                campaign = self._result(campaign_receipt)
+                revision = int(
+                    campaign.get("revision") or campaign.get("campaign_revision") or 0
+                )
+                if known_revision is not None and revision == int(known_revision):
+                    result_kind = "not_modified"
+                    result = {"not_modified": True, "revision": revision}
+                else:
+                    phase = str(campaign.get("effective_game_phase") or "lobby")
+                    party_receipt = await call(
+                        "campaign_query",
+                        {
+                            "view": "party",
+                            "payload": {"campaign_id": campaign_id},
+                            "principal_id": principal_id,
+                        },
+                    )
+                    characters_receipt = await call(
+                        "character_query",
+                        {
+                            "view": "list",
+                            "payload": {"campaign_id": campaign_id},
+                            "principal_id": principal_id,
+                        },
+                    )
+                    modules_receipt = await call(
+                        "module_query",
+                        {
+                            "campaign_id": campaign_id,
+                            "view": "list",
+                            "principal_id": principal_id,
+                        },
+                    )
+                    current_module: Any = None
+                    try:
+                        current_receipt = await call(
+                            "module_query",
+                            {
+                                "campaign_id": campaign_id,
+                                "view": "current",
+                                "principal_id": principal_id,
+                            },
+                        )
+                        current_module = self._result(current_receipt)
+                    except RuntimeError:
+                        current_module = None
+                    combat: Any = None
+                    if phase == "combat":
+                        combat_receipt = await call(
+                            "combat_query",
+                            {
+                                "campaign_id": campaign_id,
+                                "view": "status",
+                                "principal_id": principal_id,
+                            },
+                        )
+                        combat = self._result(combat_receipt)
+                    result = {
+                        "not_modified": False,
+                        "campaign": campaign,
+                        "phase": phase,
+                        "revision": revision,
+                        "party": self._result(party_receipt),
+                        "characters": self._result(characters_receipt),
+                        "modules": self._result(modules_receipt),
+                        "current_module": current_module,
+                        "combat": combat,
+                    }
+        PANEL_SNAPSHOT_RESULTS.labels(system="dnd5e", result=result_kind).inc()
+        return result
 
     async def render_public_combat(self, **arguments: Any) -> DndCombatRender:
         campaign_id = arguments["campaign_id"]

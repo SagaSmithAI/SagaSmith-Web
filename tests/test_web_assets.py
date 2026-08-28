@@ -14,7 +14,7 @@ def test_browser_entry_loads_complete_precached_module_graph(client: TestClient)
 
     service_worker = client.get("/service-worker.js")
     assert service_worker.status_code == 200
-    assert 'const CACHE="sagasmith-shell-v10"' in service_worker.text
+    assert 'const CACHE="sagasmith-shell-v11"' in service_worker.text
 
     expected_modules = {
         "/assets/api/client.js",
@@ -85,6 +85,12 @@ def test_browser_entry_loads_complete_precached_module_graph(client: TestClient)
     )
     for feature in ("campaign", "forge", "identity", "module-studio"):
         assert f'/assets/{feature}/' not in room_sources
+    room_controller = client.get("/assets/room/controller.js").text
+    assert "panelRefreshPromise" in room_controller
+    assert "known_revision=" in room_controller
+    assert "sagasmith:panel-refresh" in room_controller
+    assert 'recordPanelRefresh("coalesced")' in room_controller
+    assert "}, 60000);" in entry
 
     visiting: set[str] = set()
     complete: set[str] = set()

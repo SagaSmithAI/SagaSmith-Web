@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Mapping
-from contextlib import AsyncExitStack
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
 import httpx
@@ -21,6 +21,8 @@ from sagasmith_service.observability import (
     MCP_INITIALIZE_SECONDS,
     MCP_TOOL_SECONDS,
     MCP_TRANSPORT_SETUP_SECONDS,
+    PANEL_SNAPSHOT_RESULTS,
+    PANEL_SNAPSHOT_SECONDS,
     observe_latency,
 )
 
@@ -144,20 +146,22 @@ class StreamableHttpCocRuntime:
             raise RuntimeError("CoC MCP returned no structured result")
         return current
 
-    async def _call(
+    @asynccontextmanager
+    async def _request_session(
         self,
-        name: str,
-        arguments: dict[str, Any],
         *,
         principal_id: str,
         campaign_id: str | None,
-    ) -> dict[str, Any]:
+        operation_class: str,
+    ) -> AsyncIterator[Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]]:
+        """Open one request-local MCP session without sharing principal state."""
+
         try:
             async with AsyncExitStack() as stack:
                 with observe_latency(
                     MCP_TRANSPORT_SETUP_SECONDS,
                     system="coc7e",
-                    operation_class="request",
+                    operation_class=operation_class,
                     transport="streamable_http",
                 ):
                     read, write, _ = await stack.enter_async_context(
@@ -167,7 +171,7 @@ class StreamableHttpCocRuntime:
                 with observe_latency(
                     MCP_INITIALIZE_SECONDS,
                     system="coc7e",
-                    operation_class="request",
+                    operation_class=operation_class,
                     transport="streamable_http",
                 ):
                     await session.initialize()
@@ -177,7 +181,9 @@ class StreamableHttpCocRuntime:
                 )
                 authorization_epoch = 0
 
-                async def call(tool_name: str, tool_arguments: dict[str, Any]):
+                async def raw_call(
+                    tool_name: str, tool_arguments: dict[str, Any]
+                ) -> dict[str, Any]:
                     nonlocal authorization_epoch
                     metadata = None
                     if self.auth_context_secret:
@@ -197,13 +203,16 @@ class StreamableHttpCocRuntime:
                         **({"meta": metadata} if metadata is not None else {}),
                     )
                     payload = _tool_payload(result)
-                    authorization_epoch = exposure_revision(payload, authorization_epoch)
+                    if tool_name == "exposure" or isinstance(
+                        payload.get(AUTH_CONTEXT_RECEIPT_META_KEY), Mapping
+                    ):
+                        authorization_epoch = exposure_revision(payload, authorization_epoch)
                     return payload
 
                 with observe_latency(
                     MCP_EXPOSURE_SECONDS,
                     system="coc7e",
-                    operation_class="request",
+                    operation_class=operation_class,
                     transport="streamable_http",
                 ):
                     exposure: dict[str, Any] = {
@@ -212,9 +221,18 @@ class StreamableHttpCocRuntime:
                     }
                     if campaign_id is not None:
                         exposure["campaign_id"] = campaign_id
-                    await call("exposure", exposure)
-                    if name != "exposure":
-                        search = await call(
+                    await raw_call("exposure", exposure)
+
+                async def call(
+                    name: str, arguments: dict[str, Any]
+                ) -> dict[str, Any]:
+                    with observe_latency(
+                        MCP_EXPOSURE_SECONDS,
+                        system="coc7e",
+                        operation_class=operation_class,
+                        transport="streamable_http",
+                    ):
+                        search = await raw_call(
                             "exposure",
                             {
                                 "action": "search",
@@ -225,7 +243,7 @@ class StreamableHttpCocRuntime:
                         )
                         visible = {str(item) for item in search.get("visible_tools", [])}
                         if name not in visible:
-                            await call(
+                            await raw_call(
                                 "exposure",
                                 {
                                     "action": "set",
@@ -237,17 +255,34 @@ class StreamableHttpCocRuntime:
                         listed = await session.list_tools()
                         if name not in {tool.name for tool in listed.tools}:
                             raise RuntimeError(f"CoC MCP did not expose {name!r}")
-                with observe_latency(
-                    MCP_TOOL_SECONDS,
-                    system="coc7e",
-                    operation_class="request",
-                    transport="streamable_http",
-                ):
-                    return await call(name, arguments)
+                    with observe_latency(
+                        MCP_TOOL_SECONDS,
+                        system="coc7e",
+                        operation_class=operation_class,
+                        transport="streamable_http",
+                    ):
+                        return await raw_call(name, arguments)
+
+                yield call
         except RuntimeError:
             raise
         except Exception as exc:
             raise RuntimeError("CoC MCP request failed") from exc
+
+    async def _call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        principal_id: str,
+        campaign_id: str | None,
+    ) -> dict[str, Any]:
+        async with self._request_session(
+            principal_id=principal_id,
+            campaign_id=campaign_id,
+            operation_class="request",
+        ) as call:
+            return await call(name, arguments)
 
     async def create_campaign(self, **arguments: Any) -> dict[str, Any]:
         return await self._call(
@@ -355,30 +390,66 @@ class StreamableHttpCocRuntime:
         return self._result(receipt)
 
     async def get_panel_state(self, **arguments: Any) -> dict[str, Any]:
-        campaign = self._result(await self.get_campaign(**arguments))
         campaign_id = arguments["campaign_id"]
         principal_id = arguments["principal_id"]
-        characters = self._result(
-            await self._call(
-            "character_query",
-            {"action": "list", "campaign_id": campaign_id, "principal_id": principal_id},
-            principal_id=principal_id,
-            campaign_id=campaign_id,
-            )
-        )
-        state = dict(campaign.get("state") or {})
-        phase = str(campaign.get("effective_game_phase") or state.get("game_phase") or "lobby")
-        return {
-            "campaign": campaign,
-            "phase": phase,
-            "revision": int(campaign.get("revision") or 0),
-            "party": {},
-            "characters": list(characters.get("characters") or []),
-            "modules": [],
-            "current_module": None,
-            "combat": state.get("combat"),
-            "chase": state.get("chase"),
-        }
+        known_revision = arguments.get("known_revision")
+        result_kind = "modified"
+        with observe_latency(
+            PANEL_SNAPSHOT_SECONDS,
+            system="coc7e",
+            operation_class="panel_snapshot",
+            transport="streamable_http",
+        ):
+            async with self._request_session(
+                principal_id=principal_id,
+                campaign_id=campaign_id,
+                operation_class="panel_snapshot",
+            ) as call:
+                campaign = self._result(
+                    await call(
+                        "campaign_query",
+                        {
+                            "action": "get",
+                            "campaign_id": campaign_id,
+                            "principal_id": principal_id,
+                        },
+                    )
+                )
+                revision = int(campaign.get("revision") or 0)
+                if known_revision is not None and revision == int(known_revision):
+                    result_kind = "not_modified"
+                    result = {"not_modified": True, "revision": revision}
+                else:
+                    characters = self._result(
+                        await call(
+                            "character_query",
+                            {
+                                "action": "list",
+                                "campaign_id": campaign_id,
+                                "principal_id": principal_id,
+                            },
+                        )
+                    )
+                    state = dict(campaign.get("state") or {})
+                    phase = str(
+                        campaign.get("effective_game_phase")
+                        or state.get("game_phase")
+                        or "lobby"
+                    )
+                    result = {
+                        "not_modified": False,
+                        "campaign": campaign,
+                        "phase": phase,
+                        "revision": revision,
+                        "party": {},
+                        "characters": list(characters.get("characters") or []),
+                        "modules": [],
+                        "current_module": None,
+                        "combat": state.get("combat"),
+                        "chase": state.get("chase"),
+                    }
+        PANEL_SNAPSHOT_RESULTS.labels(system="coc7e", result=result_kind).inc()
+        return result
 
     async def set_game_phase(self, **arguments: Any) -> dict[str, Any]:
         return await self._call(

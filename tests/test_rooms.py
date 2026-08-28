@@ -382,6 +382,26 @@ def test_async_projection_refresh_releases_database_when_mcp_fails(
     assert client.app.state.async_engine.sync_engine.pool.checkedout() == 0
 
 
+def test_panel_revision_short_circuit_skips_binding_projection(
+    client: TestClient,
+    dnd_runtime: FakeDndRuntime,
+) -> None:
+    register(client, "projection-revision@example.com", "Projection revision DM")
+    create_campaign(client)
+
+    response = client.get(
+        "/api/campaigns/campaign-1/room/panel?known_revision=7"
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"not_modified": True, "revision": 7}
+    call_name, arguments = dnd_runtime.calls[-1]
+    assert call_name == "panel_state"
+    assert arguments["campaign_id"] == "campaign-1"
+    assert arguments["principal_id"].startswith("user:")
+    assert arguments["known_revision"] == 7
+
+
 def test_invalid_async_room_action_rolls_back_staged_room_work(
     client: TestClient,
 ) -> None:

@@ -34,4 +34,11 @@ export const state = {
   encounterDraft: null,
   animatedResolutions: new Set(),
   hydratingRoom: false,
+  panelRefreshMetrics: {
+    requested: 0,
+    coalesced: 0,
+    modified: 0,
+    not_modified: 0,
+    error: 0,
+  },
 };

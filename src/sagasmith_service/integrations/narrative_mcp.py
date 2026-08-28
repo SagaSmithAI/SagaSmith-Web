@@ -165,15 +165,23 @@ class HttpNarrativeRuntime:
         )
 
     async def get_panel_state(
-        self, *, campaign_id: str, principal_id: str
+        self,
+        *,
+        campaign_id: str,
+        principal_id: str,
+        known_revision: int | None = None,
     ) -> dict[str, Any]:
         campaign = await self.get_campaign(
             campaign_id=campaign_id, principal_id=principal_id
         )
+        revision = int(campaign.get("revision") or 0)
+        if known_revision is not None and revision == known_revision:
+            return {"not_modified": True, "revision": revision}
         return {
+            "not_modified": False,
             "campaign": campaign,
             "phase": campaign.get("phase", "lobby"),
-            "revision": int(campaign.get("revision") or 0),
+            "revision": revision,
             "party": {"members": []},
             "characters": [],
             "modules": [],

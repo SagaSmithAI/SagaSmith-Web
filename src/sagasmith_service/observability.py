@@ -52,6 +52,16 @@ MCP_TOOL_SECONDS = Histogram(
     "Latency of authoritative MCP tool operations",
     _UPSTREAM_LABELS,
 )
+PANEL_SNAPSHOT_SECONDS = Histogram(
+    "sagasmith_panel_snapshot_seconds",
+    "Latency of one principal-scoped authoritative panel snapshot",
+    _UPSTREAM_LABELS,
+)
+PANEL_SNAPSHOT_RESULTS = Counter(
+    "sagasmith_panel_snapshot_results_total",
+    "Authoritative panel snapshot results",
+    ["system", "result"],
+)
 ROOM_PROJECTION_BATCH_SECONDS = Histogram(
     "sagasmith_room_projection_batch_seconds",
     "Latency of bounded room projection batches",

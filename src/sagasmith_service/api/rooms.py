@@ -2056,6 +2056,7 @@ async def panel_state(
     request: Request,
     user: AsyncCurrentUser,
     session: AsyncDbSession,
+    known_revision: Annotated[int | None, Query(ge=0)] = None,
 ) -> dict[str, Any]:
     user_id = user.id
     principal_id = user.principal_id
@@ -2075,9 +2076,18 @@ async def panel_state(
     runtime = _runtime_for_system(request, campaign.system_id)
     await session.rollback()
     try:
-        value = await runtime.get_panel_state(campaign_id=campaign_id, principal_id=principal_id)
+        value = await runtime.get_panel_state(
+            campaign_id=campaign_id,
+            principal_id=principal_id,
+            known_revision=known_revision,
+        )
     except RuntimeError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    if value.get("not_modified"):
+        return {
+            "not_modified": True,
+            "revision": int(value.get("revision") or known_revision or 0),
+        }
     bindings = (
         await session.scalars(
             select(ActorBindingProjection).where(
@@ -2260,6 +2270,10 @@ async def panel_action(
     if membership.role not in {"owner", "dm"}:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "DM role required")
     runtime = _campaign_runtime(request, session, campaign_id)
+    # MCP is authoritative and accepts both expected_revision and an idempotency key.
+    # Release the Web row lock before network I/O; a retry can replay the MCP receipt
+    # and the second locked idempotency check below serializes local finalization.
+    session.commit()
     panel = await runtime.get_panel_state(campaign_id=campaign_id, principal_id=user.principal_id)
     revision = int(panel.get("revision") or 0)
     try:
@@ -2363,6 +2377,21 @@ async def panel_action(
     except RuntimeError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     next_revision = _receipt_revision(receipt, revision)
+    room = _room(session, campaign_id)
+    existing = session.scalar(
+        select(CampaignMessage).where(
+            CampaignMessage.room_id == room.id,
+            CampaignMessage.client_message_id == f"panel:{idempotency_key}",
+        )
+    )
+    if existing is not None:
+        recorded = dict(existing.structured_payload or {})
+        if (
+            recorded.get("panel_action") != payload.action
+            or recorded.get("payload") != payload.payload
+        ):
+            raise HTTPException(status.HTTP_409_CONFLICT, "idempotency key payload mismatch")
+        return {"message": _message_view(existing, user.id), "receipt": existing.mcp_receipt}
     campaign = session.get(CampaignProjection, campaign_id)
     if campaign is not None:
         campaign.mcp_revision = next_revision
