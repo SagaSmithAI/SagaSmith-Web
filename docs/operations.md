@@ -50,6 +50,14 @@ Worker and is probed through the Supervisor rather than exposed as a network ser
 Only ports 80/443 are public. SagaSmith Web starts with `alembic upgrade head`. For a real hostname set
 `SAGASMITH_SITE_ADDRESS` to the hostname and `SAGASMITH_SECURE_COOKIES=true`.
 
+The Supervisor keeps one isolated process per conversation, starts different conversations with
+bounded parallelism, and coalesces concurrent starts for the same conversation. Size
+`SAGASMITH_AGENT_MAX_WORKERS` to the host memory budget, keep
+`SAGASMITH_AGENT_SPAWN_CONCURRENCY` low enough to avoid a cold-start CPU spike, and tune
+`SAGASMITH_AGENT_IDLE_SECONDS` for the desired warm-worker/LRU tradeoff. When capacity is full and
+all workers are serving requests, new cold conversations receive HTTP 503 instead of creating
+unbounded processes; clients should retry with backoff.
+
 ## Health and observability
 
 - `/api/health`: process liveness.
@@ -82,6 +90,9 @@ Only ports 80/443 are public. SagaSmith Web starts with `alembic upgrade head`. 
   delivery errors persist. These metrics use only bounded stream/reason/status labels.
 - `module-worker:9101/metrics`: Module task outcomes and expired-lease recovery counters on the
   private network.
+- `agent:8910/metrics`: Agent worker spawn latency, bounded spawn queue, ready/busy/spawning/
+  retiring worker counts, capacity rejections, and aggregate tracked-worker RSS. The endpoint is
+  private-network only and is included in the observability profile's Prometheus scrape targets.
 - `X-Request-ID`: accepted only in a safe shape or generated, echoed, and logged.
 - Alert on readiness failures, 5xx rate, Agent/D&D MCP failures, p95 latency, quota settlement lag,
   moderation queue age, copyright-report age, disk/object capacity and backup age.

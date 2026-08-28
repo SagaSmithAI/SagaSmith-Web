@@ -1,10 +1,39 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from conftest import FakeAgentRuntime, FakeDndRuntime
 from fastapi.testclient import TestClient
+from sqlalchemy import event
+from sqlalchemy.dialects import postgresql
 from test_packs import pack_archive
 
+from sagasmith_service.api.community import _artifact_catalog_statement, _artifact_search_filter
+from sagasmith_service.models import (
+    Artifact,
+    ArtifactCollaborator,
+    ArtifactFavorite,
+    ArtifactRelease,
+    CommunityPost,
+    now_utc,
+)
+
 PASSWORD = "correct horse battery staple"
+
+
+def test_postgresql_artifact_search_matches_the_indexed_document() -> None:
+    session = SimpleNamespace(
+        bind=SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+    )
+    statement = _artifact_catalog_statement().where(
+        _artifact_search_filter(session, "dragon gate")
+    )
+    compiled = str(statement.compile(dialect=postgresql.dialect()))
+    assert (
+        "to_tsvector('simple'::regconfig, coalesce(artifacts.title, '') || ' ' || "
+        "coalesce(artifacts.summary, ''))"
+    ) in compiled
+    assert "websearch_to_tsquery('simple'::regconfig" in compiled
 
 
 def register(client: TestClient, email: str, name: str) -> dict:
@@ -270,3 +299,124 @@ def test_private_source_and_executable_rule_cannot_enter_publication(
     )
     assert rejected.status_code == 422
     assert "executable" in rejected.json()["detail"]
+
+
+def test_artifact_catalog_query_count_is_constant_and_paginates(client: TestClient) -> None:
+    owner = register(client, "catalog-owner@forge.example.com", "Catalog Owner")
+    with client.app.state.session_factory() as session:
+        for index in range(25):
+            artifact = Artifact(
+                owner_user_id=owner["id"],
+                slug=f"catalog-{index:02d}",
+                artifact_type="module",
+                title=f"Indexed Adventure {index:02d}",
+                summary="Searchable catalog entry",
+                visibility="public",
+                status="published",
+                rights_attested=True,
+            )
+            session.add(artifact)
+            session.flush()
+            release = ArtifactRelease(
+                artifact_id=artifact.id,
+                version=f"1.0.{index}",
+                status="published",
+                published_at=now_utc(),
+            )
+            session.add(release)
+            if index % 2 == 0:
+                session.add(ArtifactFavorite(artifact_id=artifact.id, user_id=owner["id"]))
+        session.commit()
+
+    statements: list[str] = []
+
+    def record_statement(*args) -> None:
+        statements.append(str(args[2]))
+
+    event.listen(client.app.state.engine, "before_cursor_execute", record_statement)
+    try:
+        first_page = client.get(
+            "/api/community/artifacts",
+            params={"q": "Indexed Adventure", "limit": 10},
+        )
+        first_selects = sum(
+            statement.lstrip().upper().startswith("SELECT") for statement in statements
+        )
+        statements.clear()
+        second_page = client.get(
+            "/api/community/artifacts",
+            params={"q": "Indexed Adventure", "limit": 10, "offset": 10},
+        )
+        second_selects = sum(
+            statement.lstrip().upper().startswith("SELECT") for statement in statements
+        )
+    finally:
+        event.remove(client.app.state.engine, "before_cursor_execute", record_statement)
+
+    assert first_page.status_code == second_page.status_code == 200
+    assert len(first_page.json()) == len(second_page.json()) == 10
+    assert {item["id"] for item in first_page.json()}.isdisjoint(
+        item["id"] for item in second_page.json()
+    )
+    assert first_selects == second_selects
+    assert first_selects <= 3
+    assert all(item["latest_release_id"] for item in first_page.json())
+    favorites_page = client.get("/api/community/artifacts", params={"favorites": True})
+    assert favorites_page.status_code == 200
+    assert len(favorites_page.json()) == 13
+
+
+def test_post_query_count_does_not_grow_with_owner_only_posts(client: TestClient) -> None:
+    owner = register(client, "post-owner@forge.example.com", "Post Owner")
+    viewer = register(client, "post-editor@forge.example.com", "Post Editor")
+    with client.app.state.session_factory() as session:
+        artifact = Artifact(
+            owner_user_id=owner["id"],
+            slug="owner-thread",
+            artifact_type="module",
+            title="Owner Thread",
+            visibility="public",
+            status="published",
+            rights_attested=True,
+        )
+        session.add(artifact)
+        session.flush()
+        session.add(
+            ArtifactCollaborator(
+                artifact_id=artifact.id,
+                user_id=viewer["id"],
+                role="editor",
+                status="active",
+            )
+        )
+        for index in range(30):
+            session.add(
+                CommunityPost(
+                    author_user_id=owner["id"],
+                    target_type="artifact",
+                    target_id=artifact.id,
+                    audience="owners",
+                    body=f"Owner note {index}",
+                )
+            )
+        session.commit()
+        artifact_id = artifact.id
+
+    statements: list[str] = []
+
+    def record_statement(*args) -> None:
+        statements.append(str(args[2]))
+
+    event.listen(client.app.state.engine, "before_cursor_execute", record_statement)
+    try:
+        response = client.get(
+            "/api/community/posts",
+            params={"target_type": "artifact", "target_id": artifact_id},
+        )
+    finally:
+        event.remove(client.app.state.engine, "before_cursor_execute", record_statement)
+
+    select_count = sum(statement.lstrip().upper().startswith("SELECT") for statement in statements)
+    assert response.status_code == 200
+    assert len(response.json()) == 30
+    assert select_count <= 5
