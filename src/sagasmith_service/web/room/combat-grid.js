@@ -30,6 +30,7 @@ import {
   moveGridCursor,
   movementIntentSegment,
   terrainAt,
+  visibleCellRange,
 } from "/assets/room/combat-grid-state.js";
 import {
   buildEncounterPayload,
@@ -59,12 +60,32 @@ export function createCombatGridController({
   let combatSnapshotBlob = null;
   let combatSnapshotUrl = null;
   let combatSnapshotCaption = "全队公开战况图。";
+  let combatSnapshotRevision = null;
+  let combatSnapshotArtifact = "";
+  let gridDrawFrame = 0;
+  let gridStaticLayer = { key: "", canvas: null };
 
   function releaseCombatSnapshot() {
     if (combatSnapshotUrl) URL.revokeObjectURL(combatSnapshotUrl);
     combatSnapshotBlob = null;
     combatSnapshotUrl = null;
     combatSnapshotCaption = "全队公开战况图。";
+    combatSnapshotRevision = null;
+    combatSnapshotArtifact = "";
+  }
+
+  function requestGridDraw() {
+    if (gridDrawFrame) return;
+    gridDrawFrame = requestAnimationFrame(() => {
+      gridDrawFrame = 0;
+      drawCombatGridNow();
+    });
+  }
+
+  function setGridZoom(value, center = null) {
+    state.gridZoom = Math.max(1, Math.min(8, Number(value) || 1));
+    if (center) state.gridViewportCenter = { x: center.x, y: center.y };
+    requestGridDraw();
   }
 
   function setGridExpanded(expanded) {
@@ -81,15 +102,19 @@ export function createCombatGridController({
         control.setAttribute("aria-expanded", String(state.gridExpanded));
       }
     }
-    requestAnimationFrame(drawCombatGrid);
+    requestGridDraw();
   }
 
   function renderCombatPanel() {
     const root = $("#combat-panel");
     const visible = characters();
-    releaseCombatSnapshot();
+    const revision = Number(state.panel?.revision || 0);
+    if (combatSnapshotRevision !== null && combatSnapshotRevision !== revision) {
+      releaseCombatSnapshot();
+    }
     root.replaceChildren();
     if (state.panel?.phase !== "combat") {
+      releaseCombatSnapshot();
       state.gridCursor = null;
       setGridExpanded(false);
       root.append(text("p", "当前没有进行中的战斗", "muted"));
@@ -111,6 +136,7 @@ export function createCombatGridController({
     if (combatMode() === "grid" && battleMap()) {
       root.append(buildGridShell());
     } else {
+      releaseCombatSnapshot();
       state.gridCursor = null;
       state.gridDestination = null;
       setGridExpanded(false);
@@ -169,7 +195,7 @@ export function createCombatGridController({
       );
     }
     root.append(actions);
-    requestAnimationFrame(drawCombatGrid);
+    requestGridDraw();
   }
 
   function buildCombatStartForm(visible) {
@@ -366,6 +392,8 @@ export function createCombatGridController({
     templateRadio.onchange = () => {
       draft.sourceKind = "template";
       draft.templateId = draft.templateId || templates[0]?.id || "";
+      draft.zoom = 1;
+      draft.viewportCenter = null;
       seedEncounterPlacements(draft, templates, { reset: true });
       draft.submitError = "";
       rerender();
@@ -390,6 +418,8 @@ export function createCombatGridController({
     templateSelect.onchange = () => {
       draft.templateId = templateSelect.value;
       draft.cursor = { x: 0, y: 0 };
+      draft.zoom = 1;
+      draft.viewportCenter = null;
       seedEncounterPlacements(draft, templates, { reset: true });
       draft.submitError = "";
       rerender();
@@ -405,6 +435,8 @@ export function createCombatGridController({
     overrideRadio.onchange = () => {
       draft.sourceKind = "override";
       draft.cursor = { x: 0, y: 0 };
+      draft.zoom = 1;
+      draft.viewportCenter = null;
       seedEncounterPlacements(draft, templates, { reset: true });
       draft.submitError = "";
       rerender();
@@ -422,6 +454,8 @@ export function createCombatGridController({
       input.onchange = () => {
         draft.override[field] = Number(input.value);
         draft.cursor = { x: 0, y: 0 };
+        draft.zoom = 1;
+        draft.viewportCenter = null;
         seedEncounterPlacements(draft, templates, { reset: true });
         draft.submitError = "";
         rerender();
@@ -558,11 +592,34 @@ export function createCombatGridController({
     wrap.append(canvas);
     section.append(head, wrap, status);
     let dragPreview = null;
-    const draw = () => drawEncounterBoard(canvas, draft, validation, dragPreview);
-    requestAnimationFrame(draw);
+    const staticLayer = { key: "", canvas: null };
+    let drawFrame = 0;
+    const draw = () => {
+      if (drawFrame) return;
+      drawFrame = requestAnimationFrame(() => {
+        drawFrame = 0;
+        drawEncounterBoard(canvas, draft, validation, dragPreview, staticLayer);
+      });
+    };
+    draw();
+    const zoomStatus = text("span", `${draft.zoom || 1}×`, "small muted");
+    const zoomEncounter = (delta) => {
+      draft.viewportCenter = draft.cursor ? { ...draft.cursor } : draft.viewportCenter;
+      draft.zoom = Math.max(1, Math.min(8, (Number(draft.zoom) || 1) + delta));
+      zoomStatus.textContent = `${draft.zoom}×`;
+      status.textContent = `部署地图缩放 ${draft.zoom}×。`;
+      draw();
+    };
+    const zoomControls = text("div", "", "grid-head-actions");
+    const zoomOut = button("−", () => zoomEncounter(-1));
+    zoomOut.setAttribute("aria-label", "缩小部署地图");
+    const zoomIn = button("+", () => zoomEncounter(1));
+    zoomIn.setAttribute("aria-label", "放大部署地图");
+    zoomControls.append(zoomOut, zoomStatus, zoomIn);
+    head.append(zoomControls);
     let draggingActor = "";
     const updateDragPreview = (event) => {
-      const pointer = encounterBoardPointer(event, canvas, validation.map);
+      const pointer = encounterBoardPointer(event, canvas, validation.map, draft);
       if (!pointer || !draggingActor) return null;
       const feedback = encounterPlacementFeedback(
         draft,
@@ -580,7 +637,7 @@ export function createCombatGridController({
       return pointer;
     };
     canvas.onpointerdown = (event) => {
-      const cell = encounterBoardPointer(event, canvas, validation.map);
+      const cell = encounterBoardPointer(event, canvas, validation.map, draft);
       if (!cell?.inBounds) return;
       const placed = draft.selectedIds.find((id) => {
         const position = draft.placements[id];
@@ -615,6 +672,18 @@ export function createCombatGridController({
       status.textContent = "拖动已取消；原部署坐标保持不变。";
       draw();
     };
+    canvas.onwheel = (event) => {
+      event.preventDefault();
+      const center = encounterBoardPointer(event, canvas, validation.map, draft);
+      if (center?.inBounds) draft.viewportCenter = { x: center.x, y: center.y };
+      draft.zoom = Math.max(
+        1,
+        Math.min(8, (Number(draft.zoom) || 1) + (event.deltaY < 0 ? 1 : -1)),
+      );
+      zoomStatus.textContent = `${draft.zoom}×`;
+      status.textContent = `部署地图缩放 ${draft.zoom}×；滚轮位置保持为视口中心。`;
+      draw();
+    };
     canvas.onfocus = () => {
       if (!draft.cursor) draft.cursor = { x: 0, y: 0 };
       draw();
@@ -631,6 +700,19 @@ export function createCombatGridController({
       if (navigation.has(event.key) && validation.map) {
         event.preventDefault();
         draft.cursor = moveEncounterCursor(draft.cursor, event.key, validation.map);
+        const metrics = encounterBoardMetrics(canvas, validation.map, draft);
+        const visible = visibleCellRange(
+          { width: validation.map.width, height: validation.map.height },
+          metrics,
+        );
+        if (
+          draft.cursor.x < visible.minX ||
+          draft.cursor.x > visible.maxX ||
+          draft.cursor.y < visible.minY ||
+          draft.cursor.y > visible.maxY
+        ) {
+          draft.viewportCenter = { ...draft.cursor };
+        }
         status.textContent = `坐标 ${draft.cursor.x},${draft.cursor.y}`;
         draw();
       } else if ((event.key === "Enter" || event.key === " ") && draft.activeActorId) {
@@ -658,7 +740,7 @@ export function createCombatGridController({
     return section;
   }
 
-  function encounterBoardMetrics(canvas, map) {
+  function encounterBoardMetrics(canvas, map, draft) {
     if (!map || !Number.isInteger(map.width) || !Number.isInteger(map.height)) return null;
     const rect = canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
@@ -666,17 +748,33 @@ export function createCombatGridController({
     const height = Math.max(1, Math.round(rect.height * dpr));
     if (canvas.width !== width) canvas.width = width;
     if (canvas.height !== height) canvas.height = height;
-    const cell = Math.max(3, Math.min(canvas.width / map.width, canvas.height / map.height));
+    const fitCell = Math.max(
+      1,
+      Math.min(canvas.width / map.width, canvas.height / map.height),
+    );
+    const cell = fitCell * Math.max(1, Math.min(8, Number(draft.zoom) || 1));
+    const focus = draft.viewportCenter || {
+      x: (map.width - 1) / 2,
+      y: (map.height - 1) / 2,
+    };
+    const boardWidth = cell * map.width;
+    const boardHeight = cell * map.height;
     return {
       dpr,
       cell,
-      offsetX: (canvas.width - cell * map.width) / 2,
-      offsetY: (canvas.height - cell * map.height) / 2,
+      offsetX: boardWidth <= canvas.width
+        ? (canvas.width - boardWidth) / 2
+        : Math.min(0, Math.max(canvas.width - boardWidth, canvas.width / 2 - (focus.x + 0.5) * cell)),
+      offsetY: boardHeight <= canvas.height
+        ? (canvas.height - boardHeight) / 2
+        : Math.min(0, Math.max(canvas.height - boardHeight, canvas.height / 2 - (focus.y + 0.5) * cell)),
+      canvasWidth: canvas.width,
+      canvasHeight: canvas.height,
     };
   }
 
-  function encounterBoardPointer(event, canvas, map) {
-    const metrics = encounterBoardMetrics(canvas, map);
+  function encounterBoardPointer(event, canvas, map, draft) {
+    const metrics = encounterBoardMetrics(canvas, map, draft);
     if (!metrics) return null;
     const rect = canvas.getBoundingClientRect();
     const x = Math.floor(
@@ -716,24 +814,39 @@ export function createCombatGridController({
     context.restore();
   }
 
-  function drawEncounterBoard(canvas, draft, validation, dragPreview = null) {
-    const map = validation.map;
-    const metrics = encounterBoardMetrics(canvas, map);
-    if (!metrics) return;
-    const context = canvas.getContext("2d");
-    context.clearRect(0, 0, canvas.width, canvas.height);
+  function encounterStaticLayer(canvas, map, metrics, staticLayer) {
+    const key = [
+      canvas.width,
+      canvas.height,
+      map.width,
+      map.height,
+      metrics.cell,
+      metrics.offsetX,
+      metrics.offsetY,
+    ].join(":");
+    if (staticLayer.key === key && staticLayer.map === map && staticLayer.canvas) {
+      return staticLayer.canvas;
+    }
+    const layer = document.createElement("canvas");
+    layer.width = canvas.width;
+    layer.height = canvas.height;
+    const context = layer.getContext("2d");
     context.fillStyle = "#090d0b";
-    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.fillRect(0, 0, layer.width, layer.height);
     const blocked = new Set((map.blockedCells || []).map((cell) => `${cell.x},${cell.y}`));
     const difficult = new Set((map.difficultCells || []).map((cell) => `${cell.x},${cell.y}`));
-    for (let y = 0; y < map.height; y += 1) {
-      for (let x = 0; x < map.width; x += 1) {
+    const visible = visibleCellRange(
+      { width: map.width, height: map.height },
+      metrics,
+    );
+    for (let y = visible.minY; y <= visible.maxY; y += 1) {
+      for (let x = visible.minX; x <= visible.maxX; x += 1) {
         const left = metrics.offsetX + x * metrics.cell;
         const top = metrics.offsetY + y * metrics.cell;
-        const key = `${x},${y}`;
-        context.fillStyle = blocked.has(key)
+        const keyValue = `${x},${y}`;
+        context.fillStyle = blocked.has(keyValue)
           ? "#513531"
-          : difficult.has(key)
+          : difficult.has(keyValue)
             ? "#5b542d"
             : (x + y) % 2
               ? "#101713"
@@ -744,6 +857,25 @@ export function createCombatGridController({
         context.strokeRect(left, top, metrics.cell, metrics.cell);
       }
     }
+    staticLayer.key = key;
+    staticLayer.map = map;
+    staticLayer.canvas = layer;
+    return layer;
+  }
+
+  function drawEncounterBoard(
+    canvas,
+    draft,
+    validation,
+    dragPreview = null,
+    staticLayer = { key: "", canvas: null },
+  ) {
+    const map = validation.map;
+    const metrics = encounterBoardMetrics(canvas, map, draft);
+    if (!metrics) return;
+    const context = canvas.getContext("2d");
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(encounterStaticLayer(canvas, map, metrics, staticLayer), 0, 0);
     for (const actor of draft.actors.filter((item) => draft.selectedIds.includes(item.id))) {
       if (actor.id === dragPreview?.actorId) continue;
       const position = draft.placements[actor.id];
@@ -885,7 +1017,19 @@ export function createCombatGridController({
     );
     snapshotToggle.title = "加载由 D&D MCP 按全队公开视图生成的战况图";
     const headActions = text("div", "", "grid-head-actions");
-    headActions.append(snapshotToggle, expand);
+    const zoomLabel = text("span", `${state.gridZoom || 1}×`, "small muted");
+    zoomLabel.setAttribute("aria-live", "polite");
+    const changeZoom = (delta) => {
+      setGridZoom((state.gridZoom || 1) + delta, state.gridCursor);
+      zoomLabel.textContent = `${state.gridZoom}×`;
+    };
+    const zoomOut = button("−", () => changeZoom(-1));
+    zoomOut.title = "缩小战斗地图";
+    zoomOut.setAttribute("aria-label", "缩小战斗地图");
+    const zoomIn = button("+", () => changeZoom(1));
+    zoomIn.title = "放大战斗地图";
+    zoomIn.setAttribute("aria-label", "放大战斗地图");
+    headActions.append(zoomOut, zoomLabel, zoomIn, snapshotToggle, expand);
     head.append(headActions);
     const snapshotPanel = text("section", "", "combat-snapshot");
     snapshotPanel.hidden = true;
@@ -986,6 +1130,12 @@ export function createCombatGridController({
       tooltip.hidden = true;
     };
     canvas.onclick = (event) => gridClick(event, canvas, status);
+    canvas.onwheel = (event) => {
+      event.preventDefault();
+      const center = gridCell(event, canvas) || state.gridCursor;
+      setGridZoom((state.gridZoom || 1) + (event.deltaY < 0 ? 1 : -1), center);
+      zoomLabel.textContent = `${state.gridZoom}×`;
+    };
     canvas.onfocus = () => {
       const bounds = mapBounds(battleMap());
       state.gridCursor = clampGridCursor(
@@ -1034,6 +1184,11 @@ export function createCombatGridController({
         headers.get("X-SagaSmith-Combat-Caption"),
         combatSnapshotCaption,
       );
+      combatSnapshotRevision = Number(
+        headers.get("X-SagaSmith-Combat-Revision") || state.panel?.revision || 0,
+      );
+      combatSnapshotArtifact = headers.get("X-SagaSmith-Combat-Artifact") || "";
+      image.dataset.artifactKey = combatSnapshotArtifact;
       image.src = combatSnapshotUrl;
       await image.decode();
       image.hidden = false;
@@ -1066,7 +1221,8 @@ export function createCombatGridController({
     if (!combatSnapshotBlob || !combatSnapshotUrl) return toast("请先加载玩家分享图");
     const link = document.createElement("a");
     link.href = combatSnapshotUrl;
-    link.download = "sagasmith-party-combat.png";
+    const revision = combatSnapshotRevision ?? state.panel?.revision ?? "latest";
+    link.download = `sagasmith-party-combat-r${revision}.png`;
     link.click();
     toast("战况图已下载");
   }
@@ -1077,13 +1233,14 @@ export function createCombatGridController({
       downloadCombatSnapshot();
       return;
     }
-    const file = new File([combatSnapshotBlob], "sagasmith-party-combat.png", {
+    const revision = combatSnapshotRevision ?? state.panel?.revision ?? "latest";
+    const file = new File([combatSnapshotBlob], `sagasmith-party-combat-r${revision}.png`, {
       type: "image/png",
     });
     const shareData = {
       files: [file],
       title: battleMap()?.name || activeCombat().name || "SagaSmith 战况图",
-      text: `${combatSnapshotCaption}\n战斗状态与移动判定以 SagaSmith MCP 为准。`,
+      text: `${combatSnapshotCaption}\n战况版本 R${revision}；战斗状态与移动判定以 SagaSmith MCP 为准。`,
     };
     if (!navigator.share || (navigator.canShare && !navigator.canShare(shareData))) {
       downloadCombatSnapshot();
@@ -1131,13 +1288,32 @@ export function createCombatGridController({
       canvas.width = Math.round(rect.width * dpr);
       canvas.height = Math.round(rect.height * dpr);
     }
-    const cell = Math.max(
-      8,
+    const fitCell = Math.max(
+      1,
       Math.min(canvas.width / bounds.width, canvas.height / bounds.height),
     );
-    const offsetX = (canvas.width - cell * bounds.width) / 2;
-    const offsetY = (canvas.height - cell * bounds.height) / 2;
-    return { bounds, dpr, cell, offsetX, offsetY };
+    const cell = fitCell * Math.max(1, Math.min(8, Number(state.gridZoom) || 1));
+    const focus = state.gridViewportCenter || {
+      x: (bounds.width - 1) / 2,
+      y: (bounds.height - 1) / 2,
+    };
+    const boardWidth = cell * bounds.width;
+    const boardHeight = cell * bounds.height;
+    const offsetX = boardWidth <= canvas.width
+      ? (canvas.width - boardWidth) / 2
+      : Math.min(0, Math.max(canvas.width - boardWidth, canvas.width / 2 - (focus.x + 0.5) * cell));
+    const offsetY = boardHeight <= canvas.height
+      ? (canvas.height - boardHeight) / 2
+      : Math.min(0, Math.max(canvas.height - boardHeight, canvas.height / 2 - (focus.y + 0.5) * cell));
+    return {
+      bounds,
+      dpr,
+      cell,
+      offsetX,
+      offsetY,
+      canvasWidth: canvas.width,
+      canvasHeight: canvas.height,
+    };
   }
 
   function drawGridTexture(context, metrics) {
@@ -1162,63 +1338,89 @@ export function createCombatGridController({
     context.restore();
   }
 
+  function liveStaticGridLayer(canvas, map, metrics) {
+    const key = JSON.stringify([
+      state.campaign?.id,
+      state.panel?.revision,
+      map.id || map.name || "",
+      canvas.width,
+      canvas.height,
+      metrics.bounds,
+      metrics.cell,
+      metrics.offsetX,
+      metrics.offsetY,
+      Boolean(gridTexture.complete && gridTexture.naturalWidth && gridTexture.naturalHeight),
+    ]);
+    if (gridStaticLayer.key === key && gridStaticLayer.canvas) {
+      return gridStaticLayer.canvas;
+    }
+    const layer = document.createElement("canvas");
+    layer.width = canvas.width;
+    layer.height = canvas.height;
+    const context = layer.getContext("2d");
+    const blocked = new Set((map.blocked_cells || map.blocked || []).map(cellKey));
+    const difficult = new Set(
+      (map.difficult_terrain || map.difficult_cells || []).map(cellKey),
+    );
+    const visible = visibleCellRange(metrics.bounds, metrics);
+    context.fillStyle = "#0b0f0d";
+    context.fillRect(0, 0, layer.width, layer.height);
+    drawGridTexture(context, metrics);
+    for (let y = visible.minY; y <= visible.maxY; y += 1) {
+      for (let x = visible.minX; x <= visible.maxX; x += 1) {
+        const keyValue = `${x},${y}`;
+        if (blocked.has(keyValue)) {
+          context.fillStyle = "#34302e";
+        } else if (difficult.has(keyValue)) {
+          context.fillStyle = "#253529";
+        } else {
+          continue;
+        }
+        context.fillRect(
+          metrics.offsetX + x * metrics.cell,
+          metrics.offsetY + y * metrics.cell,
+          metrics.cell,
+          metrics.cell,
+        );
+      }
+    }
+    context.strokeStyle = "#29302c";
+    context.lineWidth = Math.max(1, metrics.dpr * 0.5);
+    for (let x = visible.minX; x <= visible.maxX + 1; x += 1) {
+      context.beginPath();
+      context.moveTo(metrics.offsetX + x * metrics.cell, Math.max(0, metrics.offsetY));
+      context.lineTo(
+        metrics.offsetX + x * metrics.cell,
+        Math.min(layer.height, metrics.offsetY + metrics.bounds.height * metrics.cell),
+      );
+      context.stroke();
+    }
+    for (let y = visible.minY; y <= visible.maxY + 1; y += 1) {
+      context.beginPath();
+      context.moveTo(Math.max(0, metrics.offsetX), metrics.offsetY + y * metrics.cell);
+      context.lineTo(
+        Math.min(layer.width, metrics.offsetX + metrics.bounds.width * metrics.cell),
+        metrics.offsetY + y * metrics.cell,
+      );
+      context.stroke();
+    }
+    gridStaticLayer = { key, canvas: layer };
+    return layer;
+  }
+
   function drawCombatGrid() {
+    requestGridDraw();
+  }
+
+  function drawCombatGridNow() {
     const canvas = $("#combat-grid");
     if (!canvas || combatMode() !== "grid") return;
     const map = battleMap();
     if (!map) return;
     const context = canvas.getContext("2d");
     const metrics = gridMetrics(canvas);
-    const blocked = new Set((map.blocked_cells || map.blocked || []).map(cellKey));
-    const difficult = new Set(
-      (map.difficult_terrain || map.difficult_cells || []).map(cellKey),
-    );
     context.clearRect(0, 0, canvas.width, canvas.height);
-    context.fillStyle = "#0b0f0d";
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    drawGridTexture(context, metrics);
-    for (let y = 0; y < metrics.bounds.height; y++) {
-      for (let x = 0; x < metrics.bounds.width; x++) {
-        const key = `${x},${y}`;
-        if (blocked.has(key)) {
-          context.fillStyle = "#34302e";
-          context.fillRect(
-            metrics.offsetX + x * metrics.cell,
-            metrics.offsetY + y * metrics.cell,
-            metrics.cell,
-            metrics.cell,
-          );
-        } else if (difficult.has(key)) {
-          context.fillStyle = "#253529";
-          context.fillRect(
-            metrics.offsetX + x * metrics.cell,
-            metrics.offsetY + y * metrics.cell,
-            metrics.cell,
-            metrics.cell,
-          );
-        }
-      }
-    }
-    context.strokeStyle = "#29302c";
-    context.lineWidth = Math.max(1, metrics.dpr * 0.5);
-    for (let x = 0; x <= metrics.bounds.width; x++) {
-      context.beginPath();
-      context.moveTo(metrics.offsetX + x * metrics.cell, metrics.offsetY);
-      context.lineTo(
-        metrics.offsetX + x * metrics.cell,
-        metrics.offsetY + metrics.bounds.height * metrics.cell,
-      );
-      context.stroke();
-    }
-    for (let y = 0; y <= metrics.bounds.height; y++) {
-      context.beginPath();
-      context.moveTo(metrics.offsetX, metrics.offsetY + y * metrics.cell);
-      context.lineTo(
-        metrics.offsetX + metrics.bounds.width * metrics.cell,
-        metrics.offsetY + y * metrics.cell,
-      );
-      context.stroke();
-    }
+    context.drawImage(liveStaticGridLayer(canvas, map, metrics), 0, 0);
     if (state.gridDestination) {
       context.fillStyle = "#d9ad5b55";
       context.fillRect(
@@ -1265,13 +1467,20 @@ export function createCombatGridController({
       context.restore();
     }
     const current = currentCombatantId();
+    const visible = visibleCellRange(metrics.bounds, metrics);
     for (const item of combatants()) {
       const position = item.position || item.coordinates;
       if (!position) continue;
+      if (
+        Number(position.x) < visible.minX ||
+        Number(position.x) > visible.maxX ||
+        Number(position.y) < visible.minY ||
+        Number(position.y) > visible.maxY
+      ) continue;
       const id = combatantId(item);
       const centerX = metrics.offsetX + (Number(position.x) + 0.5) * metrics.cell;
       const centerY = metrics.offsetY + (Number(position.y) + 0.5) * metrics.cell;
-      const radius = Math.max(6, metrics.cell * 0.34);
+      const radius = Math.max(metrics.dpr * 2, metrics.cell * 0.34);
       const owned = canControl(id);
       const selected = id === state.selectedTargetId;
       context.beginPath();
@@ -1301,14 +1510,16 @@ export function createCombatGridController({
         context.fill();
         context.restore();
       }
-      context.fillStyle = "#fff";
-      context.font = `600 ${Math.max(8, Math.min(13, metrics.cell * 0.24))}px system-ui`;
-      context.textAlign = "center";
-      context.textBaseline = "middle";
-      context.fillText(combatantName(id).slice(0, 2), centerX, centerY);
+      if (metrics.cell >= 18) {
+        context.fillStyle = "#fff";
+        context.font = `600 ${Math.min(13, metrics.cell * 0.24)}px system-ui`;
+        context.textAlign = "center";
+        context.textBaseline = "middle";
+        context.fillText(combatantName(id).slice(0, 2), centerX, centerY);
+      }
       const record = cardRecord(id)?.actor;
       const hp = record?.derived?.hit_points || record?.sheet?.combat?.hp;
-      if (hp && Number(hp.max ?? hp.maximum) > 0) {
+      if (metrics.cell >= 14 && hp && Number(hp.max ?? hp.maximum) > 0) {
         const ratio = Math.max(
           0,
           Math.min(
@@ -1352,6 +1563,19 @@ export function createCombatGridController({
       parts.push(MOVEMENT_INTENT_DISCLAIMER);
     }
     status.textContent = parts.join("；");
+  }
+
+  function revealGridCell(cell, canvas) {
+    const metrics = gridMetrics(canvas);
+    const visible = visibleCellRange(metrics.bounds, metrics);
+    if (
+      cell.x < visible.minX ||
+      cell.x > visible.maxX ||
+      cell.y < visible.minY ||
+      cell.y > visible.maxY
+    ) {
+      state.gridViewportCenter = { x: cell.x, y: cell.y };
+    }
   }
 
   function gridPointerMove(event, canvas, tooltip) {
@@ -1436,6 +1660,7 @@ export function createCombatGridController({
         event.key,
         mapBounds(battleMap()),
       );
+      revealGridCell(state.gridCursor, canvas);
       updateGridStatus(state.gridCursor, status);
       drawCombatGrid();
       return;
@@ -1456,8 +1681,8 @@ export function createCombatGridController({
   }
 
   function initialize() {
-    window.addEventListener("resize", () => requestAnimationFrame(drawCombatGrid));
-    gridTexture.addEventListener("load", () => requestAnimationFrame(drawCombatGrid), {
+    window.addEventListener("resize", requestGridDraw);
+    gridTexture.addEventListener("load", requestGridDraw, {
       once: true,
     });
   }

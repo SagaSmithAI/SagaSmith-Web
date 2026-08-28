@@ -16,6 +16,7 @@ const {
   moveGridCursor,
   movementIntentSegment,
   terrainAt,
+  visibleCellRange,
 } = await import(moduleUrl);
 
 test("normalizes canonical MCP map bounds", () => {
@@ -61,4 +62,20 @@ test("decodes bounded UTF-8 public image metadata with a safe fallback", () => {
   assert.equal(decodePublicTextHeader(encoded, "fallback"), "石厅战况：Aria 当前行动。");
   assert.equal(decodePublicTextHeader("%%%", "fallback"), "fallback");
   assert.equal(decodePublicTextHeader("A".repeat(4097), "fallback"), "fallback");
+});
+
+test("culls a 200 by 200 map to the cells visible in the canvas viewport", () => {
+  assert.deepEqual(
+    visibleCellRange(
+      { width: 200, height: 200 },
+      {
+        cell: 8,
+        canvasWidth: 800,
+        canvasHeight: 400,
+        offsetX: -400,
+        offsetY: -600,
+      },
+    ),
+    { minX: 50, maxX: 149, minY: 75, maxY: 124 },
+  );
 });

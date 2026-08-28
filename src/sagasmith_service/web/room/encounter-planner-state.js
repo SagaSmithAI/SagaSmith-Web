@@ -87,11 +87,15 @@ export function createEncounterDraft({ campaignId, revision, actors, templates }
     placements: {},
     activeActorId: roster[0]?.id || "",
     cursor: { x: 0, y: 0 },
+    zoom: 1,
+    viewportCenter: null,
     submitError: "",
   };
 }
 
 export function reconcileEncounterDraft(draft, { actors, templates }) {
+  draft.zoom = Math.max(1, Math.min(8, Number(draft.zoom) || 1));
+  draft.viewportCenter ||= null;
   const previousActorIds = new Set(draft.actors.map((actor) => actor.id));
   const roster = actors
     .map((actor) => ({ id: String(actor.id), name: String(actor.name || actor.id) }))

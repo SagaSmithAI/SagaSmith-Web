@@ -98,3 +98,59 @@ def test_coc_runtime_unwraps_audience_safe_host_projections(monkeypatch) -> None
         assert presentation["resolution_id"] == "resolution-1"
 
     asyncio.run(exercise())
+
+
+def test_coc_combat_start_bulk_loads_character_revisions_once(monkeypatch) -> None:
+    runtime = StreamableHttpCocRuntime("http://coc.invalid/mcp")
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def fake_call(
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        principal_id: str,
+        campaign_id: str | None,
+    ) -> dict[str, Any]:
+        calls.append((name, arguments))
+        assert principal_id == "user:keeper"
+        assert campaign_id == "campaign-coc"
+        if name == "character_query":
+            assert arguments["action"] == "list"
+            return {
+                "result": {
+                    "characters": [
+                        {"id": "investigator-1", "campaign_id": campaign_id, "revision": 4},
+                        {"id": "cultist-1", "campaign_id": campaign_id, "revision": 9},
+                    ]
+                }
+            }
+        if name == "combat_start":
+            return {"result": {"combat": {"active": True}}}
+        raise AssertionError(name)
+
+    monkeypatch.setattr(runtime, "_call", fake_call)
+
+    result = asyncio.run(
+        runtime.start_combat(
+            campaign_id="campaign-coc",
+            principal_id="user:keeper",
+            participant_ids=["investigator-1", "cultist-1"],
+            participant_config=[
+                {"actor_id": "investigator-1", "position": {"x": 2, "y": 3}},
+                {"actor_id": "cultist-1", "side": "hostiles", "position": {"x": 8, "y": 3}},
+            ],
+            positioning_mode="grid",
+            name="Library ambush",
+            expected_revision=12,
+            idempotency_key="combat-start-1",
+        )
+    )
+
+    assert result["result"]["combat"]["active"] is True
+    assert [name for name, _ in calls] == ["character_query", "combat_start"]
+    payload = calls[-1][1]
+    assert payload["expected_character_revisions"] == {
+        "investigator-1": 4,
+        "cultist-1": 9,
+    }
+    assert payload["participants"][0]["position"] == {"x": 2, "y": 3}

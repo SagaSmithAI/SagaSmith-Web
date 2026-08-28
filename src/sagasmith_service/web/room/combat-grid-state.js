@@ -91,3 +91,27 @@ export function movementIntentSegment(items, actorId, destination) {
     authoritative: false,
   };
 }
+
+export function visibleCellRange(bounds, viewport) {
+  const cell = Number(viewport?.cell);
+  const canvasWidth = Number(viewport?.canvasWidth);
+  const canvasHeight = Number(viewport?.canvasHeight);
+  const offsetX = Number(viewport?.offsetX);
+  const offsetY = Number(viewport?.offsetY);
+  if (
+    !Number.isFinite(cell) ||
+    cell <= 0 ||
+    !Number.isFinite(canvasWidth) ||
+    !Number.isFinite(canvasHeight) ||
+    !Number.isFinite(offsetX) ||
+    !Number.isFinite(offsetY)
+  ) {
+    return { minX: 0, maxX: -1, minY: 0, maxY: -1 };
+  }
+  return {
+    minX: Math.max(0, Math.floor(-offsetX / cell)),
+    maxX: Math.min(bounds.width - 1, Math.ceil((canvasWidth - offsetX) / cell) - 1),
+    minY: Math.max(0, Math.floor(-offsetY / cell)),
+    maxY: Math.min(bounds.height - 1, Math.ceil((canvasHeight - offsetY) / cell) - 1),
+  };
+}

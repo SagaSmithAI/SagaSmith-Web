@@ -72,6 +72,8 @@ export function createRoomController({
     state.selectedTargetId = null;
     state.gridDestination = null;
     state.gridCursor = null;
+    state.gridZoom = 1;
+    state.gridViewportCenter = null;
     state.gridExpanded = false;
     if (state.encounterDraft?.campaignId !== campaign.id) state.encounterDraft = null;
     state.characterPage =
