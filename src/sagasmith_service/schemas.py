@@ -16,6 +16,11 @@ class RegisterRequest(ApiModel):
     email: EmailStr
     password: str = Field(min_length=12, max_length=200)
     display_name: str = Field(min_length=1, max_length=80)
+    # API account creation itself accepts the current published texts; the browser also requires
+    # an explicit checkbox so interactive users cannot miss them.
+    terms_accepted: Literal[True] = True
+    terms_version: Literal["2026-08-29"] = "2026-08-29"
+    privacy_version: Literal["2026-08-29"] = "2026-08-29"
 
 
 class LoginRequest(ApiModel):
@@ -34,6 +39,28 @@ class UserView(ApiModel):
 
 class AuthResult(ApiModel):
     user: UserView
+
+
+class ProfileUpdateRequest(ApiModel):
+    display_name: str = Field(min_length=1, max_length=80)
+
+
+class PasswordChangeRequest(ApiModel):
+    current_password: str = Field(min_length=1, max_length=200)
+    new_password: str = Field(min_length=12, max_length=200)
+
+
+class AccountDeactivateRequest(ApiModel):
+    current_password: str = Field(min_length=1, max_length=200)
+    confirmation: Literal["DEACTIVATE"]
+
+
+class UserSessionView(ApiModel):
+    id: str
+    created_at: datetime
+    last_seen_at: datetime
+    expires_at: datetime
+    current: bool
 
 
 class CampaignCreateRequest(ApiModel):

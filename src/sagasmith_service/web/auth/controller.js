@@ -25,6 +25,10 @@ export function createAuthController({ onAuthenticated }) {
       control.onclick = () => {
         $$('[data-mode]').forEach((item) => item.classList.toggle("active", item === control));
         $("#name-row").hidden = control.dataset.mode !== "register";
+        $("#terms-row").hidden = control.dataset.mode !== "register";
+        $("#terms-row input").required = control.dataset.mode === "register";
+        $("#auth-form input[name=password]").autocomplete =
+          control.dataset.mode === "register" ? "new-password" : "current-password";
         $("#auth-form").dataset.mode = control.dataset.mode;
       };
     });
@@ -35,7 +39,12 @@ export function createAuthController({ onAuthenticated }) {
       const mode = event.target.dataset.mode || "login";
       try {
         const body = { email: form.get("email"), password: form.get("password") };
-        if (mode === "register") body.display_name = form.get("display_name");
+        if (mode === "register") {
+          body.display_name = form.get("display_name");
+          body.terms_accepted = form.get("terms_accepted") === "on";
+          body.terms_version = "2026-08-29";
+          body.privacy_version = "2026-08-29";
+        }
         state.user = (
           await api(`/api/auth/${mode}`, { method: "POST", body: JSON.stringify(body) })
         ).user;

@@ -1,6 +1,21 @@
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_dependabot_does_not_bypass_coordinated_release_locks() -> None:
+    config = yaml.safe_load((ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8"))
+    updates = {entry["package-ecosystem"]: entry for entry in config["updates"]}
+
+    assert "infrastructure/agent-supervisor-requirements.txt" in updates["pip"][
+        "exclude-paths"
+    ]
+    assert set(updates["docker"]["exclude-paths"]) == {
+        "Dockerfile",
+        "infrastructure/Dockerfile.*",
+    }
 
 
 def test_public_proxy_does_not_expose_prometheus_metrics() -> None:

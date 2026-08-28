@@ -1,9 +1,10 @@
-const CACHE="sagasmith-shell-v11";
+const CACHE="sagasmith-shell-v12";
 const SHELL=[
   "/",
   "/styles.css",
   "/app.js",
   "/assets/api/client.js",
+  "/assets/account/controller.js",
   "/assets/auth/controller.js",
   "/assets/campaign/controller.js",
   "/assets/components/dom.js",
@@ -28,6 +29,8 @@ const SHELL=[
   "/manifest.webmanifest",
   "/sagasmith-icon.svg",
   "/sagasmith-grid-texture.webp",
+  "/legal/privacy.html",
+  "/legal/terms.html",
 ];
 self.addEventListener("install",event=>event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(SHELL))));
 self.addEventListener("activate",event=>event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(key=>key!==CACHE).map(key=>caches.delete(key))))));

@@ -1,4 +1,5 @@
 import { api } from "/assets/api/client.js";
+import { createAccountController } from "/assets/account/controller.js";
 import { createAuthController } from "/assets/auth/controller.js";
 import { createCampaignController } from "/assets/campaign/controller.js";
 import { $, $$, text } from "/assets/components/dom.js";
@@ -15,6 +16,7 @@ const campaignController = createCampaignController({
   openCampaign: (campaign) => roomController.openCampaign(campaign),
 });
 const moduleStudioController = createModuleStudioController();
+const accountController = createAccountController();
 const identityController = createIdentityController();
 const forgeController = createForgeController({
   loadPacks,
@@ -49,6 +51,7 @@ $$('.nav[data-view]').forEach((button) => {
     if (button.dataset.view === "studio") forgeController.loadStudio();
     if (button.dataset.view === "identities") identityController.loadIdentities();
     if (button.dataset.view === "modules") moduleStudioController.loadModules();
+    if (button.dataset.view === "account") accountController.load();
   };
 });
 
@@ -119,6 +122,7 @@ campaignController.initialize();
 moduleStudioController.initialize();
 identityController.initialize();
 forgeController.initialize();
+accountController.initialize();
 authController.initialize();
 registerServiceWorker();
 setInterval(() => {
