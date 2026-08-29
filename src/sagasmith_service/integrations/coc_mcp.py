@@ -16,6 +16,7 @@ from sagasmith_service.auth_context import (
     exposure_revision,
     sign_auth_context,
 )
+from sagasmith_service.mcp_result import is_tool_error, structured_tool_content
 from sagasmith_service.observability import (
     MCP_EXPOSURE_SECONDS,
     MCP_INITIALIZE_SECONDS,
@@ -28,7 +29,7 @@ from sagasmith_service.observability import (
 
 
 def _tool_payload(result: Any) -> dict[str, Any]:
-    if getattr(result, "isError", False):
+    if is_tool_error(result):
         content = getattr(result, "content", [])
         message = getattr(content[0], "text", None) if content else None
         raise RuntimeError(message or "CoC MCP rejected the request")
@@ -40,7 +41,7 @@ def _tool_payload(result: Any) -> dict[str, Any]:
             if isinstance(candidate, Mapping):
                 receipt = dict(candidate)
                 break
-    structured = getattr(result, "structuredContent", None)
+    structured = structured_tool_content(result)
     if isinstance(structured, dict):
         payload = dict(structured)
         if receipt is not None:
