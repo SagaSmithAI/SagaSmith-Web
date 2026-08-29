@@ -521,6 +521,9 @@ export function createRoomController({
         $("#dm-tools").hidden =
           tab.dataset.panel !== "members" ||
           !["owner", "dm"].includes(state.membership?.role);
+        if (tab.dataset.panel === "combat") {
+          combatGridController.drawCombatGrid();
+        }
       };
     });
     $("#open-module-studio").onclick = openModuleStudio;
