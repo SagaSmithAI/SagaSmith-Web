@@ -91,12 +91,14 @@ def test_combat_render_is_revision_cached_revalidated_and_membership_scoped(
     assert rendered.headers["x-sagasmith-combat-artifact"].startswith(
         "campaign-1:1:party_public:default:native:"
     )
-    assert base64.urlsafe_b64decode(
-        rendered.headers["x-sagasmith-combat-alt"] + "=="
-    ).decode() == "石厅战斗网格；Aria 当前行动。"
-    assert base64.urlsafe_b64decode(
-        rendered.headers["x-sagasmith-combat-caption"] + "=="
-    ).decode() == "Aria 在石厅迎战敌人。"
+    assert (
+        base64.urlsafe_b64decode(rendered.headers["x-sagasmith-combat-alt"] + "==").decode()
+        == "石厅战斗网格；Aria 当前行动。"
+    )
+    assert (
+        base64.urlsafe_b64decode(rendered.headers["x-sagasmith-combat-caption"] + "==").decode()
+        == "Aria 在石厅迎战敌人。"
+    )
     call = next(item for item in dnd_runtime.calls if item[0] == "combat_render_public")
     assert call[1] == {
         "campaign_id": "campaign-1",
@@ -322,6 +324,7 @@ def test_room_turn_persists_trusted_authority_trace_and_stable_upstream_key(
 ) -> None:
     owner = register(client, "room-owner@example.com", "DM")
     create_campaign(client)
+    client.app.state.dnd_runtime.campaign_revision = 1
     traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
     response = client.post(
         "/api/campaigns/campaign-1/room/messages",
@@ -340,17 +343,22 @@ def test_room_turn_persists_trusted_authority_trace_and_stable_upstream_key(
         assert job is not None
         assert job.trace_context == {"traceparent": traceparent, "baggage": "tenant=test"}
         assert job.authority_context["schema"] == "sagasmith.auth-context/v2"
-        assert job.authority_context["requester_identity"] == f"user:{owner['id']}"
+        assert job.authority_context["requester_principal"] == f"user:{owner['id']}"
         assert job.authority_context["room_turn_id"] == job_id
         assert job.authority_context["base_revision"] == 1
+        assert job.authority_context["target_service"] == "sagasmith-dnd-mcp"
+        assert job.authority_context["authorized_audience"] == "sagasmith-dnd-mcp"
+        assert job.authority_context["allowed_operations"]
+        assert job.authority_context["allowed_operations"] == sorted(
+            job.authority_context["allowed_operations"]
+        )
+        assert len(job.authority_context["allowed_operations"]) <= 16
         assert "token" not in json.dumps(job.authority_context).lower()
     call = agent_runtime.calls[0]
     assert call["idempotency_key"] == f"room-turn:{job_id}"
     assert call["trace_context"]["traceparent"] == traceparent
     assert call["content"] == "I inspect the sealed gate."
-    assert "I inspect the sealed gate." not in json.dumps(
-        call["context"]["authority_context"]
-    )
+    assert "I inspect the sealed gate." not in json.dumps(call["context"]["authority_context"])
     assert call["context"]["authority_context"]["room_turn_id"] == job_id
 
 
@@ -372,9 +380,34 @@ def test_room_turn_rejects_stale_base_revision_with_recovery_details(
     assert detail["base_revision"] == 6
     assert detail["current_revision"] == 1
     with client.app.state.session_factory() as session:
-        assert session.scalar(
-            select(RoomTurnJob).where(RoomTurnJob.idempotency_key == "stale-room-turn")
-        ) is None
+        assert (
+            session.scalar(
+                select(RoomTurnJob).where(RoomTurnJob.idempotency_key == "stale-room-turn")
+            )
+            is None
+        )
+
+
+def test_room_turn_rejects_revision_changed_during_unlocked_authority_prefetch(
+    client: TestClient,
+    agent_runtime: FakeAgentRuntime,
+) -> None:
+    register(client, "room-owner@example.com", "DM")
+    create_campaign(client)
+    # The Web projection accepted revision 1, while the authoritative MCP has
+    # advanced to the fixture's revision 7 before the Agent is invoked.
+    response = client.post(
+        "/api/campaigns/campaign-1/room/messages",
+        headers={"Idempotency-Key": "authoritative-stale-room-turn"},
+        json={"content": "I act on changing state.", "mode": "action", "base_revision": 1},
+    )
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "stale_revision"
+    assert detail["retryable"] is False
+    assert "refresh the room panel" in detail["message"]
+    assert not agent_runtime.calls
 
 
 def test_room_turn_projects_standard_mcp_image_to_private_host_artifact(
@@ -445,7 +478,7 @@ def test_room_turn_reuses_agent_result_when_projection_retry_recovers(
     async def fail_once(**arguments: Any) -> dict[str, Any]:
         nonlocal calls
         calls += 1
-        if calls == 1:
+        if calls == 2:
             raise RuntimeError("projection temporarily unavailable")
         return await original(**arguments)
 
@@ -457,7 +490,7 @@ def test_room_turn_reuses_agent_result_when_projection_retry_recovers(
     )
 
     assert response.status_code == 200, response.text
-    assert calls == 2
+    assert calls == 3
     assert len(agent_runtime.calls) == 1
     with client.app.state.session_factory() as session:
         job = session.get(RoomTurnJob, response.json()["job"]["id"])
@@ -533,9 +566,9 @@ def test_expired_worker_lease_recovers_and_completes_after_restart(
     deadline = time.monotonic() + 5
     status_value = "queued"
     while time.monotonic() < deadline:
-        status_value = client.get(
-            f"/api/campaigns/campaign-1/room/jobs/{job_id}"
-        ).json()["job"]["status"]
+        status_value = client.get(f"/api/campaigns/campaign-1/room/jobs/{job_id}").json()["job"][
+            "status"
+        ]
         if status_value == "succeeded":
             break
         time.sleep(0.02)
@@ -593,6 +626,10 @@ def test_async_room_action_releases_database_before_agent_and_mcp_awaits(
     def assert_database_released(label: str) -> None:
         assert len(captured_sessions) == 1
         assert not captured_sessions[0].in_transaction()
+        assert not client.app.state.room_turn_jobs._transaction_lock.locked()
+        assert not any(
+            lock.locked() for lock in client.app.state.room_turn_jobs._settlement_locks.values()
+        )
         observed_awaits.append(label)
 
     original_agent_complete = agent_runtime.complete
@@ -662,7 +699,7 @@ def test_async_room_action_releases_database_before_agent_and_mcp_awaits(
         client.app.dependency_overrides.pop(get_async_db, None)
 
     assert response.status_code == 200, response.text
-    assert observed_awaits == ["agent", "campaign", "projection"]
+    assert observed_awaits == ["campaign", "agent", "campaign", "projection"]
 
 
 def test_async_projection_refresh_releases_database_before_mcp_await(
@@ -727,9 +764,7 @@ def test_panel_revision_short_circuit_skips_binding_projection(
     register(client, "projection-revision@example.com", "Projection revision DM")
     create_campaign(client)
 
-    response = client.get(
-        "/api/campaigns/campaign-1/room/panel?known_revision=7"
-    )
+    response = client.get("/api/campaigns/campaign-1/room/panel?known_revision=7")
 
     assert response.status_code == 200
     assert response.json() == {"not_modified": True, "revision": 7}
@@ -755,9 +790,7 @@ def test_panel_projection_cache_is_revision_and_authorization_scoped(
     cached = client.get("/api/campaigns/campaign-1/room/panel")
     assert cached.status_code == 200, cached.text
     assert cached.json() == first.json()
-    unchanged = client.get(
-        "/api/campaigns/campaign-1/room/panel?known_revision=7"
-    )
+    unchanged = client.get("/api/campaigns/campaign-1/room/panel?known_revision=7")
     assert unchanged.status_code == 200, unchanged.text
     assert unchanged.json() == {"not_modified": True, "revision": 7}
     assert len([call for call in dnd_runtime.calls if call[0] == "panel_state"]) == 1
@@ -917,9 +950,10 @@ def test_room_audience_and_panel_actions_are_authorized_and_refreshable(
     dm_messages = client.get("/api/campaigns/campaign-1/room/messages").json()
     assert any(item["content"] == "只告诉 DM。" for item in dm_messages)
     dm_panel = client.get("/api/campaigns/campaign-1/room/panel").json()
-    assert dm_panel["current_module"]["scene"]["profile_data"][
-        "combat_grid_templates"
-    ][0]["id"] == "gate-ambush"
+    assert (
+        dm_panel["current_module"]["scene"]["profile_data"]["combat_grid_templates"][0]["id"]
+        == "gate-ambush"
+    )
     changed = client.post(
         "/api/campaigns/campaign-1/room/panel/actions",
         headers={"Idempotency-Key": "dm-phase-change"},
@@ -966,9 +1000,7 @@ def test_room_audience_and_panel_actions_are_authorized_and_refreshable(
             "action": "combat.start",
             "payload": {
                 "participant_ids": ["actor-1"],
-                "participant_config": [
-                    {"actor_id": "actor-1", "position": {"x": 2, "y": 3}}
-                ],
+                "participant_config": [{"actor_id": "actor-1", "position": {"x": 2, "y": 3}}],
                 "positioning_mode": "grid",
                 "name": "Grid Ambush",
                 "battle_map": {
@@ -993,9 +1025,7 @@ def test_room_audience_and_panel_actions_are_authorized_and_refreshable(
             "action": "combat.start",
             "payload": {
                 "participant_ids": ["actor-1"],
-                "participant_config": [
-                    {"actor_id": "actor-1", "position": {"x": 4, "y": 2}}
-                ],
+                "participant_config": [{"actor_id": "actor-1", "position": {"x": 4, "y": 2}}],
                 "positioning_mode": "grid",
                 "name": "Template Ambush",
                 "battle_map_template_id": "gate-ambush",
@@ -1014,9 +1044,7 @@ def test_room_audience_and_panel_actions_are_authorized_and_refreshable(
             "action": "combat.start",
             "payload": {
                 "participant_ids": ["actor-1"],
-                "participant_config": [
-                    {"actor_id": "actor-1", "position": {"x": 0, "y": 0}}
-                ],
+                "participant_config": [{"actor_id": "actor-1", "position": {"x": 0, "y": 0}}],
                 "positioning_mode": "grid",
                 "battle_map_template_id": "gate-ambush",
                 "battle_map": {"width_cells": 6, "height_cells": 4},
@@ -1033,9 +1061,7 @@ def test_room_audience_and_panel_actions_are_authorized_and_refreshable(
             "action": "combat.start",
             "payload": {
                 "participant_ids": ["actor-1"],
-                "participant_config": [
-                    {"actor_id": "actor-1", "position": {"x": 0, "y": 0}}
-                ],
+                "participant_config": [{"actor_id": "actor-1", "position": {"x": 0, "y": 0}}],
                 "positioning_mode": "grid",
             },
         },
@@ -1049,9 +1075,12 @@ def test_room_audience_and_panel_actions_are_authorized_and_refreshable(
     assert event_types.count("state.changed") == 4
 
     login(client, "room-private@example.com")
-    assert client.put(
-        "/api/campaigns/campaign-1/room/read", json={"last_read_sequence": 3}
-    ).status_code == 200
+    assert (
+        client.put(
+            "/api/campaigns/campaign-1/room/read", json={"last_read_sequence": 3}
+        ).status_code
+        == 200
+    )
     mismatch = client.post(
         "/api/campaigns/campaign-1/room/messages",
         headers={"Idempotency-Key": "private-message-1"},
@@ -1174,9 +1203,7 @@ def test_structured_room_turn_projects_actor_identity_and_personal_suggestions(
                 "revision": 7,
                 "nonce": "room-receipt-nonce",
             },
-            "structured_content": {
-                "result": {"resolution_id": "resolution-1", "total": 17}
-            },
+            "structured_content": {"result": {"resolution_id": "resolution-1", "total": 17}},
         },
     )
     dnd_runtime.resolution_presentations["resolution-1"] = {
@@ -1348,8 +1375,7 @@ def test_public_room_turn_cannot_reference_dm_only_resolution(
     assert response.json()["detail"]["retryable"] is False
     timeline = client.get("/api/campaigns/campaign-1/room/messages").json()
     assert all(
-        resolution_id not in str(message.get("structured_payload") or {})
-        for message in timeline
+        resolution_id not in str(message.get("structured_payload") or {}) for message in timeline
     )
 
 
@@ -1475,9 +1501,7 @@ def test_room_turn_globally_bounds_resolution_actor_and_suggestion_projections(
     assert response.status_code == 200, response.text
     assert maximum == 16
     assert {kind for kind, _ in starts[:16]} == {"resolution", "actor"}
-    last_resolution = max(
-        index for index, (kind, _) in enumerate(starts) if kind == "resolution"
-    )
+    last_resolution = max(index for index, (kind, _) in enumerate(starts) if kind == "resolution")
     assert any(
         kind == "actor" and actor_id == "projection-actor-1"
         for kind, actor_id in starts[:last_resolution]
@@ -1485,9 +1509,10 @@ def test_room_turn_globally_bounds_resolution_actor_and_suggestion_projections(
     assert starts.count(("actor", "projection-actor-1")) == 3
     blocks = response.json()["agent_message"]["structured_payload"]["blocks"]
     assert [block["resolution_id"] for block in blocks[3:]] == resolution_ids
-    assert response.json()["agent_message"]["structured_payload"]["suggestions"][0][
-        "actor_revision"
-    ] == 3
+    assert (
+        response.json()["agent_message"]["structured_payload"]["suggestions"][0]["actor_revision"]
+        == 3
+    )
     assert owner["id"] != player["id"]
 
 
@@ -1680,9 +1705,7 @@ def test_suggestion_cannot_reference_hidden_or_stale_pending_choice(
                 {
                     "output_id": "ordinary-output",
                     "audience": {"kind": "public"},
-                    "blocks": [
-                        {"type": "prompt", "block_id": "p1", "text": "你要怎么做？"}
-                    ],
+                    "blocks": [{"type": "prompt", "block_id": "p1", "text": "你要怎么做？"}],
                 }
             ],
             "suggestions": [
@@ -1757,10 +1780,13 @@ def test_structured_room_turn_accepts_pc_performance_from_exact_trigger_intent(
 ) -> None:
     owner = register(client, "room-owner@example.com", "DM")
     create_campaign(client)
-    assert client.put(
-        "/api/campaigns/campaign-1/actors/actor-1/binding",
-        json={"user_id": owner["id"], "can_control": True, "can_view_private": True},
-    ).status_code == 200
+    assert (
+        client.put(
+            "/api/campaigns/campaign-1/actors/actor-1/binding",
+            json={"user_id": owner["id"], "can_control": True, "can_view_private": True},
+        ).status_code
+        == 200
+    )
 
     def output(context: dict[str, Any]) -> dict[str, Any]:
         return {

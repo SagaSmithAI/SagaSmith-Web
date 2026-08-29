@@ -18,6 +18,8 @@ class FakeDndRuntime:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.fail_grant = False
         self.campaign_count = 0
+        self.campaign_revision = 7
+        self.campaign_phase = "play"
         self.module_revision = 1
         self.final_pack_id = ""
         self.final_pack_version = ""
@@ -34,8 +36,8 @@ class FakeDndRuntime:
             "action": "get",
             "result": {
                 "id": arguments["campaign_id"],
-                "revision": 7,
-                "effective_game_phase": "play",
+                "revision": self.campaign_revision,
+                "effective_game_phase": self.campaign_phase,
             },
         }
 

@@ -37,10 +37,12 @@ class Settings(BaseSettings):
     agent_reservation_tokens: int = 32_768
     agent_api_url: str = "http://127.0.0.1:8910"
     agent_api_key: SecretStr = SecretStr("")
+    agent_boundary_mode: Literal["legacy", "modern"] = "legacy"
     auth_context_secret: SecretStr = SecretStr("development-auth-context-secret-change-me")
     service_internal_url: str = "http://127.0.0.1:8080"
     agent_completion_timeout_seconds: int = Field(default=900, ge=30, le=3600)
     agent_reservation_ttl_seconds: int = Field(default=1200, ge=60, le=7200)
+    agent_delegation_ttl_seconds: int = Field(default=600, ge=30, le=900)
     room_turn_worker_poll_seconds: float = Field(default=0.1, gt=0, le=60)
     room_turn_worker_lease_seconds: int = Field(default=60, ge=15, le=900)
     room_turn_worker_concurrency: int = Field(default=4, ge=1, le=64)

@@ -1,0 +1,33 @@
+{
+  "dnd5e": {
+    "source_contract": "sagasmith_dnd_mcp.server.campaign_query(view=get)",
+    "response": {
+      "status": "ok",
+      "action": "get",
+      "result": {
+        "id": "dnd-campaign",
+        "revision": 0,
+        "effective_game_phase": "lobby"
+      }
+    },
+    "expected": {"phase": "lobby", "revision": 0}
+  },
+  "coc7e": {
+    "source_contract": "sagasmith_coc_mcp.server.campaign_query(action=get)",
+    "response": {
+      "id": "coc-campaign",
+      "revision": 8,
+      "effective_game_phase": "combat"
+    },
+    "expected": {"phase": "combat", "revision": 8}
+  },
+  "narrative": {
+    "source_contract": "sagasmith_narrative_mcp.server.campaign_query(action=get)",
+    "response": {
+      "id": "narrative-campaign",
+      "revision": 4,
+      "phase": "conflict"
+    },
+    "expected": {"phase": "conflict", "revision": 4}
+  }
+}

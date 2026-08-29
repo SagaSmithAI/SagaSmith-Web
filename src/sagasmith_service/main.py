@@ -195,6 +195,7 @@ def create_app(
         settings.agent_api_url,
         settings.agent_api_key.get_secret_value(),
         timeout_seconds=settings.agent_completion_timeout_seconds,
+        boundary_mode=settings.agent_boundary_mode,
         http_client=managed_http_client(
             "agent",
             timeout=httpx.Timeout(settings.agent_completion_timeout_seconds, connect=10),

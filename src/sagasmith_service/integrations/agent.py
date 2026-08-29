@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Protocol
+from datetime import datetime
+from typing import Any, Literal, Protocol
 from urllib.parse import quote
 
 import httpx
+from pydantic import BaseModel, ConfigDict, Field
 
 from sagasmith_service.observability import AGENT_UPSTREAM_SECONDS, observe_latency
 
@@ -64,6 +66,70 @@ class AgentRuntimeError(RuntimeError):
         super().__init__(message)
         self.retryable = retryable
         self.code = code
+
+
+class ModernWorkerTrustedContext(BaseModel):
+    """Exact SagaSmith Agent Hosted Worker trusted-context contract."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    caller_principal: str = Field(min_length=1, max_length=300)
+    workload_identity: str = Field(min_length=1, max_length=300)
+    requester_principal: str = Field(min_length=1, max_length=300)
+    resource_owner_principal: str = Field(min_length=1, max_length=300)
+    acting_host_principal: str = Field(min_length=1, max_length=300)
+    acting_character_id: str = Field(default="", max_length=300)
+    authorized_audience: str = Field(min_length=1, max_length=300)
+    allowed_operations: list[str] = Field(min_length=1, max_length=100)
+    room_turn_id: str = Field(min_length=1, max_length=300)
+    campaign_id: str = Field(min_length=1, max_length=300)
+    system_id: str = Field(min_length=1, max_length=100)
+    base_revision: int = Field(ge=0)
+    expires_at: datetime
+    idempotency_key: str = Field(min_length=1, max_length=300)
+    conversation_principal: str = Field(min_length=1, max_length=300)
+    tenant_id: str = Field(default="", max_length=300)
+    traceparent: str = Field(default="", max_length=512)
+    tracestate: str = Field(default="", max_length=2048)
+    baggage: str = Field(default="", max_length=8192)
+
+
+_MODERN_TRUSTED_CONTEXT_FIELDS = frozenset(ModernWorkerTrustedContext.model_fields)
+
+
+def _modern_worker_payload(content: str, context: dict[str, Any]) -> dict[str, Any]:
+    """Project durable Web authority inputs onto the Agent's exact wire schema."""
+
+    authority = context.get("authority_context")
+    if not isinstance(authority, dict):
+        raise ValueError("modern Agent requests require a durable authority context")
+    trusted = ModernWorkerTrustedContext.model_validate(
+        {name: authority[name] for name in _MODERN_TRUSTED_CONTEXT_FIELDS if name in authority}
+    )
+    return {
+        "messages": [{"role": "user", "content": content}],
+        "trusted_context": trusted.model_dump(mode="json"),
+        "stream": False,
+        "response_contract": context.get("response_contract"),
+        "terminal": bool(context.get("terminal", False)),
+    }
+
+
+def _legacy_worker_payload(
+    content: str,
+    context: dict[str, Any],
+    idempotency_key: str | None,
+) -> dict[str, Any]:
+    """Build the pinned pre-v2 worker payload without weakening modern mode."""
+
+    return {
+        "messages": [{"role": "user", "content": _legacy_worker_prompt(content, context)}],
+        "trusted_context": context,
+        "principal_id": context["principal_id"],
+        "stream": False,
+        "response_contract": context.get("response_contract"),
+        "idempotency_key": idempotency_key,
+    }
 
 
 def _legacy_worker_prompt(content: str, context: dict[str, Any]) -> str:
@@ -151,11 +217,13 @@ class HttpAgentRuntime:
         api_key: str = "",
         *,
         timeout_seconds: int = 180,
+        boundary_mode: Literal["legacy", "modern"] = "legacy",
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
+        self.boundary_mode = boundary_mode
         self._owns_http_client = http_client is None
         self.http_client = (
             http_client
@@ -210,19 +278,11 @@ class HttpAgentRuntime:
             response = await self.http_client.post(
                 f"{self.base_url}/v1/conversations/{quote(session_id, safe='')}/completions",
                 headers=headers,
-                json={
-                    # Keep the structured envelope as the durable authority input.
-                    # The single-message projection is a pinned-Agent compatibility
-                    # path and grants no authority; domain MCPs reauthorize calls.
-                    "messages": [
-                        {"role": "user", "content": _legacy_worker_prompt(content, context)}
-                    ],
-                    "trusted_context": context,
-                    "principal_id": context["principal_id"],
-                    "stream": False,
-                    "response_contract": context.get("response_contract"),
-                    "idempotency_key": idempotency_key,
-                },
+                json=(
+                    _modern_worker_payload(content, context)
+                    if self.boundary_mode == "modern"
+                    else _legacy_worker_payload(content, context, idempotency_key)
+                ),
                 timeout=httpx.Timeout(self.timeout_seconds, connect=10),
             )
             if response.status_code >= 400:
