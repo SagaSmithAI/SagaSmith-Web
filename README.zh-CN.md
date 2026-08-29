@@ -83,15 +83,15 @@ fallback 或新工作的目标。
 ## 已审查的组件锁
 
 托管构建由 [`component-versions.json`](component-versions.json) 完整固定，schema 为
-`sagasmith.release-lock/v3`，lock 为 `2026.8.29-hosted-mcp-modern`：
+`sagasmith.release-lock/v3`，lock 为 `2026.8.30-mcp-modern-final`：
 
 | 强制组件 | 审查 revision |
 |---|---|
-| SagaSmith Agent | `a5dee9bcc429f99beaf4539ad725aa4b95935e5f` |
-| SagaSmith Core | `eef98fcfcaa96d08c069708b33ee7717ba1625c3` |
-| D&D | `587f66e0673b686a7d47d1ee266d8404ef221741` |
-| CoC | `515f6a7e3ba3c2a41fff7de2624ee19e4deb6190` |
-| Narrative | `3f3694401dace148684f7fab9adda5b12679dfa0` |
+| SagaSmith Agent | `c0731c44775a045bb106000391ef6240f7b4d2a3` |
+| SagaSmith Core | `612bfe7e5290eb5b23f2811baa83b8a28293b36e` |
+| D&D | `ba602ea103de67d19ffbfba2f69f3802a9e34dd3` |
+| CoC | `eebab0986299b0cd9ce420c3521e4688356e9746` |
+| Narrative | `2e2dfe8a18b53ad4c090a7382c25c32a354c7621` |
 
 该锁要求 MCP `2026-07-28`、`sagasmith.authoritative-mcp/v2`、
 `sagasmith.auth-context/v2` 和 modern Hosted boundary。`compose.yaml`、`.env.example`、Agent
