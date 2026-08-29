@@ -90,7 +90,7 @@ The hosted build is reproducible from [`component-versions.json`](component-vers
 
 | Enforced component | Reviewed revision |
 |---|---|
-| SagaSmith Agent | `056f295360bcfa56a9ade7c6c151e9aea447df41` |
+| SagaSmith Agent | `a5dee9bcc429f99beaf4539ad725aa4b95935e5f` |
 | SagaSmith Core | `eef98fcfcaa96d08c069708b33ee7717ba1625c3` |
 | D&D | `587f66e0673b686a7d47d1ee266d8404ef221741` |
 | CoC | `515f6a7e3ba3c2a41fff7de2624ee19e4deb6190` |
@@ -178,6 +178,13 @@ holding a room or database lock, then performs a short compare-and-set. A stale 
 recoverable HTTP 409. Only final ordered message/outbox settlement takes a short per-room lock, so
 independent rooms, reads, and compatible actions can continue concurrently.
 
+`SAGASMITH_ROOM_TURN_WORKER_CONCURRENCY` bounds the process-wide worker pool, while
+`SAGASMITH_ROOM_TURN_PER_ROOM_CONCURRENCY` (default `4`) independently limits expensive turns for
+one room. The durable claim transaction locks the room row, counts valid leases, and releases the
+lock before Agent/MCP work, so the limit holds across Web replicas without a long database or
+settlement lock. Set the per-room value to `1` when strict single-turn execution is preferred,
+without serializing unrelated rooms.
+
 The reservation TTL must exceed the Agent completion timeout. Defaults are 1,200 and 900 seconds,
 respectively. Job heartbeats renew the reservation; an expired timestamp alone cannot free quota
 while an active room or Module job owns it. Usage settles immediately after Agent completion and
@@ -187,6 +194,11 @@ Clients can recover or cancel work through:
 
 - `GET /api/campaigns/{campaign_id}/room/jobs/{job_id}`
 - `POST /api/campaigns/{campaign_id}/room/jobs/{job_id}/cancel`
+
+Terminal errors retain their stable code, retryability, class, and recovery hint. Conflicts and
+cancellation return 409, model-correctable request/tool-output errors return 422, retryable
+Agent/storage failures return 503, non-retryable upstream failures return 502, and unexpected Host
+faults return 500. A network retry uses the original idempotency key for every retryable class.
 
 Operational details are in [Durable room-turn operations](docs/room-turn-jobs.md).
 
@@ -202,8 +214,9 @@ Each conversation runs in a bounded worker process. The Supervisor limits worker
 concurrency, coalesces simultaneous starts, and returns 503 instead of creating unbounded
 processes. Managed state lives only below `/workspaces/hosted-v1` and uses an owner marker plus an
 opaque workspace ID. Startup recovers crash-left markers, terminal success removes registered
-state, and TTL/LRU cleanup enforces count and byte limits. Unknown, malformed, external, legacy,
-symlinked, or active directories are preserved for operator review rather than deleted.
+state, and TTL/LRU cleanup enforces count and byte limits. The supervisor recognizes Agent's exact
+regular-file root admission lock as operational metadata; every other unknown, malformed, external,
+legacy, symlinked, or active entry is preserved for operator review rather than deleted.
 
 ## Projections, caches, and realtime delivery
 
@@ -212,6 +225,11 @@ audience-safe Web projections and a durable outbox. Projection cache keys includ
 revision; successful commits invalidate only affected scopes, while failed, rolled-back, and no-op
 operations do not invalidate data. Tool-catalog caching changes with authorization/catalog scope,
 not with each combat write.
+
+Each committed `state.changed` receipt and its outbox wake-up carry `authority_revision`, sorted
+`changed_scopes`, affected `entity_ids`, and the audience descriptor. Consumers can therefore
+rebuild or invalidate only the revisioned projection named by the receipt. If a tool receipt does
+not advance the authority revision, Web emits no state-change invalidation.
 
 Room and Module SSE use Redis wake-ups plus PostgreSQL cursor replay. The database reconciliation
 poll is a missed-event safety net. Structured activity/suggestion fields and composite indexes

@@ -20,6 +20,7 @@ class FakeDndRuntime:
         self.campaign_count = 0
         self.campaign_revision = 7
         self.campaign_phase = "play"
+        self.combat: dict[str, Any] | None = None
         self.module_revision = 1
         self.final_pack_id = ""
         self.final_pack_version = ""
@@ -43,17 +44,17 @@ class FakeDndRuntime:
 
     async def get_panel_state(self, **arguments: Any) -> dict[str, Any]:
         self.calls.append(("panel_state", arguments))
-        if arguments.get("known_revision") == 7:
-            return {"not_modified": True, "revision": 7}
+        if arguments.get("known_revision") == self.campaign_revision:
+            return {"not_modified": True, "revision": self.campaign_revision}
         return {
             "not_modified": False,
             "campaign": {
                 "id": arguments["campaign_id"],
-                "revision": 7,
-                "effective_game_phase": "play",
+                "revision": self.campaign_revision,
+                "effective_game_phase": self.campaign_phase,
             },
-            "phase": "play",
-            "revision": 7,
+            "phase": self.campaign_phase,
+            "revision": self.campaign_revision,
             "party": {"members": ["actor-1"]},
             "characters": [
                 {
@@ -81,7 +82,7 @@ class FakeDndRuntime:
                     },
                 }
             },
-            "combat": None,
+            "combat": self.combat,
         }
 
     async def render_public_combat(self, **arguments: Any) -> DndCombatRender:
@@ -149,29 +150,42 @@ class FakeDndRuntime:
 
     async def set_game_phase(self, **arguments: Any) -> dict[str, Any]:
         self.calls.append(("phase_set", arguments))
+        self.campaign_revision = arguments["expected_revision"] + 1
+        self.campaign_phase = arguments["tool_profile"]
         return {
             "action": "set",
             "result": {
                 "effective_game_phase": arguments["tool_profile"],
-                "campaign_revision": arguments["expected_revision"] + 1,
+                "campaign_revision": self.campaign_revision,
             },
         }
 
     async def start_combat(self, **arguments: Any) -> dict[str, Any]:
         self.calls.append(("combat_start", arguments))
+        self.campaign_revision = arguments["expected_revision"] + 1
+        self.campaign_phase = "combat"
+        self.combat = {
+            "active": True,
+            "combatants": arguments["participant_ids"],
+            "positioning_mode": arguments["positioning_mode"],
+            "battle_map": arguments.get("battle_map"),
+        }
         return {
             "result": {
-                "campaign_revision": arguments["expected_revision"] + 1,
-                "combat": {"active": True, "combatants": arguments["participant_ids"]},
+                "campaign_revision": self.campaign_revision,
+                "combat": self.combat,
             }
         }
 
     async def end_combat(self, **arguments: Any) -> dict[str, Any]:
         self.calls.append(("combat_end", arguments))
+        self.campaign_revision = arguments["expected_revision"] + 1
+        self.campaign_phase = "play"
+        self.combat = {"active": False, "outcome": arguments["outcome"]}
         return {
             "result": {
-                "campaign_revision": arguments["expected_revision"] + 1,
-                "combat": {"active": False, "outcome": arguments["outcome"]},
+                "campaign_revision": self.campaign_revision,
+                "combat": self.combat,
             }
         }
 

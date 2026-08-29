@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import base64
 import os
 import socket
 import threading
 import time
 import urllib.request
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 import uvicorn
@@ -28,7 +30,7 @@ def _free_port() -> int:
 
 
 @pytest.fixture
-def live_web(tmp_path) -> Iterator[str]:
+def live_web(tmp_path, dnd_runtime: Any, agent_runtime: Any) -> Iterator[str]:
     port = _free_port()
     database_url = f"sqlite:///{(tmp_path / 'browser.db').as_posix()}"
     settings = Settings(
@@ -38,7 +40,14 @@ def live_web(tmp_path) -> Iterator[str]:
         private_storage_dir=str(tmp_path / "private"),
         exchange_dir=str(tmp_path / "exchange"),
     )
-    app = create_app(settings, make_engine(database_url))
+    app = create_app(
+        settings,
+        make_engine(database_url),
+        dnd_runtime,
+        agent_runtime,
+        coc_runtime=dnd_runtime,
+        narrative_runtime=dnd_runtime,
+    )
     server = uvicorn.Server(
         uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
     )
@@ -138,3 +147,93 @@ def test_account_lifecycle_in_a_real_browser(live_web: str) -> None:
         error for error in console_errors if "401 (Unauthorized)" not in error
     ]
     assert unexpected_console_errors == []
+
+
+def test_hosted_room_media_and_combat_grid_render_in_a_real_browser(
+    live_web: str, agent_runtime: Any
+) -> None:
+    image = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUB"
+        "AScY42YAAAAASUVORK5CYII="
+    )
+    agent_runtime.mcp_results = (
+        {
+            "content": [
+                {"type": "text", "text": "Rendered combat grid."},
+                {
+                    "type": "image",
+                    "data": base64.b64encode(image).decode("ascii"),
+                    "mimeType": "image/png",
+                },
+            ],
+            "structuredContent": {"revision": 7},
+            "isError": False,
+        },
+    )
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(channel="chrome", headless=True)
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        _register(page, live_web)
+        request = page.context.request
+        common_headers = {"Origin": live_web}
+        campaign_response = request.post(
+            f"{live_web}/api/campaigns",
+            headers={**common_headers, "Idempotency-Key": "browser-media-campaign"},
+            data={"name": "Browser Media", "edition": "2024"},
+        )
+        assert campaign_response.status == 201, campaign_response.text()
+        campaign_id = campaign_response.json()["id"]
+        room_response = request.post(
+            f"{live_web}/api/campaigns/{campaign_id}/room/messages",
+            headers={**common_headers, "Idempotency-Key": "browser-media-turn"},
+            data={"content": "Render the shared map.", "mode": "action"},
+        )
+        assert room_response.status == 200, room_response.text()
+        media_url = room_response.json()["agent_message"]["structured_payload"]["media"][0][
+            "url"
+        ]
+        combat_response = request.post(
+            f"{live_web}/api/campaigns/{campaign_id}/room/panel/actions",
+            headers={**common_headers, "Idempotency-Key": "browser-grid-start"},
+            data={
+                "action": "combat.start",
+                "base_revision": 7,
+                "payload": {
+                    "participant_ids": ["actor-1"],
+                    "participant_config": [
+                        {"actor_id": "actor-1", "position": {"x": 1, "y": 1}}
+                    ],
+                    "positioning_mode": "grid",
+                    "name": "Browser Grid",
+                    "battle_map": {
+                        "width_cells": 8,
+                        "height_cells": 6,
+                        "blocked_cells": [],
+                        "difficult_cells": [],
+                    },
+                    "battle_map_override_reason": "browser acceptance fixture",
+                },
+            },
+        )
+        assert combat_response.status == 200, combat_response.text()
+
+        page.reload(wait_until="networkidle")
+        page.locator("article.campaign", has_text="Browser Media").click()
+        page.locator("#campaign-room").wait_for(state="visible")
+        room_image = page.locator('.message-media img[src="%s"]' % media_url)
+        expect(room_image).to_be_visible()
+        page.wait_for_function(
+            """url => {
+                const image = document.querySelector(`.message-media img[src="${url}"]`);
+                return image && image.complete && image.naturalWidth > 0;
+            }""",
+            arg=media_url,
+        )
+        assert room_image.evaluate("element => element.naturalWidth") == 1
+        page.get_by_role("button", name="战斗", exact=True).click()
+        expect(page.locator("#combat-grid")).to_be_visible()
+        page.wait_for_function(
+            "() => document.querySelector('#combat-grid')?.width > 0",
+        )
+        assert page.locator("#combat-grid").evaluate("element => element.width > 0")
+        browser.close()

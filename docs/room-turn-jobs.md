@@ -31,6 +31,25 @@ commit whose HTTP response was lost can be recovered safely. The domain MCP reva
 authority on every call. Only the final ordered message/outbox write is serialized by a short
 per-room settlement lock, so different rooms and independent reads remain concurrent.
 
+The process-wide pool is configured by `SAGASMITH_ROOM_TURN_WORKER_CONCURRENCY`; the additional
+`SAGASMITH_ROOM_TURN_PER_ROOM_CONCURRENCY` scheduler defaults to four active turns per room. Claiming
+a job takes a short database row lock for its room and counts unexpired running leases, so separate
+processors and Web replicas share one durable limit. The transaction commits before Agent/MCP I/O;
+there is no database or settlement lock spanning a turn.
+
+Successful authoritative changes emit a rebuildable `state.changed` receipt and transactional
+outbox row containing `authority_revision`, sorted `changed_scopes`, `entity_ids`, and `audience`.
+The revisioned projection cache can invalidate exactly those keys. A failed transaction emits no
+row, and a successful no-op whose authority revision did not advance emits no invalidation.
+
+## Error boundary
+
+The durable job records a stable error code, class, retryability flag, and safe recovery hint.
+HTTP polling and inline completion map conflict/cancel to 409, model-correctable request or tool
+execution errors to 422, retryable upstream/storage/state failures to 503, non-retryable upstream
+failures to 502, and unexpected Host failures to 500. Retrying a retryable result must preserve the
+original browser idempotency key.
+
 ## Quota lease
 
 `SAGASMITH_AGENT_RESERVATION_TTL_SECONDS` must be greater than

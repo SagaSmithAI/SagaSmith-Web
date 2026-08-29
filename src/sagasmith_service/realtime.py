@@ -274,6 +274,15 @@ def _outbox_for_flush(session: Session, _flush_context: object, _instances: obje
     for item in candidates:
         is_new = item in session.new
         if isinstance(item, CampaignRoomEvent) and is_new:
+            projection_receipt: dict[str, Any] = {}
+            if item.event_type == "state.changed":
+                source = dict(item.payload or {})
+                projection_receipt = {
+                    "authority_revision": source.get("authority_revision"),
+                    "changed_scopes": list(source.get("changed_scopes") or []),
+                    "entity_ids": list(source.get("entity_ids") or []),
+                    "audience": dict(source.get("audience") or {}),
+                }
             entries.append(
                 (
                     item.event_type,
@@ -282,6 +291,7 @@ def _outbox_for_flush(session: Session, _flush_context: object, _instances: obje
                     {
                         "topics": [f"room:{item.room_id}"],
                         "sequence": item.sequence,
+                        **projection_receipt,
                     },
                 )
             )
@@ -296,6 +306,10 @@ def _outbox_for_flush(session: Session, _flush_context: object, _instances: obje
                     {
                         "topics": [f"campaign:{item.id}"],
                         "revision": item.mcp_revision,
+                        "authority_revision": item.mcp_revision,
+                        "changed_scopes": ["campaign"],
+                        "entity_ids": [item.id],
+                        "audience": {"kind": "campaign", "user_ids": []},
                     },
                 )
             )

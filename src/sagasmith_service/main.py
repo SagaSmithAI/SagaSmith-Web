@@ -213,6 +213,7 @@ def create_app(
         concurrency=settings.room_turn_worker_concurrency,
         poll_seconds=settings.room_turn_worker_poll_seconds,
         lease_seconds=settings.room_turn_worker_lease_seconds,
+        per_room_concurrency=settings.room_turn_per_room_concurrency,
         reservation_ttl_seconds=settings.agent_reservation_ttl_seconds,
         retry_seconds=settings.room_turn_retry_seconds,
         failure_recorder=record_room_job_failure,

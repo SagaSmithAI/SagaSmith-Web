@@ -275,16 +275,29 @@ class HttpAgentRuntime:
             operation_class="completion",
             transport="http",
         ):
-            response = await self.http_client.post(
-                f"{self.base_url}/v1/conversations/{quote(session_id, safe='')}/completions",
-                headers=headers,
-                json=(
-                    _modern_worker_payload(content, context)
-                    if self.boundary_mode == "modern"
-                    else _legacy_worker_payload(content, context, idempotency_key)
-                ),
-                timeout=httpx.Timeout(self.timeout_seconds, connect=10),
-            )
+            try:
+                response = await self.http_client.post(
+                    f"{self.base_url}/v1/conversations/{quote(session_id, safe='')}/completions",
+                    headers=headers,
+                    json=(
+                        _modern_worker_payload(content, context)
+                        if self.boundary_mode == "modern"
+                        else _legacy_worker_payload(content, context, idempotency_key)
+                    ),
+                    timeout=httpx.Timeout(self.timeout_seconds, connect=10),
+                )
+            except httpx.TimeoutException as exc:
+                raise AgentRuntimeError(
+                    "Agent completion timed out",
+                    retryable=True,
+                    code="agent_timeout",
+                ) from exc
+            except httpx.RequestError as exc:
+                raise AgentRuntimeError(
+                    "Agent transport is unavailable",
+                    retryable=True,
+                    code="agent_transport_unavailable",
+                ) from exc
             if response.status_code >= 400:
                 retryable = response.status_code in {408, 425, 429} or response.status_code >= 500
                 raise AgentRuntimeError(
