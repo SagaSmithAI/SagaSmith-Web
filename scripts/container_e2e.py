@@ -770,7 +770,12 @@ def run(base_url: str) -> None:
         raise RuntimeError("Narrative Agent completion was not audited")
     narrative_receipts = narrative_audit["details"].get("auth_context_receipts") or []
     if not any(
-        receipt.get("actor_principal") == f"user:{owner_user['id']}"
+        receipt.get("schema") == "sagasmith.auth-context/v2"
+        and receipt.get("target_service") == "sagasmith-narrative-mcp"
+        and receipt.get("requester_principal") == f"user:{owner_user['id']}"
+        and receipt.get("acting_host_principal") == f"user:{owner_user['id']}"
+        and receipt.get("authorized_audience") == "sagasmith-narrative-mcp"
+        and receipt.get("allowed_operations") == ["actor_query"]
         and receipt.get("campaign_id") == narrative_campaign_id
         and narrative_conversation["id"] in receipt.get("conversation_principal", "")
         and str(receipt.get("tool", "")).endswith("actor_query")
@@ -797,6 +802,23 @@ def run(base_url: str) -> None:
         raise RuntimeError(f"hosted acting identity was not preserved: {room_details}")
     if room_details.get("authorized_audience") != "sagasmith-dnd-mcp":
         raise RuntimeError(f"room MCP audience was not exact: {room_details}")
+    room_receipts = room_details.get("auth_context_receipts") or []
+    if not any(
+        receipt.get("schema") == "sagasmith.auth-context/v2"
+        and receipt.get("target_service") == "sagasmith-dnd-mcp"
+        and receipt.get("requester_principal") == f"user:{player_user['id']}"
+        and receipt.get("resource_owner_principal") == f"user:{owner_user['id']}"
+        and receipt.get("acting_host_principal") == f"agent:{identity['id']}"
+        and receipt.get("authorized_audience") == "sagasmith-dnd-mcp"
+        and receipt.get("allowed_operations") == ["character_query"]
+        and receipt.get("campaign_id") == campaign_id
+        and receipt.get("room_turn_id") == (room_turn.get("job") or {}).get("id")
+        and str(receipt.get("tool", "")).endswith("character_query")
+        for receipt in room_receipts
+    ):
+        raise RuntimeError(
+            f"Hosted room modern delegation receipt was not retained: {room_receipts}"
+        )
     if (
         not operations
         or operations != sorted(set(operations))
@@ -820,6 +842,8 @@ def run(base_url: str) -> None:
                 "public_artifact_id": public_artifact["id"],
                 "module_project_id": project_id,
                 "identity_id": identity["id"],
+                "mcp_protocol": "2026-07-28",
+                "authority_contract": "sagasmith.authoritative-mcp/v2",
                 "revocation": "enforced",
                 "audit_actions": len(actions),
             },

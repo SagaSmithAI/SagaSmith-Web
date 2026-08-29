@@ -20,7 +20,7 @@ def test_component_lock_covers_every_current_repository() -> None:
         "SagaSmithAI.github.io",
     }
 
-    assert lock["schema"] == "sagasmith.component-lock/v1"
+    assert lock["schema"] == "sagasmith.release-lock/v3"
     assert locked == expected
     assert len({component["repository"] for component in lock["components"]}) == len(
         lock["components"]
@@ -52,7 +52,7 @@ def test_service_release_manifest_pins_every_runtime_layer() -> None:
     assert runtime_locks["service_api"] == "uv.lock"
     assert runtime_locks["agent_supervisor"] == ("infrastructure/agent-supervisor-requirements.txt")
     assert runtime_locks["uv_version"] == "0.11.25"
-    assert runtime_locks["dependency_cutoff"] == "2026-08-17T12:00:00Z"
+    assert runtime_locks["dependency_cutoff"] == "2026-08-29T10:00:00Z"
     deployment_text = "\n".join(
         path.read_text(encoding="utf-8")
         for path in (
@@ -96,14 +96,28 @@ def test_agent_supervisor_lock_does_not_disclose_local_paths() -> None:
 
 def test_hosted_contract_requires_dynamic_scoped_structured_tools() -> None:
     lock = json.loads((ROOT / "component-versions.json").read_text(encoding="utf-8"))
+    assert lock["compatibility"] == {
+        "mcp_protocol": "2026-07-28",
+        "legacy_protocol": "fallback-only",
+        "auth_context": "sagasmith.auth-context/v2",
+        "authority": "sagasmith.authoritative-mcp/v2",
+    }
+    assert lock["required_contracts"]["release_lock"] == "sagasmith.release-lock/v3"
+    assert lock["required_contracts"]["authority"] == "sagasmith.authoritative-mcp/v2"
+    assert lock["required_contracts"]["hosted_boundary"] == "modern"
     assert lock["required_contracts"]["agent"] == [
-        "sessionScoped",
-        "tools/list_changed",
+        "per_request_authority",
         "structured_output",
         "tool_receipts",
+        "io.modelcontextprotocol/tasks",
     ]
+    assert lock["required_contracts"]["host_tool_projection"] == {
+        "maximum_tools": 16,
+        "ordering": "sorted-unique",
+        "catalog": "authorization-scoped-deterministic",
+        "enforcement": "host-projection-plus-call-time-mcp-authorization",
+    }
     assert lock["required_contracts"]["mcp_common_tools"] == [
-        "exposure",
         "server_capabilities",
         "campaign_query",
         "game_phase",
@@ -114,35 +128,60 @@ def test_hosted_contract_requires_dynamic_scoped_structured_tools() -> None:
         "resolution_presentation",
     ]
     assert lock["required_contracts"]["narrative_transport"] == ("process-local-stdio-only")
+    serialized = json.dumps(lock["required_contracts"])
+    assert "sessionScoped" not in serialized
+    assert "tools/list_changed" not in serialized
 
 
-def test_hosted_agent_uses_current_session_scoped_native_tool_contract() -> None:
+def test_release_lock_matches_final_coordinated_component_set() -> None:
+    lock = json.loads((ROOT / "component-versions.json").read_text(encoding="utf-8"))
+    revisions = {item["repository"]: item["revision"] for item in lock["components"]}
+    expected = {
+        ".github": "6ee83e94efda617c1e0f36d370f87150a4e0c7d5",
+        "SagaSmith-agent": "966fcba0b89b668f55b878e09c623ea3c9d2f698",
+        "sagasmith-core": "eef98fcfcaa96d08c069708b33ee7717ba1625c3",
+        "sagasmith-dnd": "587f66e0673b686a7d47d1ee266d8404ef221741",
+        "sagasmith-coc": "515f6a7e3ba3c2a41fff7de2624ee19e4deb6190",
+        "sagasmith-narrative": "3f3694401dace148684f7fab9adda5b12679dfa0",
+        "SagaSmithAI.github.io": "a737915ddd8fa3a479b584f0609b19cf9b880b8e",
+    }
+    for repository, revision in expected.items():
+        assert revisions[repository] == revision
+    assert lock["shared"] == {"sagasmith-core": expected["sagasmith-core"]}
+    assert lock["profiles"] == {
+        "dnd": {"sagasmith-dnd": expected["sagasmith-dnd"]},
+        "coc": {"sagasmith-coc": expected["sagasmith-coc"]},
+        "narrative": {"sagasmith-narrative": expected["sagasmith-narrative"]},
+    }
+
+
+def test_hosted_agent_uses_owned_modern_request_scoped_tool_contract() -> None:
     paths = (
         ROOT / "config" / "agent-config.example.json",
+        ROOT / "config" / "agent-config.regression.json",
         ROOT / "tests/e2e/agent-config.json",
     )
     for path in paths:
         config = json.loads(path.read_text(encoding="utf-8"))
-        expected_servers = {
-            "sagasmith-dnd-mcp",
-            "sagasmith-coc-mcp",
-            "sagasmith-narrative-mcp",
+        expected_systems = {
+            "sagasmith-dnd-mcp": ["dnd5e"],
+            "sagasmith-coc-mcp": ["coc7e"],
+            "sagasmith-narrative-mcp": ["narrative"],
         }
-        for server_name in expected_servers:
+        for server_name, system_ids in expected_systems.items():
             server = config["tools"]["mcpServers"][server_name]
             assert server["injectPrincipal"] is True
-            assert server["sessionScoped"] is True
             assert server["exposeResourcesAndPrompts"] is True
             assert server["toolTimeout"] == 900
+            assert server["taskTimeout"] == 900
             assert server["enabledTools"] == ["*"]
-            # The current component lock pins the pre-v2 Agent schema. Modern
-            # delegation/audience/protocol fields are added only by the atomic
-            # release-lock upgrade so this rollback-compatible config remains
-            # loadable by the pinned worker.
-            assert "delegationSecret" not in server
-            assert "authorizationAudience" not in server
-            assert "systemIds" not in server
-            assert "protocolMode" not in server
+            assert server["delegationSecret"]
+            assert server["targetService"] == server_name
+            assert server["authorizationAudience"] == server_name
+            assert server["systemIds"] == system_ids
+            assert server["protocolMode"] == "2026-07-28"
+            assert "authContextSecret" not in server
+            assert "sessionScoped" not in server
         skills = config["agents"]["defaults"]["externalSkillsDirs"]
         assert skills == [
             "/opt/sagasmith/skills/hosted",

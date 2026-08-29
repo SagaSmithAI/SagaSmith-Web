@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import timedelta
 from decimal import Decimal
 from typing import Annotated
 
@@ -22,6 +23,12 @@ from sagasmith_service.models import (
     now_utc,
 )
 from sagasmith_service.quota import QuotaExceededError, release, reserve, settle
+from sagasmith_service.room_tool_policy import (
+    RoomToolPolicyError,
+    campaign_phase_and_revision,
+    select_room_turn_tools,
+    service_for_system,
+)
 from sagasmith_service.schemas import (
     AgentMessageRequest,
     AgentRunView,
@@ -228,7 +235,7 @@ async def send_message(
             metric="llm_tokens",
             quantity=quota_quantity,
             idempotency_key=f"agent-reserve:{user.id}:{idempotency_key}",
-            ttl_seconds=300,
+            ttl_seconds=request.app.state.settings.agent_reservation_ttl_seconds,
         )
     except QuotaExceededError as exc:
         raise HTTPException(status.HTTP_402_PAYMENT_REQUIRED, str(exc)) from exc
@@ -244,6 +251,48 @@ async def send_message(
     session.commit()
     runtime: AgentRuntime = request.app.state.agent_runtime
     try:
+        domain_runtime = request.app.state.game_runtimes.get(campaign.system_id)
+        if domain_runtime is None:
+            raise RoomToolPolicyError(f"unsupported campaign system: {campaign.system_id}")
+        runtime_state = await domain_runtime.get_campaign(
+            campaign_id=campaign_id,
+            principal_id=principal_id,
+        )
+        phase, base_revision = campaign_phase_and_revision(campaign.system_id, runtime_state)
+        allowed_operations = select_room_turn_tools(
+            system_id=campaign.system_id,
+            phase=phase,
+            role=campaign_role,
+            task="chat",
+        )
+        target_service = service_for_system(campaign.system_id)
+        requester_principal = user.principal_id
+        authority_context = {
+            "schema": "sagasmith.auth-context/v2",
+            "target_service": target_service,
+            "caller_principal": "service:sagasmith-web",
+            "workload_identity": "workload:agent-api",
+            "requester_principal": requester_principal,
+            "resource_owner_principal": f"user:{campaign.owner_user_id}",
+            "acting_host_principal": principal_id,
+            "acting_character_id": "",
+            "authorized_audience": target_service,
+            "allowed_operations": list(allowed_operations),
+            "room_turn_id": run.id,
+            "campaign_id": campaign_id,
+            "system_id": campaign.system_id,
+            "base_revision": base_revision,
+            "expires_at": (
+                now_utc()
+                + timedelta(seconds=request.app.state.settings.agent_delegation_ttl_seconds)
+            ).isoformat(),
+            "idempotency_key": f"agent-turn:{run.id}",
+            "conversation_principal": f"agent-conversation:{conversation_id}",
+            "tenant_id": "",
+            "traceparent": request.headers.get("traceparent", ""),
+            "tracestate": request.headers.get("tracestate", ""),
+            "baggage": request.headers.get("baggage", ""),
+        }
         result = await runtime.complete(
             session_id=session_id,
             content=payload.content,
@@ -252,10 +301,11 @@ async def send_message(
                 "system_id": campaign.system_id,
                 "principal_id": principal_id,
                 "campaign_role": campaign_role,
+                "authority_context": authority_context,
                 **identity_context,
             },
         )
-    except RuntimeError as exc:
+    except (RoomToolPolicyError, RuntimeError, ValueError) as exc:
         release(session, reservation.id)
         run.status = "failed"
         run.error_code = "agent_unavailable"
@@ -301,6 +351,10 @@ async def send_message(
                 "tokens": actual,
                 "quota_user_id": quota_user_id,
                 "identity_assignment_id": conversation.identity_assignment_id,
+                "requester_principal": authority_context["requester_principal"],
+                "acting_host_principal": authority_context["acting_host_principal"],
+                "authorized_audience": authority_context["authorized_audience"],
+                "allowed_operations": authority_context["allowed_operations"],
                 "auth_context_receipts": [
                     dict(receipt["auth_context_receipt"])
                     for receipt in result.tool_receipts

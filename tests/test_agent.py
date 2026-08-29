@@ -33,14 +33,16 @@ def test_agent_call_has_authenticated_scope_and_settles_usage(
         {
             "tool": "mcp_sagasmith_dnd_campaign_query",
             "auth_context_receipt": {
-                "schema": "sagasmith.auth-context/v1",
-                "actor_principal": f"user:{user['id']}",
-                "conversation_principal": "session:campaign-1:user:conversation",
+                "schema": "sagasmith.auth-context/v2",
+                "target_service": "sagasmith-dnd-mcp",
+                "requester_principal": f"user:{user['id']}",
+                "acting_host_principal": f"user:{user['id']}",
+                "conversation_principal": "agent-conversation:test",
                 "tenant_id": "",
                 "campaign_id": "campaign-1",
-                "session_id": "campaign-1:user:conversation",
                 "tool": "campaign_query",
-                "authorization_epoch": 2,
+                "room_turn_id": "turn-1",
+                "base_revision": 7,
                 "revision": 4,
                 "nonce": "agent-receipt-nonce",
             },
@@ -58,12 +60,33 @@ def test_agent_call_has_authenticated_scope_and_settles_usage(
     assert response.status_code == 200, response.text
     assert response.json()["assistant_content"] == "你进入了烛堡。"
     call = agent_runtime.calls[0]
-    assert call["context"] == {
+    context = call["context"]
+    legacy_context_fields = ("campaign_id", "system_id", "principal_id", "campaign_role")
+    assert {name: context[name] for name in legacy_context_fields} == {
         "campaign_id": "campaign-1",
         "system_id": "dnd5e",
         "principal_id": f"user:{user['id']}",
         "campaign_role": "owner",
     }
+    authority = context["authority_context"]
+    assert authority["schema"] == "sagasmith.auth-context/v2"
+    assert authority["target_service"] == "sagasmith-dnd-mcp"
+    assert authority["requester_principal"] == f"user:{user['id']}"
+    assert authority["resource_owner_principal"] == f"user:{user['id']}"
+    assert authority["acting_host_principal"] == f"user:{user['id']}"
+    assert authority["authorized_audience"] == "sagasmith-dnd-mcp"
+    assert authority["allowed_operations"] == [
+        "campaign_query",
+        "character_query",
+        "module_query",
+        "rule_search",
+        "skill_query",
+    ]
+    assert len(authority["allowed_operations"]) <= 16
+    assert authority["base_revision"] == 7
+    assert authority["room_turn_id"] == response.json()["id"]
+    assert authority["idempotency_key"] == f"agent-turn:{response.json()['id']}"
+    assert authority["conversation_principal"] == f"agent-conversation:{conversation['id']}"
     assert call["session_id"].startswith(f"campaign-1:{user['id']}:")
     balance = client.get("/api/usage/balance").json()
     assert balance["used"] == "150.000000"
@@ -74,6 +97,8 @@ def test_agent_call_has_authenticated_scope_and_settles_usage(
         assert audit.details["auth_context_receipts"] == [
             agent_runtime.tool_receipts[0]["auth_context_receipt"]
         ]
+        assert audit.details["requester_principal"] == f"user:{user['id']}"
+        assert audit.details["acting_host_principal"] == f"user:{user['id']}"
 
     repeated = client.post(
         f"/api/campaigns/campaign-1/agent/conversations/{conversation['id']}/messages",

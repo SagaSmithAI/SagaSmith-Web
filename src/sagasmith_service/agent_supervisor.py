@@ -1164,7 +1164,7 @@ def create_supervisor_app(manager: WorkerManager, internal_key: str) -> FastAPI:
 def main() -> None:
     internal_key = os.environ["SAGASMITH_AGENT_INTERNAL_KEY"]
     worker_service_token = os.environ.get("SAGASMITH_WORKER_SERVICE_TOKEN", "")
-    boundary_mode = os.environ.get("SAGASMITH_AGENT_BOUNDARY_MODE", "legacy")
+    boundary_mode = os.environ.get("SAGASMITH_AGENT_BOUNDARY_MODE", "modern")
     if boundary_mode not in {"legacy", "modern"}:
         raise RuntimeError("SAGASMITH_AGENT_BOUNDARY_MODE must be legacy or modern")
     if boundary_mode == "modern" and len(worker_service_token.encode("utf-8")) < 32:

@@ -15,6 +15,6 @@ def test_compile_command_pins_resolver_and_dependency_cutoff() -> None:
 
     assert command[:5] == ["uvx", "--from", "uv==0.11.25", "uv", "pip"]
     cutoff_index = command.index("--exclude-newer")
-    assert command[cutoff_index + 1] == "2026-08-17T12:00:00Z"
+    assert command[cutoff_index + 1] == "2026-08-29T10:00:00Z"
     assert "--generate-hashes" in command
     assert "--no-annotate" in command

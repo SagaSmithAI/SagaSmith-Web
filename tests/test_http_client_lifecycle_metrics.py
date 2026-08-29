@@ -72,7 +72,7 @@ def test_app_lifespan_owns_and_closes_each_default_http_client(monkeypatch, tmp_
     assert all(client.closed for client in created)
 
 
-def test_agent_runtime_reuses_injected_client_and_records_success_and_error() -> None:
+def test_legacy_agent_runtime_reuses_injected_client_and_records_success_and_error() -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -103,7 +103,11 @@ def test_agent_runtime_reuses_injected_client_and_records_success_and_error() ->
 
     async def exercise() -> None:
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        runtime = HttpAgentRuntime("http://agent.test", http_client=client)
+        runtime = HttpAgentRuntime(
+            "http://agent.test",
+            boundary_mode="legacy",
+            http_client=client,
+        )
         await runtime.probe()
         result = await runtime.complete(
             session_id="conversation/1",
@@ -222,6 +226,15 @@ def test_modern_agent_payload_matches_merged_hosted_worker_contract_fixture() ->
             },
             idempotency_key="room-turn:job-1",
         )
+        overflow = dict(authority)
+        overflow["allowed_operations"] = [f"tool_{index:02d}" for index in range(17)]
+        with pytest.raises(ValueError):
+            await runtime.complete(
+                session_id="campaign-1:user-1:conversation-1",
+                content="I inspect the gate.",
+                context={"authority_context": overflow},
+                idempotency_key="room-turn:job-overflow",
+            )
         await client.aclose()
 
     asyncio.run(exercise())

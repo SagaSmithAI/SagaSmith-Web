@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     agent_reservation_tokens: int = 32_768
     agent_api_url: str = "http://127.0.0.1:8910"
     agent_api_key: SecretStr = SecretStr("")
-    agent_boundary_mode: Literal["legacy", "modern"] = "legacy"
+    agent_boundary_mode: Literal["legacy", "modern"] = "modern"
     auth_context_secret: SecretStr = SecretStr("development-auth-context-secret-change-me")
     service_internal_url: str = "http://127.0.0.1:8080"
     agent_completion_timeout_seconds: int = Field(default=900, ge=30, le=3600)

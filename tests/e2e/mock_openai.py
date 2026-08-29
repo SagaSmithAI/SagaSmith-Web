@@ -208,7 +208,13 @@ class Handler(BaseHTTPRequestHandler):
         query_name = next(
             (name for name in selected_tools if name.endswith(f"_{target_tool_id}")), ""
         )
-        if authenticated and campaign_match and principal_match and not tool_messages:
+        if (
+            authenticated
+            and campaign_match
+            and principal_match
+            and exposure_name
+            and not tool_messages
+        ):
             self._tool_call(
                 exposure_name,
                 {
