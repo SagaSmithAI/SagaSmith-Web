@@ -268,6 +268,26 @@ def _room_job_view(job: RoomTurnJob | None) -> dict[str, Any] | None:
     }
 
 
+def _room_job_http_status(job: dict[str, Any]) -> int:
+    """Map durable failure classes to an actionable HTTP boundary."""
+
+    error = dict(job.get("error") or {})
+    code = str(error.get("code") or "room_turn_failed")
+    error_class = str(error.get("class") or "internal")
+    retryable = bool(job.get("retryable"))
+    if code == "stale_revision" or error_class in {"conflict", "cancel"}:
+        return status.HTTP_409_CONFLICT
+    if error_class == "auth":
+        return status.HTTP_403_FORBIDDEN
+    if error_class in {"request", "tool_execution"}:
+        return status.HTTP_422_UNPROCESSABLE_CONTENT
+    if error_class in {"upstream", "storage", "state"} and retryable:
+        return status.HTTP_503_SERVICE_UNAVAILABLE
+    if error_class == "upstream":
+        return status.HTTP_502_BAD_GATEWAY
+    return status.HTTP_500_INTERNAL_SERVER_ERROR
+
+
 def _audience_users(
     session: Session,
     campaign_id: str,
@@ -2010,7 +2030,11 @@ async def execute_room_turn_job(app: FastAPI, job_id: str) -> None:
                     "state",
                 )
             campaign = session.get(CampaignProjection, preparation.campaign.id)
-            if campaign is not None and revision is not None:
+            prior_revision = campaign.mcp_revision if campaign is not None else None
+            authority_changed = (
+                campaign is not None and revision is not None and revision != prior_revision
+            )
+            if authority_changed:
                 campaign.mcp_revision = revision
             media_envelopes = [item.envelope for item in media]
             for item in media:
@@ -2072,12 +2096,20 @@ async def execute_room_turn_job(app: FastAPI, job_id: str) -> None:
                     "job_id": job.id,
                 },
             )
-            _emit(
-                session,
-                room,
-                "state.changed",
-                {"reason": "agent.completed", "mcp_revision": revision},
-            )
+            if authority_changed and revision is not None:
+                _emit(
+                    session,
+                    room,
+                    "state.changed",
+                    _state_change_payload(
+                        reason="agent.completed",
+                        authority_revision=revision,
+                        campaign_id=preparation.campaign.id,
+                        changed_scopes=_room_turn_changed_scopes(result),
+                        audience=trigger.audience,
+                        audience_user_ids=list(trigger.audience_user_ids or []),
+                    ),
+                )
             session.add(
                 AuditEvent(
                     actor_user_id=user.id,
@@ -2172,11 +2204,8 @@ async def _post_message(
     if job.get("status") == "failed":
         error = job.get("error") or {}
         code = str(error.get("code") or "room_turn_failed")
-        status_code = (
-            status.HTTP_409_CONFLICT if code == "stale_revision" else status.HTTP_502_BAD_GATEWAY
-        )
         raise HTTPException(
-            status_code,
+            _room_job_http_status(job),
             detail={
                 "code": code,
                 "retryable": bool(job.get("retryable")),
@@ -2943,6 +2972,45 @@ def _receipt_revision(receipt: dict[str, Any], fallback: int) -> int:
     return int(result.get("campaign_revision") or result.get("revision") or fallback)
 
 
+def _state_change_payload(
+    *,
+    reason: str,
+    authority_revision: int,
+    campaign_id: str,
+    changed_scopes: list[str],
+    audience: str = "public",
+    audience_user_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """Build the rebuildable projection receipt carried by the durable outbox."""
+
+    return {
+        "reason": reason,
+        "mcp_revision": authority_revision,
+        "authority_revision": authority_revision,
+        "changed_scopes": sorted(set(changed_scopes)),
+        "entity_ids": [campaign_id],
+        "audience": {
+            "kind": audience,
+            "user_ids": sorted(set(audience_user_ids or [])),
+        },
+    }
+
+
+def _room_turn_changed_scopes(result: AgentResult) -> list[str]:
+    scopes: set[str] = set()
+    for receipt in result.tool_receipts:
+        tool = str(receipt.get("tool") or "").casefold()
+        if any(name in tool for name in ("combat", "encounter")):
+            scopes.add("combat")
+        if any(name in tool for name in ("phase", "exposure", "catalog")):
+            scopes.update(("phase", "catalog"))
+        if any(name in tool for name in ("actor", "character")):
+            scopes.add("actors")
+        if any(name in tool for name in ("module", "pack")):
+            scopes.add("modules")
+    return sorted(scopes or {"campaign"})
+
+
 @router.post("/panel/actions")
 async def panel_action(
     campaign_id: str,
@@ -3126,7 +3194,9 @@ async def panel_action(
             raise HTTPException(status.HTTP_409_CONFLICT, "idempotency key payload mismatch")
         return {"message": _message_view(existing, user.id), "receipt": existing.mcp_receipt}
     campaign = session.get(CampaignProjection, campaign_id)
-    if campaign is not None:
+    prior_revision = campaign.mcp_revision if campaign is not None else revision
+    authority_changed = next_revision != prior_revision
+    if campaign is not None and authority_changed:
         campaign.mcp_revision = next_revision
     _expire_suggestions(session, room)
     message = _append_message(
@@ -3143,12 +3213,23 @@ async def panel_action(
         mcp_revision=next_revision,
         mcp_receipt=receipt,
     )
-    _emit(
-        session,
-        room,
-        "state.changed",
-        {"reason": payload.action, "mcp_revision": next_revision},
-    )
+    if authority_changed:
+        changed_scopes = {
+            "phase.set": ["catalog", "phase"],
+            "combat.start": ["catalog", "combat", "phase"],
+            "combat.end": ["catalog", "combat", "phase"],
+        }[payload.action]
+        _emit(
+            session,
+            room,
+            "state.changed",
+            _state_change_payload(
+                reason=payload.action,
+                authority_revision=next_revision,
+                campaign_id=campaign_id,
+                changed_scopes=changed_scopes,
+            ),
+        )
     session.add(
         AuditEvent(
             actor_user_id=user.id,

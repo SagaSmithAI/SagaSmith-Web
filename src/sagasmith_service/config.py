@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     room_turn_worker_poll_seconds: float = Field(default=0.1, gt=0, le=60)
     room_turn_worker_lease_seconds: int = Field(default=60, ge=15, le=900)
     room_turn_worker_concurrency: int = Field(default=4, ge=1, le=64)
+    room_turn_per_room_concurrency: int = Field(default=4, ge=1, le=64)
     room_turn_worker_max_attempts: int = Field(default=3, ge=1, le=20)
     room_turn_retry_seconds: int = Field(default=2, ge=0, le=3600)
     room_turn_inline_wait_seconds: float = Field(default=30, ge=0, le=120)

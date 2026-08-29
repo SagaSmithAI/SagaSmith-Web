@@ -56,3 +56,11 @@ def test_agent_delegation_ttl_is_independent_and_capped_at_worker_limit() -> Non
     assert settings.agent_reservation_ttl_seconds == 1200
     with pytest.raises(ValidationError):
         Settings(env="test", agent_delegation_ttl_seconds=901)
+
+
+def test_per_room_scheduler_is_configurable_and_bounded() -> None:
+    assert Settings(env="test").room_turn_per_room_concurrency == 4
+    configured = Settings(env="test", room_turn_per_room_concurrency=1)
+    assert configured.room_turn_per_room_concurrency == 1
+    with pytest.raises(ValidationError):
+        Settings(env="test", room_turn_per_room_concurrency=0)

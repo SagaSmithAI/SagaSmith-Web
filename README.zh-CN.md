@@ -87,7 +87,7 @@ fallback 或新工作的目标。
 
 | 强制组件 | 审查 revision |
 |---|---|
-| SagaSmith Agent | `056f295360bcfa56a9ade7c6c151e9aea447df41` |
+| SagaSmith Agent | `a5dee9bcc429f99beaf4539ad725aa4b95935e5f` |
 | SagaSmith Core | `eef98fcfcaa96d08c069708b33ee7717ba1625c3` |
 | D&D | `587f66e0673b686a7d47d1ee266d8404ef221741` |
 | CoC | `515f6a7e3ba3c2a41fff7de2624ee19e4deb6190` |
@@ -166,6 +166,11 @@ action 可以携带 `base_revision`。Web 在不持有房间或数据库锁的�
 phase/revision，再进行短暂 compare-and-set；stale revision 返回可恢复的 HTTP 409。只有最后的
 有序消息/outbox 结算持有短暂 per-room lock，不同房间、读取和兼容动作仍可并行。
 
+`SAGASMITH_ROOM_TURN_WORKER_CONCURRENCY` 限制进程内总 worker 数，
+`SAGASMITH_ROOM_TURN_PER_ROOM_CONCURRENCY`（默认 `4`）单独限制同一房间的昂贵 turn。已领取
+作业在等待 room scheduler slot 时仍会 heartbeat，但不持有数据库事务或短暂 settlement lock。
+需要同一房间严格串行时可设为 `1`，不会阻塞其他房间。
+
 reservation TTL 必须大于 Agent completion timeout；默认分别为 1200 秒与 900 秒。作业 heartbeat
 会续租；只要 active room/Module job 仍拥有 reservation，时间戳过期本身不能释放额度。Agent
 完成后先按实际 usage 结算，再进入可重试的 Web 发布。
@@ -174,6 +179,10 @@ reservation TTL 必须大于 Agent completion timeout；默认分别为 1200 秒
 
 - `GET /api/campaigns/{campaign_id}/room/jobs/{job_id}`
 - `POST /api/campaigns/{campaign_id}/room/jobs/{job_id}/cancel`
+
+终态错误保留稳定 code、retryability、class 和 recovery hint：冲突/取消返回 409，模型可修复
+的请求或 tool-output 错误返回 422，可重试 Agent/storage 故障返回 503，不可重试上游故障
+返回 502，未预期 Host 故障返回 500。网络重试始终复用原幂等键。
 
 详细状态、迁移和回滚要求见[持久房间回合运维](docs/room-turn-jobs.md)。
 
@@ -196,6 +205,10 @@ Web 不直接读取领域权威数据库。MCP receipt 驱动 revisioned、audie
 durable outbox。projection cache key 包含 authority revision；成功提交只使受影响 scope 失效，
 failed、rolled-back 与 no-op 不失效。工具目录缓存只跟 authorization/catalog scope 变化，不会因
 每次 combat write 全量刷新。
+
+每个已提交的 `state.changed` receipt 及其 outbox wake-up 都携带 `authority_revision`、排序后的
+`changed_scopes`、受影响 `entity_ids` 和 audience 描述，便于消费者只重建或失效对应 revisioned
+projection。tool receipt 未推进权威 revision 时，Web 不会发出 state-change invalidation。
 
 房间和 Module SSE 使用 Redis wake-up 加 PostgreSQL cursor replay；数据库 reconciliation 只是漏
 事件兜底。结构化 activity/suggestion 字段和复合索引避免每次请求扫描完整 campaign history。

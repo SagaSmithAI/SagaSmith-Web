@@ -17,7 +17,7 @@ from prometheus_client import REGISTRY
 from sagasmith_service.api.rooms import _observed_projection_batch
 from sagasmith_service.config import Settings
 from sagasmith_service.database import make_engine
-from sagasmith_service.integrations.agent import HttpAgentRuntime
+from sagasmith_service.integrations.agent import AgentRuntimeError, HttpAgentRuntime
 from sagasmith_service.integrations.coc_mcp import StreamableHttpCocRuntime
 from sagasmith_service.integrations.dnd_mcp import StreamableHttpDndRuntime
 from sagasmith_service.main import create_app
@@ -250,6 +250,36 @@ def test_modern_agent_payload_matches_merged_hosted_worker_contract_fixture() ->
     assert "session_id" not in payload
     assert "catalog_phase" not in payload["trusted_context"]
     assert requests[0].headers["Idempotency-Key"] == "room-turn:job-1"
+
+
+def test_agent_transport_timeout_is_structured_and_retryable() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("simulated hosted worker timeout", request=request)
+
+    async def exercise() -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        runtime = HttpAgentRuntime(
+            "http://agent.test",
+            boundary_mode="legacy",
+            http_client=client,
+        )
+        with pytest.raises(AgentRuntimeError) as raised:
+            await runtime.complete(
+                session_id="conversation/timeout",
+                content="hold this operation",
+                context={
+                    "campaign_id": "campaign-1",
+                    "system_id": "dnd5e",
+                    "principal_id": "user:1",
+                    "campaign_role": "owner",
+                },
+                idempotency_key="room-turn:timeout-job",
+            )
+        assert raised.value.code == "agent_timeout"
+        assert raised.value.retryable is True
+        await client.aclose()
+
+    asyncio.run(exercise())
 
 
 def test_mcp_calls_reuse_http_pool_but_keep_sessions_isolated(monkeypatch) -> None:

@@ -78,7 +78,7 @@
     {
       "repository": "SagaSmith-agent",
       "branch": "main",
-      "revision": "056f295360bcfa56a9ade7c6c151e9aea447df41",
+      "revision": "a5dee9bcc429f99beaf4539ad725aa4b95935e5f",
       "remote": "https://github.com/SagaSmithAI/SagaSmith-agent.git",
       "usage": "build",
       "enforced": true

@@ -58,6 +58,7 @@ class RoomTurnJobProcessor:
         concurrency: int,
         poll_seconds: float,
         lease_seconds: int,
+        per_room_concurrency: int,
         reservation_ttl_seconds: int,
         retry_seconds: int,
         failure_recorder: Callable[[Session, RoomTurnJob, RoomJobError], None] | None = None,
@@ -68,6 +69,7 @@ class RoomTurnJobProcessor:
         self.concurrency = concurrency
         self.poll_seconds = poll_seconds
         self.lease_seconds = lease_seconds
+        self.per_room_concurrency = per_room_concurrency
         self.reservation_ttl_seconds = reservation_ttl_seconds
         self.retry_seconds = retry_seconds
         self.failure_recorder = failure_recorder
@@ -77,6 +79,7 @@ class RoomTurnJobProcessor:
         self._workers: list[asyncio.Task[None]] = []
         self._waiters: dict[str, set[asyncio.Event]] = {}
         self._settlement_locks: dict[str, asyncio.Lock] = {}
+        self._room_execution_slots: dict[str, asyncio.Semaphore] = {}
         self._claim_lock = asyncio.Lock()
         self._transaction_lock = asyncio.Lock()
 
@@ -306,7 +309,11 @@ class RoomTurnJobProcessor:
         heartbeat = asyncio.create_task(self._heartbeat_loop(job_id))
         started = time.perf_counter()
         outcome = "success"
+        execution_slot: asyncio.Semaphore | None = None
+        room_id: str | None = None
         try:
+            room_id = await self._database_retry(self._room_id, job_id)
+            execution_slot = await self._acquire_execution_slot(room_id)
             await self.executor(job_id)
         except asyncio.CancelledError:
             outcome = "cancelled"
@@ -323,6 +330,8 @@ class RoomTurnJobProcessor:
                 RoomJobError("room_turn_internal", str(exc), True, "internal"),
             )
         finally:
+            if execution_slot is not None and room_id is not None:
+                self._release_execution_slot(room_id, execution_slot)
             heartbeat.cancel()
             with suppress(asyncio.CancelledError):
                 await heartbeat
@@ -330,6 +339,13 @@ class RoomTurnJobProcessor:
                 time.perf_counter() - started
             )
             self._signal(job_id)
+
+    def _room_id(self, job_id: str) -> str:
+        with self.factory() as session:
+            room_id = session.scalar(select(RoomTurnJob.room_id).where(RoomTurnJob.id == job_id))
+        if room_id is None:
+            raise RoomJobError("job_not_found", "Room turn job no longer exists", False, "state")
+        return str(room_id)
 
     async def _worker_loop(self) -> None:
         while not self._stop.is_set():
@@ -406,6 +422,29 @@ class RoomTurnJobProcessor:
             yield
         if not lock.locked() and not getattr(lock, "_waiters", None):
             self._settlement_locks.pop(room_id, None)
+
+    async def _acquire_execution_slot(self, room_id: str) -> asyncio.Semaphore:
+        """Apply the configured per-room scheduler without holding a database lock.
+
+        The job heartbeat starts before a claimed job waits for this slot, so a
+        busy room cannot make a valid lease look abandoned. Independent rooms
+        still consume the global worker pool concurrently.
+        """
+
+        slot = self._room_execution_slots.setdefault(
+            room_id,
+            asyncio.Semaphore(self.per_room_concurrency),
+        )
+        await slot.acquire()
+        return slot
+
+    def _release_execution_slot(self, room_id: str, slot: asyncio.Semaphore) -> None:
+        slot.release()
+        if (
+            getattr(slot, "_value", 0) == self.per_room_concurrency
+            and not getattr(slot, "_waiters", None)
+        ):
+            self._room_execution_slots.pop(room_id, None)
 
     @asynccontextmanager
     async def transaction_lock(self) -> AsyncIterator[None]:

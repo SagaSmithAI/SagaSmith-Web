@@ -88,7 +88,7 @@ def test_agent_failure_refreshes_sequence_after_live_activity_callback(
         headers={"Idempotency-Key": "live-activity-action"},
         json={"content": "I enter the room.", "mode": "action"},
     )
-    assert response.status_code == 502, response.text
+    assert response.status_code == 422, response.text
 
     with client.app.state.session_factory() as session:
         events = session.scalars(

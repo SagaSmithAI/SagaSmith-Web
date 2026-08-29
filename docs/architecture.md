@@ -134,7 +134,10 @@ campaign room -> principal-scoped conversation lease -> dedicated Agent worker
 `RoomTurnJob` is a Web Host orchestration record, never an MCP Task. Its durable states are
 `queued`, `running`, `waiting`, `succeeded`, `failed`, and `cancelled`; leases, heartbeats,
 bounded retries, saved standard Agent/MCP results and stable idempotency keys recover safely after
-a worker or Web restart. MCP Tasks are negotiated only for one genuinely long-running domain tool.
+a worker or Web restart. The global worker pool and configurable per-room semaphore bound
+concurrency without retaining a database lock across Agent/MCP I/O; only final publication uses a
+short room settlement lock. MCP Tasks are negotiated only for one genuinely long-running domain
+tool.
 
 Room messages and room events use monotonic per-room sequence numbers in PostgreSQL. The browser
 opens an SSE stream after loading a REST snapshot. Message events append to the timeline, while
@@ -149,6 +152,10 @@ through Redis and one process-level subscription fans them out to local SSE clie
 subscribes before its initial database replay, then queries only after an event wake-up or a
 30-second reconciliation deadline. Redis is a wake-up and fan-out layer, never the recovery
 authority; reconnecting clients replay the durable room sequence from PostgreSQL.
+
+An authoritative `state.changed` event and its outbox wake-up include the authority revision,
+sorted changed scopes, affected entity IDs, and audience. They are emitted only after a revision
+advances; failed, rolled-back, and successful no-op calls produce no invalidation event.
 
 Panel cache entries are versioned principal/audience projections, not copies of MCP tables. Their
 identity includes campaign, audience, source revision, authorization epoch and projection schema

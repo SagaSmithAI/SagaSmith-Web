@@ -15,6 +15,10 @@ from sqlalchemy import event, select
 
 from sagasmith_service.api.dependencies import get_async_db
 from sagasmith_service.api.rooms import _activity_token
+from sagasmith_service.config import Settings
+from sagasmith_service.database import make_engine
+from sagasmith_service.integrations.agent import AgentRuntimeError
+from sagasmith_service.main import create_app
 from sagasmith_service.models import (
     AgentRun,
     AuditEvent,
@@ -22,6 +26,7 @@ from sagasmith_service.models import (
     CampaignMessage,
     CampaignRoomEvent,
     CampaignSuggestion,
+    OutboxEvent,
     QuotaReservation,
     RoomMediaArtifact,
     RoomTurnJob,
@@ -319,6 +324,62 @@ def test_different_players_run_agent_work_concurrently_and_settle_in_room_order(
         assert {job.status for job in jobs} == {"succeeded"}
 
 
+def test_configured_per_room_scheduler_limits_one_room_without_holding_database(
+    client: TestClient,
+    agent_runtime: FakeAgentRuntime,
+) -> None:
+    register(client, "room-owner@example.com", "DM")
+    create_campaign(client)
+    player = add_player(client, "scheduled-player@example.com", "Player")
+    player_cookie = client.cookies.get(SESSION_COOKIE)
+    login(client, "room-owner@example.com")
+    owner_cookie = client.cookies.get(SESSION_COOKIE)
+    assert player["id"] and owner_cookie and player_cookie
+    processor = client.app.state.room_turn_jobs
+    processor.per_room_concurrency = 1
+    original_complete = agent_runtime.complete
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    active = 0
+    maximum = 0
+
+    async def delayed_complete(**arguments: Any):
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        first_entered.set()
+        try:
+            while not release_first.is_set():
+                await asyncio.sleep(0.01)
+            return await original_complete(**arguments)
+        finally:
+            active -= 1
+
+    agent_runtime.complete = delayed_complete
+
+    def post_action(key: str, cookie: str):
+        return client.post(
+            "/api/campaigns/campaign-1/room/messages",
+            headers={"Idempotency-Key": key, "Cookie": f"{SESSION_COOKIE}={cookie}"},
+            json={"content": key, "mode": "action"},
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(post_action, "scheduled-owner", owner_cookie),
+            executor.submit(post_action, "scheduled-player", player_cookie),
+        ]
+        assert first_entered.wait(timeout=5)
+        time.sleep(0.1)
+        assert maximum == 1
+        assert not processor._transaction_lock.locked()
+        release_first.set()
+        responses = [future.result(timeout=10) for future in futures]
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert maximum == 1
+
+
 def test_room_turn_persists_trusted_authority_trace_and_stable_upstream_key(
     client: TestClient, agent_runtime: FakeAgentRuntime
 ) -> None:
@@ -420,7 +481,12 @@ def test_room_turn_projects_standard_mcp_image_to_private_host_artifact(
 ) -> None:
     register(client, "room-owner@example.com", "DM")
     create_campaign(client)
-    image = b"\x89PNG\r\n\x1a\nroom-grid"
+    player = add_player(client, "room-media-player@example.com", "Player")
+    login(client, "room-owner@example.com")
+    image = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUB"
+        "AScY42YAAAAASUVORK5CYII="
+    )
     agent_runtime.mcp_results = (
         {
             "content": [
@@ -463,6 +529,14 @@ def test_room_turn_projects_standard_mcp_image_to_private_host_artifact(
     assert embedded.headers["content-disposition"].startswith("attachment;")
     assert embedded.headers["x-content-type-options"] == "nosniff"
     assert embedded.content == b"<script>must-not-run-inline</script>"
+    login(client, "room-media-player@example.com")
+    group_artifact = client.get(media[0]["url"])
+    assert group_artifact.status_code == 200
+    assert group_artifact.content == image
+    assert player["id"]
+    register(client, "room-media-outsider@example.com", "Outsider")
+    assert client.get(media[0]["url"]).status_code == 403
+    login(client, "room-owner@example.com")
     with client.app.state.session_factory() as session:
         job = session.get(RoomTurnJob, response.json()["job"]["id"])
         row = session.get(RoomMediaArtifact, media[0]["artifact_id"])
@@ -535,6 +609,154 @@ def test_queued_room_turn_can_be_cancelled_without_agent_call(
         ).all()
         assert trigger is not None and trigger.status == "cancelled"
         assert len(events) == 1
+
+
+def test_running_room_turn_cancel_is_published_without_an_assistant_message(
+    client: TestClient, agent_runtime: FakeAgentRuntime
+) -> None:
+    register(client, "room-owner@example.com", "DM")
+    create_campaign(client)
+    entered_agent = threading.Event()
+    release_agent = threading.Event()
+    original_complete = agent_runtime.complete
+
+    async def delayed_complete(**arguments: Any):
+        entered_agent.set()
+        while not release_agent.is_set():
+            await asyncio.sleep(0.01)
+        return await original_complete(**arguments)
+
+    agent_runtime.complete = delayed_complete
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            client.post,
+            "/api/campaigns/campaign-1/room/messages",
+            headers={"Idempotency-Key": "cancel-running-turn"},
+            json={"content": "Cancel after dispatch.", "mode": "action"},
+        )
+        assert entered_agent.wait(timeout=5)
+        with client.app.state.session_factory() as session:
+            job = session.scalar(
+                select(RoomTurnJob).where(RoomTurnJob.idempotency_key == "cancel-running-turn")
+            )
+            assert job is not None and job.status == "running"
+            job_id = job.id
+        cancelled = client.post(f"/api/campaigns/campaign-1/room/jobs/{job_id}/cancel")
+        assert cancelled.status_code == 200
+        assert cancelled.json()["job"]["status"] == "running"
+        release_agent.set()
+        response = future.result(timeout=10)
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "cancelled"
+    with client.app.state.session_factory() as session:
+        job = session.get(RoomTurnJob, job_id)
+        assistants = session.scalars(
+            select(CampaignMessage).where(
+                CampaignMessage.trigger_message_id == job.trigger_message_id
+            )
+        ).all()
+        assert job is not None and job.status == "cancelled"
+        assert assistants == []
+
+
+def test_agent_timeout_has_retryable_service_unavailable_contract(
+    client: TestClient, agent_runtime: FakeAgentRuntime
+) -> None:
+    register(client, "room-owner@example.com", "DM")
+    create_campaign(client)
+    client.app.state.settings.room_turn_worker_max_attempts = 1
+
+    async def timeout(**_arguments: Any):
+        raise AgentRuntimeError("Agent completion timed out", retryable=True, code="agent_timeout")
+
+    agent_runtime.complete = timeout
+    response = client.post(
+        "/api/campaigns/campaign-1/room/messages",
+        headers={"Idempotency-Key": "agent-timeout-turn"},
+        json={"content": "Time out safely.", "mode": "action"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "code": "agent_timeout",
+        "retryable": True,
+        "message": "Agent completion timed out",
+        "recovery": "Retry with the same idempotency key.",
+        "job_id": response.json()["detail"]["job_id"],
+    }
+    with client.app.state.session_factory() as session:
+        assert session.scalars(
+            select(CampaignRoomEvent).where(CampaignRoomEvent.event_type == "state.changed")
+        ).all() == []
+        assert session.scalars(
+            select(OutboxEvent).where(OutboxEvent.event_type == "state.changed")
+        ).all() == []
+
+
+def test_expired_inflight_job_recovers_when_a_fresh_web_app_starts(
+    tmp_path, dnd_runtime: FakeDndRuntime, agent_runtime: FakeAgentRuntime
+) -> None:
+    database_url = f"sqlite:///{(tmp_path / 'restart-room.db').as_posix()}"
+    settings = Settings(
+        env="test",
+        database_url=database_url,
+        session_secret="restart-session-secret-at-least-thirty-two-characters",
+        private_storage_dir=str(tmp_path / "private"),
+        exchange_dir=str(tmp_path / "exchange"),
+        public_origin="http://testserver",
+        room_turn_inline_wait_seconds=0,
+    )
+    first_app = create_app(
+        settings,
+        make_engine(database_url),
+        dnd_runtime,
+        agent_runtime,
+        coc_runtime=dnd_runtime,
+        narrative_runtime=dnd_runtime,
+    )
+    with TestClient(first_app) as first:
+        first.headers["Origin"] = "http://testserver"
+        register(first, "room-owner@example.com", "DM")
+        create_campaign(first)
+        first.portal.call(first.app.state.room_turn_jobs.close)
+        queued = first.post(
+            "/api/campaigns/campaign-1/room/messages",
+            headers={"Idempotency-Key": "fresh-app-recovery"},
+            json={"content": "Recover in another Web process.", "mode": "action"},
+        )
+        job_id = queued.json()["job"]["id"]
+        with first.app.state.session_factory() as session:
+            job = session.get(RoomTurnJob, job_id)
+            assert job is not None
+            job.status = "running"
+            job.attempt = 1
+            job.lease_owner = "terminated-web-process"
+            job.lease_expires_at = now_utc() - timedelta(seconds=1)
+            session.commit()
+
+    second_app = create_app(
+        settings,
+        make_engine(database_url),
+        dnd_runtime,
+        agent_runtime,
+        coc_runtime=dnd_runtime,
+        narrative_runtime=dnd_runtime,
+    )
+    with TestClient(second_app) as second:
+        second.headers["Origin"] = "http://testserver"
+        login(second, "room-owner@example.com")
+        deadline = time.monotonic() + 5
+        status_value = "running"
+        while time.monotonic() < deadline:
+            status_value = second.get(
+                f"/api/campaigns/campaign-1/room/jobs/{job_id}"
+            ).json()["job"]["status"]
+            if status_value == "succeeded":
+                break
+            time.sleep(0.02)
+        assert status_value == "succeeded"
+    assert len(agent_runtime.calls) == 1
 
 
 def test_expired_worker_lease_recovers_and_completes_after_restart(
@@ -1077,7 +1299,16 @@ def test_room_audience_and_panel_actions_are_authorized_and_refreshable(
         event_types = session.scalars(
             select(CampaignRoomEvent.event_type).order_by(CampaignRoomEvent.sequence)
         ).all()
+        projection_events = session.scalars(
+            select(OutboxEvent).where(OutboxEvent.event_type == "state.changed")
+        ).all()
     assert event_types.count("state.changed") == 4
+    assert len(projection_events) == 4
+    for event_row in projection_events:
+        assert isinstance(event_row.payload["authority_revision"], int)
+        assert event_row.payload["changed_scopes"]
+        assert event_row.payload["entity_ids"] == ["campaign-1"]
+        assert event_row.payload["audience"] == {"kind": "public", "user_ids": []}
 
     login(client, "room-private@example.com")
     assert (
@@ -1099,6 +1330,37 @@ def test_room_audience_and_panel_actions_are_authorized_and_refreshable(
     )
     assert changed_mode.status_code == 409
     assert player["id"]
+
+
+def test_noop_authoritative_receipt_does_not_emit_projection_invalidation(
+    client: TestClient, dnd_runtime: FakeDndRuntime
+) -> None:
+    register(client, "room-owner@example.com", "DM")
+    create_campaign(client)
+    assert client.get("/api/campaigns/campaign-1/room/panel").status_code == 200
+
+    async def unchanged_phase(**arguments: Any) -> dict[str, Any]:
+        return {
+            "result": {
+                "effective_game_phase": arguments["tool_profile"],
+                "campaign_revision": arguments["expected_revision"],
+            }
+        }
+
+    dnd_runtime.set_game_phase = unchanged_phase
+    response = client.post(
+        "/api/campaigns/campaign-1/room/panel/actions",
+        headers={"Idempotency-Key": "noop-phase-change"},
+        json={"action": "phase.set", "payload": {"phase": "play"}, "base_revision": 7},
+    )
+    assert response.status_code == 200
+    with client.app.state.session_factory() as session:
+        assert session.scalars(
+            select(CampaignRoomEvent).where(CampaignRoomEvent.event_type == "state.changed")
+        ).all() == []
+        assert session.scalars(
+            select(OutboxEvent).where(OutboxEvent.event_type == "state.changed")
+        ).all() == []
 
 
 def test_all_game_panel_intents_use_the_room_agent_and_emit_refresh(
@@ -1127,7 +1389,10 @@ def test_all_game_panel_intents_use_the_room_agent_and_emit_refresh(
         event_types = session.scalars(
             select(CampaignRoomEvent.event_type).order_by(CampaignRoomEvent.sequence)
         ).all()
-    assert event_types.count("state.changed") == 3
+    # The first intent refreshes the Web projection from revision 1 to the
+    # authority's revision 7. Subsequent no-op receipts must not fan out cache
+    # invalidations merely because another Agent turn completed.
+    assert event_types.count("state.changed") == 1
 
 
 def test_character_card_requires_private_actor_scope(
@@ -1375,7 +1640,7 @@ def test_public_room_turn_cannot_reference_dm_only_resolution(
         headers={"Idempotency-Key": "reject-hidden-roll-publication"},
         json={"content": "我环顾四周。", "mode": "action"},
     )
-    assert response.status_code == 502
+    assert response.status_code == 422
     assert response.json()["detail"]["code"] == "mcp_projection_invalid"
     assert response.json()["detail"]["retryable"] is False
     timeline = client.get("/api/campaigns/campaign-1/room/messages").json()
@@ -1728,7 +1993,7 @@ def test_suggestion_cannot_reference_hidden_or_stale_pending_choice(
         headers={"Idempotency-Key": "reject-hidden-suggestion"},
         json={"content": "我等待。", "mode": "action"},
     )
-    assert response.status_code == 502
+    assert response.status_code == 422
     assert response.json()["detail"]["code"] == "mcp_projection_invalid"
     assert response.json()["detail"]["retryable"] is False
 
@@ -1775,7 +2040,7 @@ def test_structured_room_turn_rejects_agent_ruling_for_human_pc(
         headers={"Idempotency-Key": "invalid-pc-ruling-1"},
         json={"content": "我观察敌人。", "mode": "action"},
     )
-    assert response.status_code == 502
+    assert response.status_code == 422
     assert response.json()["detail"]["code"] == "mcp_projection_invalid"
     assert response.json()["detail"]["retryable"] is False
 
