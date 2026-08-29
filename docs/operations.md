@@ -93,12 +93,14 @@ starting workers are never cleanup candidates; if they alone exhaust a configure
 conversations receive HTTP 503 until capacity is available.
 
 Cleanup is fail closed: it only removes direct children with the expected schema, owner, and
-matching workspace ID. Legacy directories, Narrative state, unknown entries, malformed markers,
-paths outside the managed namespace, and symbolic links are retained for operator review. Do not
-manually add the service marker to an existing directory. The worker health response and metrics
-report managed count/occupied bytes and ignored-entry count/bytes; alert on ignored entries or sustained capacity
-rejections, then audit and remove unknown data manually under the deployment's data-retention
-policy.
+matching workspace ID. Agent's exact regular-file `.sagasmith-hosted-workspaces.lock` at the managed
+namespace root is recognized as the shared root admission lock and is neither capacity data nor an
+unknown entry. A directory or link with that name, and all other legacy directories, Narrative state,
+unknown entries, malformed markers, paths outside the managed namespace, and symbolic links are
+retained for operator review. Do not manually add the service marker to an existing directory. The
+worker health response and metrics report managed count/occupied bytes and ignored-entry
+count/bytes; alert on ignored entries or sustained capacity rejections, then audit and remove unknown
+data manually under the deployment's data-retention policy.
 
 `SAGASMITH_AGENT_BOUNDARY_MODE=modern` is the coordinated release-lock default. It requires MCP
 2026-07-28 `server/discover`, request-scoped auth-context v2 delegations, and a dedicated random

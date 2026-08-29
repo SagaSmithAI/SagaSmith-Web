@@ -213,8 +213,9 @@ Each conversation runs in a bounded worker process. The Supervisor limits worker
 concurrency, coalesces simultaneous starts, and returns 503 instead of creating unbounded
 processes. Managed state lives only below `/workspaces/hosted-v1` and uses an owner marker plus an
 opaque workspace ID. Startup recovers crash-left markers, terminal success removes registered
-state, and TTL/LRU cleanup enforces count and byte limits. Unknown, malformed, external, legacy,
-symlinked, or active directories are preserved for operator review rather than deleted.
+state, and TTL/LRU cleanup enforces count and byte limits. The supervisor recognizes Agent's exact
+regular-file root admission lock as operational metadata; every other unknown, malformed, external,
+legacy, symlinked, or active entry is preserved for operator review rather than deleted.
 
 ## Projections, caches, and realtime delivery
 

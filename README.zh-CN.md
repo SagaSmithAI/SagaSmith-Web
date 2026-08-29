@@ -196,8 +196,9 @@ ID，并执行 room audience、大小、checksum 和幂等 artifact key 检查�
 每个 conversation 使用一个有界 worker 进程。Supervisor 限制 worker 数量与 spawn 并发、合并
 同一 conversation 的并发启动，并在容量耗尽时返回 503，而不是无限创建进程。托管状态只位于
 `/workspaces/hosted-v1`，每个目录具有 owner marker 和 opaque workspace ID。启动时会恢复 crash-left
-marker；成功终态立即清理已登记状态；TTL/LRU 再限制目录数量和总字节。未知、格式错误、外部、
-legacy、symlink 或 active 目录会保留给运维人员检查，不会被自动删除。
+marker；成功终态立即清理已登记状态；TTL/LRU 再限制目录数量和总字节。Supervisor 只把 Agent 在
+托管命名空间根目录创建的精确常规文件 admission lock 视为运行元数据；其他未知、格式错误、外部、
+legacy、symlink 或 active 条目会保留给运维人员检查，不会被自动删除。
 
 ## 投影、缓存与实时交付
 

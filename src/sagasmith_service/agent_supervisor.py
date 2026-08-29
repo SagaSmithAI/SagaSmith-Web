@@ -76,6 +76,7 @@ WORKSPACE_CLEANUP = Counter(
 LOGGER = logging.getLogger(__name__)
 WORKSPACE_NAMESPACE = "hosted-v1"
 WORKSPACE_ROOT_MARKER = ".sagasmith-workspace-root.json"
+HOSTED_WORKSPACE_ADMISSION_LOCK = ".sagasmith-hosted-workspaces.lock"
 WORKSPACE_MARKER = ".sagasmith-workspace.json"
 WORKSPACE_ROOT_SCHEMA = "sagasmith.agent-workspace-root/v1"
 WORKSPACE_SCHEMA = "sagasmith.agent-workspace/v1"
@@ -487,6 +488,15 @@ class WorkerManager:
                     continue
         return total
 
+    def _is_agent_root_admission_lock(self, path: Path) -> bool:
+        """Recognize only Agent's regular-file lock at the managed namespace root."""
+        if path.name != HOSTED_WORKSPACE_ADMISSION_LOCK or self._is_link_like(path):
+            return False
+        try:
+            return stat.S_ISREG(path.lstat().st_mode)
+        except OSError:
+            return False
+
     def _scan_workspace_store(self) -> WorkspaceSnapshot:
         records: list[WorkspaceRecord] = []
         unknown = 0
@@ -497,6 +507,8 @@ class WorkerManager:
             entries = []
         for path in entries:
             if path.name == WORKSPACE_ROOT_MARKER:
+                continue
+            if self._is_agent_root_admission_lock(path):
                 continue
             record = self._registered_workspace(path)
             if record is None:

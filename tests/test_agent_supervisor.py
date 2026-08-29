@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sagasmith_service.agent_supervisor import (
+    HOSTED_WORKSPACE_ADMISSION_LOCK,
     WORKSPACE_MARKER,
     Worker,
     WorkerCapacityError,
@@ -899,6 +900,35 @@ def test_workspace_cleanup_never_deletes_unknown_or_outside(
     assert (outside / "keep.txt").read_text(encoding="utf-8") == "keep"
     assert manager._workspace_snapshot.unknown_entries == 1
     assert manager._workspace_snapshot.unknown_bytes > 0
+
+
+def test_workspace_scan_accepts_only_regular_agent_root_admission_lock(
+    tmp_path: Path,
+) -> None:
+    manager = WorkerManager(
+        config_path=str(tmp_path / "config.json"),
+        workspace_root=str(tmp_path / "workspaces"),
+        worker_api_key="secret",
+    )
+    manager._initialize_workspace_store()
+    admission_lock = manager.managed_workspace_root / HOSTED_WORKSPACE_ADMISSION_LOCK
+    admission_lock.touch()
+
+    snapshot = manager._scan_workspace_store()
+
+    assert snapshot.unknown_entries == 0
+    assert snapshot.unknown_bytes == 0
+
+    admission_lock.unlink()
+    admission_lock.mkdir()
+    (admission_lock / "keep.txt").write_text("keep", encoding="utf-8")
+
+    snapshot = manager._scan_workspace_store()
+
+    assert snapshot.unknown_entries == 1
+    assert snapshot.unknown_bytes > 0
+    manager._prune_workspace_store(set(), 0)
+    assert (admission_lock / "keep.txt").read_text(encoding="utf-8") == "keep"
 
 
 def test_workspace_cleanup_never_deletes_top_level_symlink(tmp_path: Path) -> None:
