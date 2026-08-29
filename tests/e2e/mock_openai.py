@@ -202,9 +202,7 @@ class Handler(BaseHTTPRequestHandler):
         if system_match:
             marker = {"coc7e": "coc", "narrative": "narrative"}.get(system_id, "dnd")
             selected_tools = {name for name in tool_names if marker in name.casefold()}
-        exposure_name = next(
-            (name for name in selected_tools if name.endswith("_exposure")), ""
-        )
+        exposure_name = next((name for name in selected_tools if name.endswith("_exposure")), "")
         query_name = next(
             (name for name in selected_tools if name.endswith(f"_{target_tool_id}")), ""
         )
@@ -233,8 +231,7 @@ class Handler(BaseHTTPRequestHandler):
                             "principal_id": principal_match.group(1),
                         }
                         if system_id == "narrative"
-                        else
-                        {
+                        else {
                             "action": "list",
                             "campaign_id": campaign_match.group(1),
                             "principal_id": principal_match.group(1),
@@ -278,9 +275,43 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
         native_call_completed = any(
-            str(message.get("name", "")).endswith(f"_{target_tool_id}")
-            for message in tool_messages
+            str(message.get("name", "")).endswith(f"_{target_tool_id}") for message in tool_messages
         )
+        submit_name = next((name for name in tool_names if name == "submit_room_turn"), "")
+        submit_completed = any(
+            str(message.get("name", "")) == "submit_room_turn" for message in tool_messages
+        )
+        run_match = re.search(r"^run_id=(.+)$", context, re.MULTILINE)
+        if (
+            authenticated
+            and native_call_completed
+            and submit_name
+            and not submit_completed
+            and run_match
+        ):
+            self._tool_call(
+                submit_name,
+                {
+                    "schema": "sagasmith.room-turn/v1",
+                    "run_id": run_match.group(1),
+                    "messages": [
+                        {
+                            "output_id": "container-room-output",
+                            "audience": {"kind": "public", "actor_refs": []},
+                            "blocks": [
+                                {
+                                    "type": "narration",
+                                    "block_id": "container-room-narration",
+                                    "text": "Hosted identity completed the room turn.",
+                                }
+                            ],
+                        }
+                    ],
+                    "suggestions": [],
+                },
+                "room-submit",
+            )
+            return
         content = (
             "SagaSmith container E2E dynamic MCP call completed."
             if authenticated and native_call_completed

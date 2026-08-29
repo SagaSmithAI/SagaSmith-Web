@@ -124,23 +124,25 @@ def test_hosted_agent_uses_current_session_scoped_native_tool_contract() -> None
     for path in paths:
         config = json.loads(path.read_text(encoding="utf-8"))
         expected_servers = {
-            "sagasmith-dnd-mcp": "dnd5e",
-            "sagasmith-coc-mcp": "coc7e",
-            "sagasmith-narrative-mcp": "narrative",
+            "sagasmith-dnd-mcp",
+            "sagasmith-coc-mcp",
+            "sagasmith-narrative-mcp",
         }
-        for server_name, system_id in expected_servers.items():
+        for server_name in expected_servers:
             server = config["tools"]["mcpServers"][server_name]
             assert server["injectPrincipal"] is True
             assert server["sessionScoped"] is True
             assert server["exposeResourcesAndPrompts"] is True
             assert server["toolTimeout"] == 900
             assert server["enabledTools"] == ["*"]
-            assert server["delegationSecret"] == "${SAGASMITH_AUTH_CONTEXT_SECRET}" or (
-                server["delegationSecret"] == "e2e-auth-context-secret-at-least-32-bytes"
-            )
-            assert server["authorizationAudience"] == server_name
-            assert server["systemIds"] == [system_id]
-            assert server["protocolMode"] == "auto"
+            # The current component lock pins the pre-v2 Agent schema. Modern
+            # delegation/audience/protocol fields are added only by the atomic
+            # release-lock upgrade so this rollback-compatible config remains
+            # loadable by the pinned worker.
+            assert "delegationSecret" not in server
+            assert "authorizationAudience" not in server
+            assert "systemIds" not in server
+            assert "protocolMode" not in server
         skills = config["agents"]["defaults"]["externalSkillsDirs"]
         assert skills == [
             "/opt/sagasmith/skills/hosted",

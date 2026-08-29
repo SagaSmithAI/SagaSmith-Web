@@ -2089,6 +2089,14 @@ async def execute_room_turn_job(app: FastAPI, job_id: str) -> None:
                         "run_id": run.id,
                         "job_id": job.id,
                         "mcp_revision": revision,
+                        "requester_principal": preparation.authority_context["requester_principal"],
+                        "acting_host_principal": preparation.authority_context[
+                            "acting_host_principal"
+                        ],
+                        "authorized_audience": preparation.authority_context["authorized_audience"],
+                        "allowed_operations": list(
+                            preparation.authority_context["allowed_operations"]
+                        ),
                         "media_artifact_ids": [item.row.id for item in media],
                         "auth_context_receipts": [
                             dict(receipt["auth_context_receipt"])
