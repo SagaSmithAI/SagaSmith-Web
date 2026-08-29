@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import shutil
 import tempfile
 from pathlib import Path
@@ -60,6 +61,32 @@ class LocalPrivateStorage:
         if source.stat().st_size > max_bytes:
             raise PrivateStorageError("private object exceeds the read limit")
         return source.read_bytes()
+
+    def put_bytes_idempotent(
+        self,
+        key: str,
+        payload: bytes,
+        *,
+        max_bytes: int,
+        content_type: str,
+    ) -> tuple[str, int]:
+        if len(payload) > max_bytes:
+            raise ValueError("object exceeds configured size limit")
+        destination = (self.root / key).resolve()
+        if self.root not in destination.parents:
+            raise ValueError("invalid storage key")
+        digest = hashlib.sha256(payload).hexdigest()
+        if destination.is_file():
+            existing = destination.read_bytes()
+            if hashlib.sha256(existing).hexdigest() != digest:
+                raise PrivateStorageError("idempotent object key contains different bytes")
+            return digest, len(existing)
+        return self.put(
+            key,
+            io.BytesIO(payload),
+            max_bytes=max_bytes,
+            content_type=content_type,
+        )
 
     def delete(self, key: str) -> None:
         source = (self.root / key).resolve()
@@ -179,6 +206,23 @@ class S3PrivateStorage:
         if len(payload) > max_bytes:
             raise PrivateStorageError("private object exceeds the read limit")
         return bytes(payload)
+
+    def put_bytes_idempotent(
+        self,
+        key: str,
+        payload: bytes,
+        *,
+        max_bytes: int,
+        content_type: str,
+    ) -> tuple[str, int]:
+        if len(payload) > max_bytes:
+            raise ValueError("object exceeds configured size limit")
+        return self.put(
+            key,
+            io.BytesIO(payload),
+            max_bytes=max_bytes,
+            content_type=content_type,
+        )
 
     def delete(self, key: str) -> None:
         try:

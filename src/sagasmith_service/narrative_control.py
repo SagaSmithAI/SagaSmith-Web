@@ -62,9 +62,9 @@ class NarrativeControlClient:
         with path.open(encoding="utf-8") as source:
             config = json.load(source)
         servers = config.get("tools", {}).get("mcpServers", {})
-        server = servers.get("sagasmith_narrative")
+        server = servers.get("sagasmith-narrative-mcp") or servers.get("sagasmith_narrative")
         if not isinstance(server, dict) or server.get("type") != "stdio":
-            raise ValueError("Agent config must define sagasmith_narrative as stdio")
+            raise ValueError("Agent config must define sagasmith-narrative-mcp as stdio")
         command = _resolve_environment(str(server.get("command") or "").strip())
         if not command:
             raise ValueError("Narrative MCP command is required")

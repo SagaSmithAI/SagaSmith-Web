@@ -234,6 +234,35 @@ export function createRoomTimelineController({
     return root;
   }
 
+  function renderMedia(payload) {
+    const items = Array.isArray(payload?.media) ? payload.media : [];
+    if (!items.length) return null;
+    const root = text("section", "", "message-media");
+    for (const item of items) {
+      if (item.kind === "image") {
+        const image = document.createElement("img");
+        image.src = item.url;
+        image.alt = "SagaSmith tool image";
+        image.loading = "lazy";
+        root.append(image);
+      } else if (item.kind === "audio") {
+        const audio = document.createElement("audio");
+        audio.src = item.url;
+        audio.controls = true;
+        audio.preload = "metadata";
+        root.append(audio);
+      } else {
+        const link = document.createElement("a");
+        link.href = item.url;
+        link.textContent = item.kind === "embedded-resource" ? "Open resource" : "View resource";
+        link.target = "_blank";
+        link.rel = "noopener";
+        root.append(link);
+      }
+    }
+    return root;
+  }
+
   function refreshSuggestionValidity() {
     for (const control of $$(".suggestion-chip")) {
       const valid = {
@@ -286,6 +315,8 @@ export function createRoomTimelineController({
         ? renderPresentation(payload, message.content)
         : text("div", message.content, "message-body");
     bubble.append(head, body);
+    const media = renderMedia(payload);
+    if (media) bubble.append(media);
     const suggestions = renderSuggestions(payload);
     if (suggestions) bubble.append(suggestions);
     if (message.audience !== "public") {

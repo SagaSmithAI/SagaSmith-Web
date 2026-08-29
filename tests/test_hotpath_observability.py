@@ -108,7 +108,7 @@ def test_database_observability_distinguishes_event_loop_and_worker_execution() 
     assert event_loop_observation.snapshot()["worker"][1] == 0
 
 
-def test_room_action_uses_only_async_driver_database_work(
+def test_room_action_keeps_request_db_async_and_worker_db_off_event_loop(
     client: TestClient,
 ) -> None:
     registered = client.post(
@@ -162,7 +162,7 @@ def test_room_action_uses_only_async_driver_database_work(
     assert dependency_sessions == 1
     assert _statement_count("room_action", "async_driver") > before_async
     assert _statement_count("room_action", "event_loop") == before_event_loop
-    assert _statement_count("room_action", "worker") == before_worker
+    assert _statement_count("room_action", "worker") > before_worker
     with client.app.state.session_factory() as session:
         refreshed_session = session.get(UserSession, active_session_id)
         assert refreshed_session is not None

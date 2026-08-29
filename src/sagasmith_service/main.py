@@ -33,6 +33,7 @@ from sagasmith_service.api.modules import NOTIFICATION_ROUTER
 from sagasmith_service.api.modules import router as modules_router
 from sagasmith_service.api.operations import router as operations_router
 from sagasmith_service.api.packs import router as packs_router
+from sagasmith_service.api.rooms import execute_room_turn_job, record_room_job_failure
 from sagasmith_service.api.rooms import router as rooms_router
 from sagasmith_service.api.usage import router as usage_router
 from sagasmith_service.audit import bind_request_id, reset_request_id
@@ -72,6 +73,7 @@ from sagasmith_service.realtime import (
     RealtimeHub,
     install_transactional_outbox,
 )
+from sagasmith_service.room_jobs import RoomTurnJobProcessor
 from sagasmith_service.security import SESSION_COOKIE
 from sagasmith_service.storage import LocalPrivateStorage, S3PrivateStorage
 
@@ -116,9 +118,11 @@ def create_app(
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await realtime_hub.start()
         outbox_dispatcher.start()
+        _app.state.room_turn_jobs.start()
         try:
             yield
         finally:
+            await _app.state.room_turn_jobs.close()
             await _app.state.combat_render_cache.aclose()
             await outbox_dispatcher.close()
             await realtime_hub.close()
@@ -191,10 +195,21 @@ def create_app(
         settings.agent_api_url,
         settings.agent_api_key.get_secret_value(),
         timeout_seconds=settings.agent_completion_timeout_seconds,
+        boundary_mode=settings.agent_boundary_mode,
         http_client=managed_http_client(
             "agent",
             timeout=httpx.Timeout(settings.agent_completion_timeout_seconds, connect=10),
         ),
+    )
+    app.state.room_turn_jobs = RoomTurnJobProcessor(
+        session_factory,
+        lambda job_id: execute_room_turn_job(app, job_id),
+        concurrency=settings.room_turn_worker_concurrency,
+        poll_seconds=settings.room_turn_worker_poll_seconds,
+        lease_seconds=settings.room_turn_worker_lease_seconds,
+        reservation_ttl_seconds=settings.agent_reservation_ttl_seconds,
+        retry_seconds=settings.room_turn_retry_seconds,
+        failure_recorder=record_room_job_failure,
     )
     app.state.outbound_http_clients = managed_http_clients
     app.state.realtime_hub = realtime_hub
@@ -226,9 +241,7 @@ def create_app(
         observation_token = bind_hot_path_observation(observation)
         stop = asyncio.Event()
         sampler_started = asyncio.Event()
-        sampler = asyncio.create_task(
-            sample_max_event_loop_lag(stop, started=sampler_started)
-        )
+        sampler = asyncio.create_task(sample_max_event_loop_lag(stop, started=sampler_started))
         await sampler_started.wait()
         outcome = "error"
         try:

@@ -8,15 +8,16 @@ import json
 import time
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import timedelta
 from decimal import Decimal
 from typing import Annotated, Any, TypeVar, cast
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request, status
+from fastapi import APIRouter, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import Response, StreamingResponse
 from pydantic import ValidationError
 from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -28,7 +29,8 @@ from sagasmith_service.api.dependencies import (
     StreamingCurrentUser,
 )
 from sagasmith_service.combat_render_cache import CombatRenderKey
-from sagasmith_service.integrations.agent import AgentRuntime
+from sagasmith_service.host_media import materialize_host_media
+from sagasmith_service.integrations.agent import AgentResult, AgentRuntime, AgentRuntimeError
 from sagasmith_service.models import (
     ActorBindingProjection,
     AgentConversation,
@@ -45,6 +47,9 @@ from sagasmith_service.models import (
     CampaignSuggestion,
     IdentityCampaignAssignment,
     IdentityMemoryEntry,
+    QuotaReservation,
+    RoomMediaArtifact,
+    RoomTurnJob,
     User,
     now_utc,
 )
@@ -60,6 +65,13 @@ from sagasmith_service.projection_cache import (
 )
 from sagasmith_service.quota import QuotaExceededError, release, reserve, settle
 from sagasmith_service.room_activity import RoomActivitySubmission, room_activity_contract
+from sagasmith_service.room_jobs import TERMINAL_ROOM_JOB_STATES, RoomJobError
+from sagasmith_service.room_tool_policy import (
+    RoomToolPolicyError,
+    campaign_phase_and_revision,
+    select_room_turn_tools,
+    service_for_system,
+)
 from sagasmith_service.room_turn import (
     PerformanceBlock,
     RoomAudience,
@@ -152,9 +164,7 @@ async def _observed_projection_batch(
             "status": metric_status,
             "transport": transport,
         }
-        ROOM_PROJECTION_BATCH_SECONDS.labels(**labels).observe(
-            time.perf_counter() - started
-        )
+        ROOM_PROJECTION_BATCH_SECONDS.labels(**labels).observe(time.perf_counter() - started)
         ROOM_PROJECTION_JOBS.labels(**labels).observe(len(jobs))
 
 
@@ -173,9 +183,7 @@ def _membership(session: Session, campaign_id: str, user_id: str) -> CampaignMem
 
 def _room(session: Session, campaign_id: str) -> CampaignRoom:
     item = session.scalar(
-        select(CampaignRoom)
-        .where(CampaignRoom.campaign_id == campaign_id)
-        .with_for_update()
+        select(CampaignRoom).where(CampaignRoom.campaign_id == campaign_id).with_for_update()
     )
     if item is None:
         campaign = session.get(CampaignProjection, campaign_id)
@@ -224,6 +232,40 @@ def _message_view(
         ]
     value["structured_payload"] = payload
     return value
+
+
+def _room_job_view(job: RoomTurnJob | None) -> dict[str, Any] | None:
+    if job is None:
+        return None
+    return {
+        "id": job.id,
+        "status": job.status,
+        "attempt": job.attempt,
+        "max_attempts": job.max_attempts,
+        "base_revision": job.base_revision,
+        "result_revision": job.result_revision,
+        "result_message_ids": list(job.result_message_ids or []),
+        "retryable": bool(job.retryable),
+        "error": (
+            {
+                "class": job.error_class,
+                "code": job.error_code,
+                "message": job.last_error,
+                "recovery": (
+                    "Refresh the room panel and submit a new action."
+                    if job.error_code == "stale_revision"
+                    else "Retry with the same idempotency key."
+                    if job.retryable
+                    else None
+                ),
+            }
+            if job.error_code
+            else None
+        ),
+        "created_at": job.created_at.isoformat(),
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+    }
 
 
 def _audience_users(
@@ -284,21 +326,26 @@ def _resolve_room_audience(
     return audience, user_ids
 
 
-def _runtime_for_system(request: Request, system_id: str) -> Any:
-    runtimes = getattr(request.app.state, "game_runtimes", {})
+def _application(source: Request | FastAPI) -> FastAPI:
+    return source.app if isinstance(source, Request) else source
+
+
+def _runtime_for_system(source: Request | FastAPI, system_id: str) -> Any:
+    app = _application(source)
+    runtimes = getattr(app.state, "game_runtimes", {})
     runtime = runtimes.get(system_id) if isinstance(runtimes, dict) else None
     if runtime is None and system_id == "dnd5e":
-        runtime = getattr(request.app.state, "dnd_runtime", None)
+        runtime = getattr(app.state, "dnd_runtime", None)
     if runtime is None:
         raise ValueError(f"no hosted runtime for system {system_id!r}")
     return runtime
 
 
-def _campaign_runtime(request: Request, session: Session, campaign_id: str) -> Any:
+def _campaign_runtime(source: Request | FastAPI, session: Session, campaign_id: str) -> Any:
     campaign = session.get(CampaignProjection, campaign_id)
     if campaign is None:
         raise ValueError("campaign projection not found")
-    return _runtime_for_system(request, campaign.system_id)
+    return _runtime_for_system(source, campaign.system_id)
 
 
 def _activity_token(secret: Any, campaign_id: str, run_id: str) -> str:
@@ -335,7 +382,7 @@ class _RoomProjectionContext:
     @classmethod
     def load(
         cls,
-        request: Request,
+        request: Request | FastAPI,
         session: Session,
         *,
         campaign_id: str,
@@ -353,9 +400,7 @@ class _RoomProjectionContext:
         ).all()
         members_by_user = {item.user_id: item for item in members}
         users = (
-            session.scalars(
-                select(User).where(User.id.in_(sorted(members_by_user)))
-            ).all()
+            session.scalars(select(User).where(User.id.in_(sorted(members_by_user)))).all()
             if members_by_user
             else []
         )
@@ -488,8 +533,7 @@ async def _projection_indexes(
             key = (output.output_id, actor_ref)
             actor_groups[key] = actor_principals
             actor_jobs.extend(
-                _ProjectionJob("actor", key, principal_id)
-                for principal_id in actor_principals
+                _ProjectionJob("actor", key, principal_id) for principal_id in actor_principals
             )
 
     suggestion_actor_refs = {
@@ -502,10 +546,7 @@ async def _projection_indexes(
     )
     if suggestion_actor_refs and target is None:
         raise ValueError("suggestion actor has no triggering principal")
-    suggestion_keys = [
-        ("__suggestion__", actor_ref)
-        for actor_ref in sorted(suggestion_actor_refs)
-    ]
+    suggestion_keys = [("__suggestion__", actor_ref) for actor_ref in sorted(suggestion_actor_refs)]
     actor_jobs.extend(
         _ProjectionJob("actor", key, target.principal_id, suggestion=True)
         for key in suggestion_keys
@@ -601,9 +642,10 @@ async def _projection_indexes(
 
     actor_index: dict[tuple[str, str], dict[str, Any]] = {}
     for key, values in actor_values.items():
-        if not values or len(
-            {json.dumps(item, sort_keys=True, ensure_ascii=False) for item in values}
-        ) != 1:
+        if (
+            not values
+            or len({json.dumps(item, sort_keys=True, ensure_ascii=False) for item in values}) != 1
+        ):
             raise ValueError("actor presentation differs inside one message audience")
         actor_index[key] = values[0]
     for key, values in suggestion_values.items():
@@ -689,6 +731,46 @@ def _close_run_activities(
         )
 
 
+def record_room_job_failure(
+    session: Session,
+    job: RoomTurnJob,
+    failure: RoomJobError,
+) -> None:
+    """Finish room-visible state in the same transaction as terminal job failure."""
+
+    room = session.get(CampaignRoom, job.room_id)
+    run = session.get(AgentRun, job.agent_run_id) if job.agent_run_id else None
+    if room is None:
+        return
+    cancelled = job.status == "cancelled"
+    trigger = session.get(CampaignMessage, job.trigger_message_id)
+    if trigger is not None:
+        trigger.status = "cancelled" if cancelled else "failed"
+        trigger.completed_at = now_utc()
+    if run is not None:
+        run.status = "cancelled" if cancelled else "failed"
+        run.error_code = "cancelled" if cancelled else failure.code
+        run.completed_at = now_utc()
+        _close_run_activities(
+            session,
+            room,
+            run_id=run.id,
+            state="cancelled" if cancelled else "failed",
+        )
+    _emit(
+        session,
+        room,
+        "agent.cancelled" if cancelled else "agent.failed",
+        {
+            "message_id": job.trigger_message_id,
+            "run_id": run.id if run is not None else None,
+            "job_id": job.id,
+            "error_code": "cancelled" if cancelled else failure.code,
+            "retryable": False if cancelled else failure.retryable,
+        },
+    )
+
+
 def _expire_suggestions(
     session: Session,
     room: CampaignRoom,
@@ -765,9 +847,7 @@ def _index_message_suggestions(session: Session, message: CampaignMessage) -> No
                 run_id=run_id,
                 expired=bool(valid_for.get("expired", False)),
                 valid_revision=(
-                    int(valid_for["revision"])
-                    if valid_for.get("revision") is not None
-                    else None
+                    int(valid_for["revision"]) if valid_for.get("revision") is not None else None
                 ),
                 valid_phase=str(valid_for.get("phase") or "") or None,
                 payload=deepcopy(raw_suggestion),
@@ -1046,6 +1126,7 @@ class _MessagePreparation:
     response: dict[str, Any] | None
     run_agent: bool
     membership_role: str
+    job_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1062,11 +1143,17 @@ class _AgentPreparation:
     room_id: str
     trigger_id: str
     trigger_content: str
+    trigger_mode: str
     trigger_payload: dict[str, Any]
     sender_display_name: str
     session_id: str
     identity_context: dict[str, Any]
     room_context: list[dict[str, Any]]
+    job_id: str
+    base_revision: int | None
+    base_revision_explicit: bool
+    trace_context: dict[str, str]
+    authority_context: dict[str, Any]
 
 
 def _prepare_message_transaction(
@@ -1077,6 +1164,8 @@ def _prepare_message_transaction(
     user_id: str,
     user_display_name: str,
     idempotency_key: str,
+    trace_context: dict[str, str],
+    max_attempts: int,
 ) -> _MessagePreparation:
     membership = _membership(session, campaign_id, user_id)
     room = _room(session, campaign_id)
@@ -1097,6 +1186,11 @@ def _prepare_message_transaction(
             or dict(existing.structured_payload or {}) != payload.structured_payload
         ):
             raise HTTPException(status.HTTP_409_CONFLICT, "idempotency key payload mismatch")
+        job = session.scalar(
+            select(RoomTurnJob).where(RoomTurnJob.trigger_message_id == existing.id)
+        )
+        if job is not None and job.base_revision != payload.base_revision:
+            raise HTTPException(status.HTTP_409_CONFLICT, "idempotency key payload mismatch")
         assistants = session.scalars(
             select(CampaignMessage)
             .where(CampaignMessage.trigger_message_id == existing.id)
@@ -1109,13 +1203,14 @@ def _prepare_message_transaction(
         response = {
             "message": _message_view(existing, user_id),
             "agent_message": (
-                _message_view(visible_assistant, user_id)
-                if visible_assistant is not None
-                else None
+                _message_view(visible_assistant, user_id) if visible_assistant is not None else None
             ),
+            "job": _room_job_view(job) if job is not None else None,
         }
         session.commit()
-        return _MessagePreparation(existing.id, response, False, membership.role)
+        return _MessagePreparation(
+            existing.id, response, False, membership.role, job.id if job else None
+        )
     if payload.mode == "narration" and membership.role not in {"owner", "dm"}:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "DM role required for narration")
     if payload.audience == "private":
@@ -1134,11 +1229,27 @@ def _prepare_message_transaction(
             )
     if payload.reply_to_message_id:
         parent = session.get(CampaignMessage, payload.reply_to_message_id)
-        if parent is None or parent.room_id != room.id or not _message_visible(
-            parent, membership, user_id
+        if (
+            parent is None
+            or parent.room_id != room.id
+            or not _message_visible(parent, membership, user_id)
         ):
             raise HTTPException(status.HTTP_404_NOT_FOUND, "reply target not found")
     if payload.mode == "action":
+        campaign = session.get(CampaignProjection, campaign_id)
+        if campaign is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "campaign not found")
+        if payload.base_revision is not None and payload.base_revision != campaign.mcp_revision:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "stale_revision",
+                    "retryable": True,
+                    "base_revision": payload.base_revision,
+                    "current_revision": campaign.mcp_revision,
+                    "recovery": "Refresh the room panel and retry with a new idempotency key.",
+                },
+            )
         _expire_suggestions(session, room, target_user_id=user_id)
     message = _append_message(
         session,
@@ -1165,6 +1276,30 @@ def _prepare_message_transaction(
             details={"campaign_id": campaign_id, "mode": payload.mode},
         )
     )
+    job = None
+    if payload.mode == "action":
+        input_value = payload.model_dump(mode="json")
+        input_hash = hashlib.sha256(
+            json.dumps(
+                input_value,
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        job = RoomTurnJob(
+            room_id=room.id,
+            campaign_id=campaign_id,
+            user_id=user_id,
+            trigger_message_id=message.id,
+            idempotency_key=idempotency_key,
+            input_hash=input_hash,
+            base_revision=payload.base_revision,
+            trace_context=dict(trace_context),
+            max_attempts=max_attempts,
+        )
+        session.add(job)
+        session.flush()
     session.commit()
     response = None
     if payload.mode != "action":
@@ -1174,24 +1309,41 @@ def _prepare_message_transaction(
         response,
         payload.mode == "action",
         membership.role,
+        job.id if job is not None else None,
     )
 
 
 def _prepare_agent_transaction(
     session: Session,
     *,
-    request: Request,
+    request: Request | FastAPI,
     campaign_id: str,
     trigger_id: str,
+    job_id: str,
     user_id: str,
     user_principal_id: str,
     viewer_role: str,
     idempotency_key: str,
 ) -> _AgentPreparation:
+    app = _application(request)
     campaign = session.get(CampaignProjection, campaign_id)
     trigger = session.get(CampaignMessage, trigger_id)
-    if campaign is None or trigger is None:
+    job = session.get(RoomTurnJob, job_id)
+    if campaign is None or trigger is None or job is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "campaign action context not found")
+    if job.trigger_message_id != trigger.id or job.user_id != user_id:
+        raise HTTPException(status.HTTP_409_CONFLICT, "room turn job context mismatch")
+    if job.base_revision is not None and campaign.mcp_revision != job.base_revision:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "stale_revision",
+                "retryable": True,
+                "base_revision": job.base_revision,
+                "current_revision": campaign.mcp_revision,
+                "recovery": "Refresh the room panel and submit a new action.",
+            },
+        )
     room = _room(session, campaign_id)
     principal_id = user_principal_id
     host_role = viewer_role
@@ -1272,39 +1424,103 @@ def _prepare_agent_transaction(
         else None
     )
     context_user_id = conversation_user_id if identity_assignment_id is not None else user_id
-    reservation_quantity = Decimal(request.app.state.settings.agent_reservation_tokens)
-    try:
-        reservation = reserve(
-            session,
-            user_id=quota_user_id,
+    reservation_quantity = Decimal(app.state.settings.agent_reservation_tokens)
+    reservation = None
+    run = session.get(AgentRun, job.agent_run_id) if job.agent_run_id else None
+    if job.reservation_id:
+        reservation = session.get(QuotaReservation, job.reservation_id)
+    if reservation is None:
+        try:
+            reservation = reserve(
+                session,
+                user_id=quota_user_id,
+                campaign_id=campaign_id,
+                metric="llm_tokens",
+                quantity=reservation_quantity,
+                idempotency_key=f"room-turn-reserve:{job.id}",
+                ttl_seconds=app.state.settings.agent_reservation_ttl_seconds,
+            )
+        except QuotaExceededError as exc:
+            trigger.status = "failed"
+            trigger.completed_at = now_utc()
+            _emit(
+                session,
+                room,
+                "agent.failed",
+                {"message_id": trigger.id, "job_id": job.id, "error_code": "quota_exceeded"},
+            )
+            session.commit()
+            raise HTTPException(status.HTTP_402_PAYMENT_REQUIRED, str(exc)) from exc
+        job.reservation_id = reservation.id
+    if run is None:
+        run = AgentRun(
+            conversation_id=conversation.id,
+            trigger_message_id=trigger.id,
             campaign_id=campaign_id,
-            metric="llm_tokens",
-            quantity=reservation_quantity,
-            idempotency_key=f"room-agent-reserve:{user_id}:{idempotency_key}",
-            ttl_seconds=300,
+            user_id=user_id,
+            idempotency_key=f"room:{idempotency_key}",
+            request_hash=job.input_hash,
+            user_content=trigger.content,
         )
-    except QuotaExceededError as exc:
-        trigger.status = "failed"
-        trigger.completed_at = now_utc()
-        _emit(
-            session,
-            room,
-            "agent.failed",
-            {"message_id": trigger.id, "error_code": "quota_exceeded"},
-        )
-        session.commit()
-        raise HTTPException(status.HTTP_402_PAYMENT_REQUIRED, str(exc)) from exc
-    run = AgentRun(
-        conversation_id=conversation.id,
-        trigger_message_id=trigger.id,
-        campaign_id=campaign_id,
-        user_id=user_id,
-        idempotency_key=f"room:{idempotency_key}",
-        request_hash=hashlib.sha256(trigger.content.encode()).hexdigest(),
-        user_content=trigger.content,
+        session.add(run)
+        session.flush()
+        job.agent_run_id = run.id
+    target_service = service_for_system(campaign.system_id)
+    previous_authority = dict(job.authority_context or {})
+    previous_selection_matches = (
+        previous_authority.get("schema") == "sagasmith.auth-context/v2"
+        and previous_authority.get("target_service") == target_service
+        and previous_authority.get("campaign_id") == campaign.id
+        and previous_authority.get("system_id") == campaign.system_id
+        and previous_authority.get("catalog_role") == host_role
+        and previous_authority.get("catalog_task") == trigger.message_type
+        and isinstance(previous_authority.get("allowed_operations"), list)
+        and bool(previous_authority.get("allowed_operations"))
     )
-    session.add(run)
-    session.flush()
+    durable_base_revision = int(
+        previous_authority.get("base_revision")
+        if previous_selection_matches
+        else (job.base_revision if job.base_revision is not None else campaign.mcp_revision)
+    )
+    authority_context = {
+        "schema": "sagasmith.auth-context/v2",
+        "target_service": target_service,
+        "caller_principal": "service:sagasmith-web",
+        "workload_identity": "workload:room-turn-worker",
+        "requester_principal": user_principal_id,
+        "resource_owner_principal": f"user:{campaign.owner_user_id}",
+        "acting_host_principal": principal_id,
+        "acting_character_id": (
+            str(trigger.structured_payload.get("actor_id"))
+            if trigger.structured_payload.get("actor_id")
+            else ""
+        ),
+        "authorized_audience": target_service,
+        "allowed_operations": (
+            list(previous_authority["allowed_operations"]) if previous_selection_matches else []
+        ),
+        "room_turn_id": job.id,
+        "campaign_id": campaign.id,
+        "system_id": campaign.system_id,
+        "base_revision": durable_base_revision,
+        "expires_at": (
+            now_utc() + timedelta(seconds=app.state.settings.agent_delegation_ttl_seconds)
+        ).isoformat(),
+        "idempotency_key": f"room-turn:{job.id}",
+        "conversation_principal": f"room:{room.id}",
+        "tenant_id": "",
+        "traceparent": str((job.trace_context or {}).get("traceparent") or ""),
+        "tracestate": str((job.trace_context or {}).get("tracestate") or ""),
+        "baggage": str((job.trace_context or {}).get("baggage") or ""),
+        # Web-only durable catalog selection inputs. The Agent wire projection
+        # strips these fields and validates the exact WorkerTrustedContext schema.
+        "catalog_phase": (
+            str(previous_authority.get("catalog_phase") or "") if previous_selection_matches else ""
+        ),
+        "catalog_role": host_role,
+        "catalog_task": trigger.message_type,
+    }
+    job.authority_context = authority_context
     room_context = _recent_context(
         session,
         room,
@@ -1312,7 +1528,7 @@ def _prepare_agent_transaction(
         context_user_id,
     )
     _emit(session, room, "agent.started", {"message_id": trigger.id, "run_id": run.id})
-    domain_runtime = _campaign_runtime(request, session, campaign_id)
+    domain_runtime = _campaign_runtime(app, session, campaign_id)
     session.commit()
     session_id = (
         f"{campaign_id}:agent:{identity_id}:{conversation.id}"
@@ -1332,146 +1548,401 @@ def _prepare_agent_transaction(
         room_id=room.id,
         trigger_id=trigger.id,
         trigger_content=trigger.content,
+        trigger_mode=trigger.message_type,
         trigger_payload=dict(trigger.structured_payload or {}),
         sender_display_name=sender_display_name,
         session_id=session_id,
         identity_context=identity_context,
         room_context=room_context,
+        job_id=job.id,
+        base_revision=durable_base_revision,
+        base_revision_explicit=job.base_revision is not None,
+        trace_context=dict(job.trace_context or {}),
+        authority_context=authority_context,
     )
 
 
-def _record_agent_unavailable(
+def _load_room_job_execution(
     session: Session,
     *,
-    campaign_id: str,
-    preparation: _AgentPreparation,
+    app: FastAPI,
+    job_id: str,
+) -> tuple[RoomTurnJob, User, CampaignMembershipProjection, _AgentPreparation]:
+    job = session.get(RoomTurnJob, job_id)
+    if job is None:
+        raise RoomJobError("job_not_found", "Room turn job no longer exists", False, "state")
+    if job.status in TERMINAL_ROOM_JOB_STATES:
+        raise RoomJobError("job_terminal", "Room turn job is already terminal", False, "state")
+    if job.cancel_requested:
+        raise RoomJobError("cancelled", "Room turn job was cancelled", False, "cancel")
+    user = session.get(User, job.user_id)
+    if user is None:
+        raise RoomJobError("requester_missing", "Room turn requester is unavailable", False, "auth")
+    membership = _membership(session, job.campaign_id, user.id)
+    try:
+        preparation = _prepare_agent_transaction(
+            session,
+            request=app,
+            campaign_id=job.campaign_id,
+            trigger_id=job.trigger_message_id,
+            job_id=job.id,
+            user_id=user.id,
+            user_principal_id=user.principal_id,
+            viewer_role=membership.role,
+            idempotency_key=job.idempotency_key,
+        )
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
+        code = str(detail.get("code") or "room_turn_prepare_failed")
+        retryable = bool(detail.get("retryable", exc.status_code >= 500))
+        raise RoomJobError(
+            code,
+            str(detail.get("message") or detail.get("recovery") or exc.detail),
+            retryable,
+            "conflict" if exc.status_code == 409 else "request",
+        ) from exc
+    return job, user, membership, preparation
+
+
+def _persist_agent_result(
+    session: Session,
+    *,
+    job_id: str,
+    result: AgentResult,
+    reservation_quantity: Decimal,
 ) -> None:
-    room = _room(session, campaign_id)
-    trigger = session.get(CampaignMessage, preparation.trigger_id)
-    run = session.get(AgentRun, preparation.run_id)
-    if trigger is None or run is None:
-        raise RuntimeError("persisted Agent run is unavailable")
-    release(session, preparation.reservation_id)
-    trigger.status = "failed"
-    trigger.completed_at = now_utc()
-    run.status = "failed"
-    run.error_code = "agent_unavailable"
-    run.completed_at = now_utc()
-    _close_run_activities(session, room, run_id=run.id, state="failed")
-    _emit(
+    job = session.scalar(select(RoomTurnJob).where(RoomTurnJob.id == job_id).with_for_update())
+    if job is None:
+        raise RoomJobError("job_not_found", "Room turn job no longer exists", False, "state")
+    if job.agent_result:
+        return
+    if job.reservation_id is None or job.agent_run_id is None:
+        raise RoomJobError(
+            "job_preparation_missing",
+            "Room turn job is missing its durable reservation or Agent run",
+            True,
+            "state",
+        )
+    actual = min(result.total_tokens, int(reservation_quantity))
+    settle(
         session,
-        room,
-        "agent.failed",
-        {"message_id": trigger.id, "run_id": run.id, "error_code": run.error_code},
+        reservation_id=job.reservation_id,
+        quantity=Decimal(actual),
+        idempotency_key=f"room-turn-settle:{job.id}",
+        unit="tokens",
+        provider="nanobot",
+        model=result.model,
+        request_id=result.request_id,
     )
+    run = session.get(AgentRun, job.agent_run_id)
+    if run is None:
+        raise RoomJobError("agent_run_missing", "Persisted Agent run is unavailable", True, "state")
+    run.status = "waiting"
+    run.assistant_content = result.content
+    run.upstream_request_id = result.request_id
+    run.model = result.model
+    run.prompt_tokens = result.prompt_tokens
+    run.completion_tokens = result.completion_tokens
+    job.agent_result = result.to_json()
+    # Keep the active lease authoritative while this worker projects and
+    # publishes. ``waiting`` is reserved for a retry after that lease is
+    # explicitly released; otherwise another worker could claim the saved
+    # result before this attempt finishes.
+    job.status = "running"
+    job.error_code = None
+    job.error_class = None
+    job.last_error = ""
     session.commit()
 
 
-async def _run_agent(
-    *,
-    request: Request,
-    session: AsyncSession,
-    campaign_id: str,
-    trigger_id: str,
-    user: User,
-    viewer_role: str,
-    idempotency_key: str,
-) -> dict[str, Any]:
-    preparation = await session.run_sync(
-        lambda sync_session: _prepare_agent_transaction(
-            sync_session,
-            request=request,
-            campaign_id=campaign_id,
-            trigger_id=trigger_id,
-            user_id=user.id,
-            user_principal_id=user.principal_id,
-            viewer_role=viewer_role,
-            idempotency_key=idempotency_key,
-        )
+async def _ensure_room_turn_tool_selection(
+    app: FastAPI,
+    preparation: _AgentPreparation,
+) -> _AgentPreparation:
+    """Persist one reviewed catalog selection before the first Agent attempt."""
+
+    authority = dict(preparation.authority_context)
+    selected = authority.get("allowed_operations")
+    if (
+        isinstance(selected, list)
+        and bool(selected)
+        and isinstance(authority.get("catalog_phase"), str)
+        and bool(authority["catalog_phase"])
+    ):
+        return preparation
+
+    runtime_state = await preparation.domain_runtime.get_campaign(
+        campaign_id=preparation.campaign.id,
+        principal_id=preparation.principal_id,
     )
-    settings = request.app.state.settings
-    activity_callback = (
-        f"{settings.service_internal_url.rstrip('/')}/api/campaigns/{campaign_id}"
-        f"/room/internal-activity/{preparation.run_id}"
+    phase, revision_value = campaign_phase_and_revision(
+        preparation.campaign_system_id,
+        runtime_state,
     )
-    runtime: AgentRuntime = request.app.state.agent_runtime
-    try:
-        result = await runtime.complete(
-            session_id=preparation.session_id,
-            content=preparation.trigger_content,
-            context={
-                "campaign_id": campaign_id,
-                "system_id": preparation.campaign_system_id,
-                "principal_id": preparation.principal_id,
-                "campaign_role": preparation.host_role,
-                "room_id": preparation.room_id,
-                "room_context": preparation.room_context,
-                "action_context": preparation.trigger_payload,
-                "run_id": preparation.run_id,
-                "trigger_message_id": preparation.trigger_id,
-                "response_contract": {
-                    "terminal": room_turn_contract(),
-                    "activity": room_activity_contract(),
-                    "activity_callback": {
-                        "url": activity_callback,
-                        "token": _activity_token(
-                            settings.session_secret,
-                            campaign_id,
-                            preparation.run_id,
-                        ),
-                    },
-                },
-                **preparation.identity_context,
-            },
+    base_revision = preparation.base_revision
+    if preparation.base_revision_explicit and base_revision != revision_value:
+        raise RoomJobError(
+            "stale_revision",
+            (
+                f"Campaign revision changed from {base_revision} to {revision_value}; "
+                "refresh the room panel and submit a new action."
+            ),
+            False,
+            "conflict",
         )
-    except RuntimeError as exc:
-        await session.run_sync(
-            lambda sync_session: _record_agent_unavailable(
-                sync_session,
-                campaign_id=campaign_id,
-                preparation=preparation,
+    if not preparation.base_revision_explicit:
+        base_revision = revision_value
+    operations = select_room_turn_tools(
+        system_id=preparation.campaign_system_id,
+        phase=phase,
+        role=preparation.host_role,
+        task=preparation.trigger_mode,
+    )
+    authority.update(
+        {
+            "allowed_operations": list(operations),
+            "base_revision": base_revision,
+            "catalog_phase": phase,
+            "catalog_role": preparation.host_role,
+            "catalog_task": preparation.trigger_mode,
+        }
+    )
+    async with app.state.room_turn_jobs.transaction_lock():
+        with app.state.session_factory() as session:
+            job = session.scalar(
+                select(RoomTurnJob).where(RoomTurnJob.id == preparation.job_id).with_for_update()
             )
+            if job is None:
+                raise RoomJobError("job_not_found", "Room turn job no longer exists", False)
+            if job.cancel_requested:
+                raise RoomJobError("cancelled", "Room turn job was cancelled", False, "cancel")
+            campaign = session.get(CampaignProjection, preparation.campaign.id)
+            if campaign is None:
+                raise RoomJobError(
+                    "campaign_projection_missing",
+                    "Campaign projection is unavailable",
+                    True,
+                    "state",
+                )
+            if campaign.mcp_revision != preparation.campaign.mcp_revision:
+                raise RoomJobError(
+                    "stale_revision",
+                    (
+                        "Campaign revision changed while selecting Agent tools; "
+                        "refresh the room panel and submit a new action."
+                    ),
+                    False,
+                    "conflict",
+                )
+            current_authority = dict(job.authority_context or {})
+            if current_authority.get("allowed_operations") and current_authority.get(
+                "catalog_phase"
+            ):
+                return replace(
+                    preparation,
+                    base_revision=int(current_authority["base_revision"]),
+                    authority_context=current_authority,
+                )
+            job.authority_context = authority
+            session.commit()
+    return replace(
+        preparation,
+        base_revision=base_revision,
+        authority_context=authority,
+    )
+
+
+def _room_job_result(
+    session: Session,
+    *,
+    job_id: str,
+    viewer_user_id: str,
+) -> dict[str, Any]:
+    job = session.get(RoomTurnJob, job_id)
+    if job is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "room turn job not found")
+    membership = _membership(session, job.campaign_id, viewer_user_id)
+    trigger = session.get(CampaignMessage, job.trigger_message_id)
+    if trigger is None or not _message_visible(trigger, membership, viewer_user_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "room turn job not found")
+    assistants = session.scalars(
+        select(CampaignMessage)
+        .where(CampaignMessage.trigger_message_id == trigger.id)
+        .order_by(CampaignMessage.sequence)
+    ).all()
+    visible_assistant = next(
+        (item for item in assistants if _message_visible(item, membership, viewer_user_id)),
+        None,
+    )
+    return {
+        "message": _message_view(trigger, viewer_user_id),
+        "agent_message": (
+            _message_view(visible_assistant, viewer_user_id)
+            if visible_assistant is not None
+            else None
+        ),
+        "job": _room_job_view(job),
+    }
+
+
+async def execute_room_turn_job(app: FastAPI, job_id: str) -> None:
+    """Execute or resume a durable Web Host room turn.
+
+    Agent completion, MCP projection and Web publication are separate durable
+    phases.  Once the standard Agent/MCP result is persisted, retries never
+    create a new upstream business operation.
+    """
+
+    async with app.state.room_turn_jobs.transaction_lock():
+        for database_attempt in range(8):
+            try:
+                with app.state.session_factory() as session:
+                    job, user, membership, preparation = _load_room_job_execution(
+                        session,
+                        app=app,
+                        job_id=job_id,
+                    )
+                    session.expunge(user)
+                    saved_result = dict(job.agent_result or {})
+                    reservation_quantity = preparation.reservation_quantity
+                break
+            except OperationalError:
+                if database_attempt == 7:
+                    raise
+                await asyncio.sleep(min(0.5, 0.05 * (2**database_attempt)))
+
+    result: AgentResult
+    if saved_result:
+        result = AgentResult.from_json(saved_result)
+    else:
+        try:
+            preparation = await _ensure_room_turn_tool_selection(app, preparation)
+        except RoomJobError:
+            raise
+        except RoomToolPolicyError as exc:
+            raise RoomJobError(
+                "agent_tool_policy_denied",
+                str(exc),
+                False,
+                "auth",
+            ) from exc
+        except RuntimeError as exc:
+            raise RoomJobError(
+                "mcp_catalog_preflight_unavailable",
+                str(exc),
+                True,
+                "upstream",
+            ) from exc
+        activity_callback = (
+            f"{app.state.settings.service_internal_url.rstrip('/')}/api/campaigns/"
+            f"{preparation.campaign.id}/room/internal-activity/{preparation.run_id}"
         )
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+        context = {
+            "campaign_id": preparation.campaign.id,
+            "system_id": preparation.campaign_system_id,
+            "principal_id": preparation.principal_id,
+            "campaign_role": preparation.host_role,
+            "room_id": preparation.room_id,
+            "room_turn_id": preparation.job_id,
+            "base_revision": preparation.base_revision,
+            "room_context": preparation.room_context,
+            "action_context": preparation.trigger_payload,
+            "run_id": preparation.run_id,
+            "trigger_message_id": preparation.trigger_id,
+            "authority_context": preparation.authority_context,
+            "response_contract": {
+                "terminal": room_turn_contract(),
+                "activity": room_activity_contract(),
+                "activity_callback": {
+                    "url": activity_callback,
+                    "token": _activity_token(
+                        app.state.settings.session_secret,
+                        preparation.campaign.id,
+                        preparation.run_id,
+                    ),
+                },
+            },
+            **preparation.identity_context,
+        }
+        runtime: AgentRuntime = app.state.agent_runtime
+        try:
+            result = await runtime.complete(
+                session_id=preparation.session_id,
+                content=preparation.trigger_content,
+                context=context,
+                idempotency_key=f"room-turn:{job_id}",
+                trace_context=preparation.trace_context,
+            )
+        except AgentRuntimeError as exc:
+            raise RoomJobError(exc.code, str(exc), exc.retryable, "upstream") from exc
+        except RuntimeError as exc:
+            raise RoomJobError("agent_unavailable", str(exc), True, "upstream") from exc
+        async with app.state.room_turn_jobs.transaction_lock():
+            with app.state.session_factory() as session:
+                _persist_agent_result(
+                    session,
+                    job_id=job_id,
+                    result=result,
+                    reservation_quantity=reservation_quantity,
+                )
+
+    if result.structured_output is None:
+        raise RoomJobError(
+            "agent_invalid_output",
+            "Agent returned no structured room output",
+            False,
+            "tool_execution",
+        )
+    try:
+        submission = RoomTurnSubmission.model_validate(result.structured_output)
+    except ValidationError as exc:
+        raise RoomJobError(
+            "agent_invalid_output",
+            "Agent returned an invalid structured room response",
+            False,
+            "tool_execution",
+        ) from exc
+    if submission.run_id != preparation.run_id:
+        raise RoomJobError(
+            "agent_run_mismatch",
+            "Agent structured output belongs to a different room turn",
+            False,
+            "tool_execution",
+        )
 
     revision: int | None = None
     phase: str | None = None
     try:
         runtime_state = await preparation.domain_runtime.get_campaign(
-            campaign_id=campaign_id,
+            campaign_id=preparation.campaign.id,
             principal_id=preparation.principal_id,
         )
-        state = runtime_state.get("result", runtime_state)
-        revision = int(state.get("revision") or state.get("campaign_revision") or 0) or None
-        phase_value = (
-            state.get("effective_game_phase")
-            or state.get("phase")
-            or state.get("game_phase")
+        normalized_phase, normalized_revision = campaign_phase_and_revision(
+            preparation.campaign_system_id,
+            runtime_state,
         )
-        phase = str(phase_value) if phase_value else None
-    except RuntimeError:
-        pass
+        revision = normalized_revision
+        phase = normalized_phase
+    except RoomToolPolicyError as exc:
+        raise RoomJobError("mcp_projection_invalid", str(exc), False, "tool_execution") from exc
+    except RuntimeError as exc:
+        raise RoomJobError("mcp_projection_unavailable", str(exc), True, "upstream") from exc
 
-    actual = min(result.total_tokens, int(preparation.reservation_quantity))
-    try:
-        if result.structured_output is None:
-            raise ValueError("Agent returned no structured room output")
-        submission = RoomTurnSubmission.model_validate(result.structured_output)
-        projection_context = await session.run_sync(
+    async with app.state.async_session_factory() as async_session:
+        projection_context = await async_session.run_sync(
             lambda sync_session: _RoomProjectionContext.load(
-                request,
+                app,
                 sync_session,
-                campaign_id=campaign_id,
+                campaign_id=preparation.campaign.id,
                 trigger=cast(
                     CampaignMessage,
                     sync_session.get(CampaignMessage, preparation.trigger_id),
                 ),
-                campaign=preparation.campaign,
+                campaign=sync_session.get(CampaignProjection, preparation.campaign.id),
             )
         )
-        # End the read transaction before any MCP projection await. With
-        # expire_on_commit=False the immutable request snapshot remains usable.
-        await session.commit()
+        await async_session.commit()
+    try:
         audiences, resolution_index, actor_presentation_index = await _projection_indexes(
             projection_context,
             submission=submission,
@@ -1482,170 +1953,160 @@ async def _run_agent(
             run_id=preparation.run_id,
             host_role=preparation.host_role,
             user=user,
-            secret=settings.session_secret,
+            secret=app.state.settings.session_secret,
             revision=revision,
             phase=phase,
             audiences=audiences,
             resolution_index=resolution_index,
             actor_presentation_index=actor_presentation_index,
         )
-    except (ValidationError, ValueError) as exc:
-        if session.in_transaction():
-            await session.rollback()
-
-        def record_invalid(sync_session: Session) -> None:
-            room = _room(sync_session, campaign_id)
-            trigger = sync_session.get(CampaignMessage, preparation.trigger_id)
-            run = sync_session.get(AgentRun, preparation.run_id)
-            if trigger is None or run is None:
-                raise RuntimeError("persisted Agent run is unavailable")
-            settle(
-                sync_session,
-                reservation_id=preparation.reservation_id,
-                quantity=Decimal(actual),
-                idempotency_key=f"room-agent-settle:{user.id}:{idempotency_key}",
-                unit="tokens",
-                provider="nanobot",
-                model=result.model,
-                request_id=result.request_id,
-            )
-            campaign = sync_session.get(CampaignProjection, campaign_id)
-            if campaign is not None and revision is not None:
-                campaign.mcp_revision = revision
-            trigger.status = "failed"
-            trigger.completed_at = now_utc()
-            run.status = "failed"
-            run.error_code = "agent_invalid_output"
-            run.assistant_content = result.content
-            run.upstream_request_id = result.request_id
-            run.model = result.model
-            run.prompt_tokens = result.prompt_tokens
-            run.completion_tokens = result.completion_tokens
-            run.completed_at = now_utc()
-            _close_run_activities(sync_session, room, run_id=run.id, state="failed")
-            _emit(
-                sync_session,
-                room,
-                "agent.failed",
-                {"message_id": trigger.id, "run_id": run.id, "error_code": run.error_code},
-            )
-            sync_session.add(
-                AuditEvent(
-                    actor_user_id=user.id,
-                    action="campaign.room.agent.invalid_output",
-                    subject_type="campaign_message",
-                    subject_id=trigger.id,
-                    details={"campaign_id": campaign_id, "run_id": run.id},
-                )
-            )
-            sync_session.commit()
-
-        await session.run_sync(record_invalid)
-        raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY,
-            "Agent returned an invalid structured room response",
+    except (RuntimeError, ValueError) as exc:
+        retryable = isinstance(exc, RuntimeError)
+        raise RoomJobError(
+            "mcp_projection_invalid" if not retryable else "mcp_projection_unavailable",
+            str(exc),
+            retryable,
+            "tool_execution" if not retryable else "upstream",
         ) from exc
 
-    def complete(sync_session: Session) -> dict[str, Any]:
-        room = _room(sync_session, campaign_id)
-        trigger = sync_session.get(CampaignMessage, preparation.trigger_id)
-        run = sync_session.get(AgentRun, preparation.run_id)
-        if trigger is None or run is None:
-            raise RuntimeError("persisted Agent run is unavailable")
-        settle(
-            sync_session,
-            reservation_id=preparation.reservation_id,
-            quantity=Decimal(actual),
-            idempotency_key=f"room-agent-settle:{user.id}:{idempotency_key}",
-            unit="tokens",
-            provider="nanobot",
-            model=result.model,
-            request_id=result.request_id,
+    trigger_audience = projection_context.trigger.audience
+    trigger_users = list(projection_context.trigger.audience_user_ids or [])
+    try:
+        media = materialize_host_media(
+            app.state.private_storage,
+            job_id=job_id,
+            room_id=preparation.room_id,
+            campaign_id=preparation.campaign.id,
+            call_tool_results=result.mcp_results,
+            audience=trigger_audience,
+            audience_user_ids=trigger_users,
+            max_bytes=app.state.settings.room_turn_media_max_bytes,
         )
-        campaign = sync_session.get(CampaignProjection, campaign_id)
-        if campaign is not None and revision is not None:
-            campaign.mcp_revision = revision
-        run.upstream_request_id = result.request_id
-        run.model = result.model
-        run.prompt_tokens = result.prompt_tokens
-        run.completion_tokens = result.completion_tokens
-        assistants = [
-            _append_message(
-                sync_session,
-                room,
-                campaign_id=campaign_id,
-                sender_type="agent",
-                sender_display_name=preparation.sender_display_name,
-                message_type="presentation",
-                audience=output["audience"],
-                audience_user_ids=output["audience_user_ids"],
-                content=output["content"],
-                client_message_id=f"agent:{run.id}:{output['output_id']}",
-                trigger_message_id=trigger.id,
-                structured_payload=output["structured_payload"],
-                mcp_revision=revision,
+    except (RuntimeError, ValueError) as exc:
+        raise RoomJobError("host_media_projection_failed", str(exc), True, "storage") from exc
+
+    async with (
+        app.state.room_turn_jobs.settlement_lock(preparation.room_id),
+        app.state.room_turn_jobs.transaction_lock(),
+    ):
+        with app.state.session_factory() as session:
+            job = session.scalar(
+                select(RoomTurnJob).where(RoomTurnJob.id == job_id).with_for_update()
             )
-            for output in projected
-        ]
-        run.assistant_content = "\n\n".join(item.content for item in assistants)
-        run.status = "completed"
-        run.completed_at = now_utc()
-        trigger.status = "completed"
-        trigger.completed_at = now_utc()
-        _close_run_activities(sync_session, room, run_id=run.id, state="superseded")
-        _emit(
-            sync_session,
-            room,
-            "agent.completed",
-            {
-                "message_id": trigger.id,
-                "agent_message_ids": [item.id for item in assistants],
-                "run_id": run.id,
-            },
-        )
-        _emit(
-            sync_session,
-            room,
-            "state.changed",
-            {"reason": "agent.completed", "mcp_revision": revision},
-        )
-        sync_session.add(
-            AuditEvent(
-                actor_user_id=user.id,
-                action="campaign.room.agent.complete",
-                subject_type="campaign_message",
-                subject_id=trigger.id,
-                details={
-                    "campaign_id": campaign_id,
-                    "tokens": actual,
+            if job is None:
+                raise RoomJobError("job_not_found", "Room turn job no longer exists", False)
+            if job.status == "succeeded":
+                return
+            if job.cancel_requested:
+                raise RoomJobError("cancelled", "Room turn job was cancelled", False, "cancel")
+            room = _room(session, preparation.campaign.id)
+            trigger = session.get(CampaignMessage, preparation.trigger_id)
+            run = session.get(AgentRun, preparation.run_id)
+            if trigger is None or run is None:
+                raise RoomJobError(
+                    "publication_state_missing",
+                    "Persisted room publication state is unavailable",
+                    True,
+                    "state",
+                )
+            campaign = session.get(CampaignProjection, preparation.campaign.id)
+            if campaign is not None and revision is not None:
+                campaign.mcp_revision = revision
+            media_envelopes = [item.envelope for item in media]
+            for item in media:
+                if session.get(RoomMediaArtifact, item.row.id) is None:
+                    session.add(item.row)
+            assistants: list[CampaignMessage] = []
+            for index, output in enumerate(projected):
+                client_message_id = f"agent:{run.id}:{output['output_id']}"
+                existing = session.scalar(
+                    select(CampaignMessage).where(
+                        CampaignMessage.room_id == room.id,
+                        CampaignMessage.client_message_id == client_message_id,
+                    )
+                )
+                if existing is not None:
+                    assistants.append(existing)
+                    continue
+                structured_payload = deepcopy(output["structured_payload"])
+                if index == 0 and media_envelopes:
+                    structured_payload["media"] = media_envelopes
+                assistants.append(
+                    _append_message(
+                        session,
+                        room,
+                        campaign_id=preparation.campaign.id,
+                        sender_type="agent",
+                        sender_display_name=preparation.sender_display_name,
+                        message_type="presentation",
+                        audience=output["audience"],
+                        audience_user_ids=output["audience_user_ids"],
+                        content=output["content"],
+                        client_message_id=client_message_id,
+                        trigger_message_id=trigger.id,
+                        structured_payload=structured_payload,
+                        mcp_revision=revision,
+                    )
+                )
+            run.assistant_content = "\n\n".join(item.content for item in assistants)
+            run.status = "completed"
+            run.completed_at = now_utc()
+            trigger.status = "completed"
+            trigger.completed_at = now_utc()
+            job.status = "succeeded"
+            job.result_revision = revision
+            job.result_message_ids = [item.id for item in assistants]
+            job.lease_owner = None
+            job.lease_expires_at = None
+            job.heartbeat_at = None
+            job.completed_at = now_utc()
+            _close_run_activities(session, room, run_id=run.id, state="superseded")
+            _emit(
+                session,
+                room,
+                "agent.completed",
+                {
+                    "message_id": trigger.id,
+                    "agent_message_ids": [item.id for item in assistants],
                     "run_id": run.id,
-                    "auth_context_receipts": [
-                        dict(receipt["auth_context_receipt"])
-                        for receipt in result.tool_receipts
-                        if isinstance(receipt.get("auth_context_receipt"), dict)
-                    ],
+                    "job_id": job.id,
                 },
             )
-        )
-        sync_session.commit()
-        visible_assistant = next(
-            (
-                item
-                for item in assistants
-                if _message_visible_for_role(item, preparation.viewer_role, user.id)
-            ),
-            None,
-        )
-        return {
-            "message": _message_view(trigger, user.id),
-            "agent_message": (
-                _message_view(visible_assistant, user.id)
-                if visible_assistant is not None
-                else None
-            ),
-        }
-
-    return await session.run_sync(complete)
+            _emit(
+                session,
+                room,
+                "state.changed",
+                {"reason": "agent.completed", "mcp_revision": revision},
+            )
+            session.add(
+                AuditEvent(
+                    actor_user_id=user.id,
+                    action="campaign.room.agent.complete",
+                    subject_type="campaign_message",
+                    subject_id=trigger.id,
+                    details={
+                        "campaign_id": preparation.campaign.id,
+                        "run_id": run.id,
+                        "job_id": job.id,
+                        "mcp_revision": revision,
+                        "requester_principal": preparation.authority_context["requester_principal"],
+                        "acting_host_principal": preparation.authority_context[
+                            "acting_host_principal"
+                        ],
+                        "authorized_audience": preparation.authority_context["authorized_audience"],
+                        "allowed_operations": list(
+                            preparation.authority_context["allowed_operations"]
+                        ),
+                        "media_artifact_ids": [item.row.id for item in media],
+                        "auth_context_receipts": [
+                            dict(receipt["auth_context_receipt"])
+                            for receipt in result.tool_receipts
+                            if isinstance(receipt.get("auth_context_receipt"), dict)
+                        ],
+                    },
+                )
+            )
+            session.commit()
 
 
 async def _post_message(
@@ -1657,6 +2118,15 @@ async def _post_message(
     session: AsyncSession,
     idempotency_key: str,
 ) -> dict[str, Any]:
+    trace_context = {
+        name: value
+        for name in ("traceparent", "tracestate", "baggage")
+        if (value := request.headers.get(name))
+        and "\r" not in value
+        and "\n" not in value
+        and len(value) <= 8192
+    }
+
     async def prepare_once() -> _MessagePreparation:
         return await session.run_sync(
             lambda sync_session: _prepare_message_transaction(
@@ -1666,29 +2136,192 @@ async def _post_message(
                 user_id=user.id,
                 user_display_name=user.display_name,
                 idempotency_key=idempotency_key,
+                trace_context=trace_context,
+                max_attempts=request.app.state.settings.room_turn_worker_max_attempts,
             )
         )
 
-    try:
-        preparation = await prepare_once()
-    except IntegrityError:
-        # A concurrent retry or SQLite writer can race after the initial
-        # idempotency read. Re-read once from a clean transaction so the
-        # unique key remains the authority and a stale room sequence is retried.
-        await session.rollback()
-        preparation = await prepare_once()
+    async with request.app.state.room_turn_jobs.transaction_lock():
+        try:
+            preparation = await prepare_once()
+        except IntegrityError:
+            # A concurrent retry or another replica can race after the initial
+            # idempotency read. Re-read once from a clean transaction so the
+            # unique key remains the authority and a stale room sequence is retried.
+            await session.rollback()
+            preparation = await prepare_once()
     if preparation.response is not None:
         return preparation.response
     if not preparation.run_agent:
         raise RuntimeError("room message preparation returned no response")
-    return await _run_agent(
-        request=request,
-        session=session,
-        campaign_id=campaign_id,
-        trigger_id=preparation.message_id,
-        user=user,
-        viewer_role=preparation.membership_role,
-        idempotency_key=idempotency_key,
+    if preparation.job_id is None:
+        raise RuntimeError("room action did not create a durable job")
+    request.app.state.room_turn_jobs.notify()
+    await request.app.state.room_turn_jobs.wait(
+        preparation.job_id,
+        request.app.state.settings.room_turn_inline_wait_seconds,
+    )
+    response = await session.run_sync(
+        lambda sync_session: _room_job_result(
+            sync_session,
+            job_id=preparation.job_id,
+            viewer_user_id=user.id,
+        )
+    )
+    job = response.get("job") or {}
+    if job.get("status") == "failed":
+        error = job.get("error") or {}
+        code = str(error.get("code") or "room_turn_failed")
+        status_code = (
+            status.HTTP_409_CONFLICT if code == "stale_revision" else status.HTTP_502_BAD_GATEWAY
+        )
+        raise HTTPException(
+            status_code,
+            detail={
+                "code": code,
+                "retryable": bool(job.get("retryable")),
+                "message": error.get("message") or "Room turn failed",
+                "recovery": error.get("recovery"),
+                "job_id": job.get("id"),
+            },
+        )
+    if job.get("status") == "cancelled":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={"code": "cancelled", "retryable": False, "job_id": job.get("id")},
+        )
+    return response
+
+
+@router.get("/jobs/{job_id}")
+def get_room_turn_job(
+    campaign_id: str,
+    job_id: str,
+    user: CurrentUser,
+    session: DbSession,
+) -> dict[str, Any]:
+    job = session.get(RoomTurnJob, job_id)
+    if job is None or job.campaign_id != campaign_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "room turn job not found")
+    return _room_job_result(session, job_id=job_id, viewer_user_id=user.id)
+
+
+@router.post("/jobs/{job_id}/cancel")
+def cancel_room_turn_job(
+    campaign_id: str,
+    job_id: str,
+    request: Request,
+    user: CurrentUser,
+    session: DbSession,
+) -> dict[str, Any]:
+    membership = _membership(session, campaign_id, user.id)
+    job = session.scalar(
+        select(RoomTurnJob)
+        .where(RoomTurnJob.id == job_id, RoomTurnJob.campaign_id == campaign_id)
+        .with_for_update()
+    )
+    if job is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "room turn job not found")
+    if job.user_id != user.id and membership.role not in {"owner", "dm"}:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "room turn cancellation is not allowed")
+    if job.status in TERMINAL_ROOM_JOB_STATES:
+        return {"job": _room_job_view(job)}
+    job.cancel_requested = True
+    if job.status in {"queued", "waiting"}:
+        job.status = "cancelled"
+        job.retryable = False
+        job.error_class = "cancel"
+        job.error_code = "cancelled"
+        job.last_error = "Room turn was cancelled"
+        job.completed_at = now_utc()
+        job.lease_owner = None
+        job.lease_expires_at = None
+        if job.reservation_id:
+            release(session, job.reservation_id)
+        trigger = session.get(CampaignMessage, job.trigger_message_id)
+        if trigger is not None:
+            trigger.status = "cancelled"
+            trigger.completed_at = now_utc()
+        record_room_job_failure(
+            session,
+            job,
+            RoomJobError("cancelled", "Room turn was cancelled", False, "cancel"),
+        )
+    session.commit()
+    request.app.state.room_turn_jobs.notify()
+    return {"job": _room_job_view(job)}
+
+
+@router.get("/artifacts/{artifact_id}")
+def get_room_media_artifact(
+    campaign_id: str,
+    artifact_id: str,
+    request: Request,
+    user: CurrentUser,
+    session: DbSession,
+) -> Response:
+    membership = _membership(session, campaign_id, user.id)
+    artifact = session.get(RoomMediaArtifact, artifact_id)
+    if artifact is None or artifact.campaign_id != campaign_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "room artifact not found")
+    allowed = artifact.audience == "public"
+    if artifact.audience == "dm":
+        allowed = membership.role in {"owner", "dm"}
+    elif artifact.audience == "private":
+        allowed = user.id in set(artifact.audience_user_ids or [])
+    if not allowed:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "room artifact not found")
+    if artifact.storage_key is None:
+        return Response(
+            content=json.dumps(
+                {
+                    "schema": "sagasmith.host-media/v1",
+                    "artifact_id": artifact.id,
+                    "kind": artifact.kind,
+                    "mime_type": artifact.media_type,
+                    "resource_uri": artifact.resource_uri,
+                },
+                ensure_ascii=False,
+            ),
+            media_type="application/json",
+            headers={
+                "Cache-Control": "private, no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+    try:
+        payload = request.app.state.private_storage.read_bytes(
+            artifact.storage_key,
+            max_bytes=request.app.state.settings.room_turn_media_max_bytes,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "artifact_unavailable",
+                "retryable": True,
+                "recovery": "Retry after object storage recovers.",
+            },
+        ) from exc
+    safe_inline = (
+        artifact.kind == "image"
+        and artifact.media_type in {"image/png", "image/jpeg", "image/webp", "image/gif"}
+    ) or (
+        artifact.kind == "audio"
+        and artifact.media_type
+        in {"audio/mpeg", "audio/mp4", "audio/ogg", "audio/wav", "audio/webm"}
+    )
+    headers = {
+        "Cache-Control": "private, max-age=60",
+        "ETag": f'"{artifact.sha256}"' if artifact.sha256 else '"unknown"',
+        "X-Content-Type-Options": "nosniff",
+    }
+    if not safe_inline:
+        headers["Content-Disposition"] = f'attachment; filename="{artifact.id}"'
+    return Response(
+        content=payload,
+        media_type=artifact.media_type,
+        headers=headers,
     )
 
 
@@ -1956,7 +2589,9 @@ def _room_event_batch(
         messages = {
             item.id: item
             for item in (
-                poll.scalars(select(CampaignMessage).where(CampaignMessage.id.in_(message_ids))).all()
+                poll.scalars(
+                    select(CampaignMessage).where(CampaignMessage.id.in_(message_ids))
+                ).all()
                 if message_ids
                 else []
             )
@@ -2166,9 +2801,7 @@ async def panel_state(
     ]
     if membership_role not in {"owner", "dm"}:
         value = dict(value)
-        value["current_module"] = _without_encounter_map_authority(
-            value.get("current_module")
-        )
+        value["current_module"] = _without_encounter_map_authority(value.get("current_module"))
     projected_value = {
         **value,
         "membership": {"role": membership_role, "user_id": user_id},
@@ -2233,9 +2866,7 @@ async def public_combat_render(
             status.HTTP_502_BAD_GATEWAY, "invalid combat render projection"
         ) from exc
     except (AttributeError, RuntimeError) as exc:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT, "public combat render unavailable"
-        ) from exc
+        raise HTTPException(status.HTTP_409_CONFLICT, "public combat render unavailable") from exc
     rendered = cached.render
     checksum = rendered.metadata["image_checksum"]
     public_text_headers = {}
@@ -2248,9 +2879,9 @@ async def public_combat_render(
             continue
         value = " ".join(value.split())[:limit].strip()
         if value:
-            public_text_headers[header] = base64.urlsafe_b64encode(
-                value.encode("utf-8")
-            ).decode("ascii").rstrip("=")
+            public_text_headers[header] = (
+                base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii").rstrip("=")
+            )
     headers = {
         "Cache-Control": "private, max-age=0, must-revalidate",
         "Content-Disposition": 'inline; filename="sagasmith-party-combat.png"',
@@ -2335,6 +2966,7 @@ async def panel_action(
                 mode="action",
                 audience="public",
                 structured_payload={"panel_action": payload.action, **payload.payload},
+                base_revision=payload.base_revision,
             ),
             request=request,
             user=user,
@@ -2366,6 +2998,18 @@ async def panel_action(
     session.commit()
     panel = await runtime.get_panel_state(campaign_id=campaign_id, principal_id=user.principal_id)
     revision = int(panel.get("revision") or 0)
+    if payload.base_revision is not None and payload.base_revision != revision:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "stale_revision",
+                "retryable": True,
+                "base_revision": payload.base_revision,
+                "current_revision": revision,
+                "recovery": "Refresh the room panel and retry with a new idempotency key.",
+            },
+        )
+    revision = payload.base_revision if payload.base_revision is not None else revision
     try:
         if payload.action == "phase.set":
             target = str(payload.payload.get("phase") or "")
@@ -2424,8 +3068,7 @@ async def panel_action(
                     "agent combat does not accept battle-map authority",
                 )
             if mode == "grid" and (
-                (raw_map is None and template_id is None)
-                or len(raw_config) != len(participant_ids)
+                (raw_map is None and template_id is None) or len(raw_config) != len(participant_ids)
             ):
                 raise HTTPException(
                     status.HTTP_422_UNPROCESSABLE_CONTENT,

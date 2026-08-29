@@ -42,6 +42,11 @@ MCP_INITIALIZE_SECONDS = Histogram(
     "Latency to initialize one isolated MCP session",
     _UPSTREAM_LABELS,
 )
+MCP_NEGOTIATION_SECONDS = Histogram(
+    "sagasmith_mcp_negotiation_seconds",
+    "Latency of legacy initialize or modern server/discover negotiation",
+    _UPSTREAM_LABELS,
+)
 MCP_EXPOSURE_SECONDS = Histogram(
     "sagasmith_mcp_exposure_seconds",
     "Latency to establish and verify dynamic MCP tool exposure",
@@ -111,6 +116,26 @@ OUTBOX_DELIVERIES = Counter(
 OUTBOX_PENDING = Gauge(
     "sagasmith_outbox_pending",
     "Pending transactional outbox rows observed in the latest dispatcher batch",
+)
+ROOM_TURN_JOB_TRANSITIONS = Counter(
+    "sagasmith_room_turn_job_transitions_total",
+    "Durable room-turn job state transitions",
+    ["from_status", "to_status", "reason"],
+)
+ROOM_TURN_JOB_SECONDS = Histogram(
+    "sagasmith_room_turn_job_seconds",
+    "Room-turn job execution time by bounded phase",
+    ["phase", "status"],
+)
+ROOM_TURN_JOB_RECOVERIES = Counter(
+    "sagasmith_room_turn_job_recoveries_total",
+    "Expired room-turn leases recovered after worker failure",
+    ["prior_status"],
+)
+ROOM_TURN_JOB_QUEUE = Gauge(
+    "sagasmith_room_turn_job_queue",
+    "Durable room-turn jobs observed by worker state",
+    ["status"],
 )
 
 _HOT_PATH_LABELS = ["operation_class", "status"]
