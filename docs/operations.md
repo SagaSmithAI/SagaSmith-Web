@@ -100,13 +100,19 @@ report managed count/occupied bytes and ignored-entry count/bytes; alert on igno
 rejections, then audit and remove unknown data manually under the deployment's data-retention
 policy.
 
-`SAGASMITH_AGENT_BOUNDARY_MODE=legacy` is the rollback-compatible default while the component lock
-still points at the pre-v2 Hosted Worker. After the Agent and all three domain MCP revisions are
-locked to the modern contract, set it to `modern`. Modern mode requires a dedicated random
+`SAGASMITH_AGENT_BOUNDARY_MODE=modern` is the coordinated release-lock default. It requires MCP
+2026-07-28 `server/discover`, request-scoped auth-context v2 delegations, and a dedicated random
 `SAGASMITH_WORKER_SERVICE_TOKEN` of at least 32 bytes; this token authenticates Supervisor-to-worker
 requests and is never a browser or provider token. `SAGASMITH_AGENT_DELEGATION_TTL_SECONDS` defaults
 to 600 and may not exceed the Agent's 900-second trusted-context limit. It is independent from the
-longer renewable quota reservation lease.
+longer renewable quota reservation lease. Set `legacy` only while atomically rolling back Agent and
+all three domain components to a compatible lock; never use it as an identity boundary.
+
+Every SagaSmith-owned Agent MCP entry pins `protocolMode` to `2026-07-28`, an exact target service,
+authorization audience and campaign system. The full deterministic server catalog may be cached,
+but Web passes at most 16 sorted, unique tool IDs to each turn. `taskTimeout` applies only after a
+long D&D tool returns an `io.modelcontextprotocol/tasks` claim; ordinary tools remain bounded by
+`toolTimeout` and return a standard `CallToolResult`.
 
 ## Health and observability
 

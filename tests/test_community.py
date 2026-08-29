@@ -99,6 +99,33 @@ def publish(
     )
     assert reviewed.status_code == 200, reviewed.text
     assert reviewed.json()["status"] == "agent_reviewed"
+    call = agent_runtime.calls[-1]
+    authority = call["context"]["authority_context"]
+    expected_runtime_system = "narrative" if system_id == "system-neutral" else system_id
+    expected_service = {
+        "dnd5e": "sagasmith-dnd-mcp",
+        "coc7e": "sagasmith-coc-mcp",
+        "narrative": "sagasmith-narrative-mcp",
+    }[expected_runtime_system]
+    expected_agent_key = f"artifact-review-agent:{release.json()['id']}:review-{slug}-1000"
+    assert call["idempotency_key"] == expected_agent_key
+    assert authority["schema"] == "sagasmith.auth-context/v2"
+    assert authority["workload_identity"] == "workload:community-artifact-review"
+    assert authority["requester_principal"] == authority["resource_owner_principal"]
+    assert authority["requester_principal"] == authority["acting_host_principal"]
+    assert authority["requester_principal"] != authority["workload_identity"]
+    assert authority["target_service"] == expected_service
+    assert authority["authorized_audience"] == expected_service
+    assert authority["allowed_operations"] == ["server_capabilities"]
+    assert authority["system_id"] == expected_runtime_system
+    assert authority["campaign_id"] == "community"
+    assert authority["base_revision"] == 0
+    assert authority["room_turn_id"] == release.json()["id"]
+    assert authority["idempotency_key"] == expected_agent_key
+    assert authority["conversation_principal"] == (
+        f"community-release:{release.json()['id']}"
+    )
+    assert title not in str(authority)
     submitted = client.post(
         f"/api/community/artifacts/{artifact.json()['id']}/releases/{release.json()['id']}/submit"
     )

@@ -9,14 +9,14 @@
 | async DB diagnosis | concurrent room action retry, Agent message, projection refresh and activity callback; async-engine lifecycle and rollback; HTTP success rate; event-loop lag; `async_driver` versus sync DB execution context; SQLite baseline and disposable PostgreSQL staging run |
 | synchronized panels | SSE message and `state.changed`; Character/Play/Combat/Module projection refresh; player intents; DM phase/combat commands; stream reconnect recovery |
 | live-room UI | private character-card scope; character/spells/inventory/party drawer; inspected versus acting actor; Grid-only map; token hover-safe fields; target/destination action context; expanded Grid preserves the single composer |
-| dynamic tools | real host lookup for D&D and CoC; system-directed server selection; Lobby/Play/Combat list changes; `tools/list_changed`; next legal native call |
+| dynamic tools | real MCP 2026-07-28 discovery for all three domains; deterministic authorization-scoped catalog; system/phase/role/task Host projection sorted and bounded to 16; next legal native call reauthorized by MCP |
 | phases | Lobby -> Play -> Combat -> Play; grid and Agent spatial modes; chase/combat exclusivity |
 | continuity | restart/resume; snapshot/branch restore; undo/redo; exposure immediately recoverable |
 | Pack | current `.sagasmith-pack` only; ZIP safety, byte/uncompressed limits, checksum, ownership isolation, MCP validation/import/activation, immutable version |
 | Forge | every artifact type; immutable version; provenance/license; Agent review; moderation; search/favorite/Fork; discussion/spoiler; report/withdraw |
 | public install | cross-account Module/Rule/Character install through real MCP; separate activation; Soul/Skill/Asset library reference; withdrawn release denied |
 | Identity | published Soul pin; invitation/acceptance; `agent:` MCP principal; quota payer; memory namespace/revision; Agent context; authority-first revoke |
-| Module Studio | hidden authoring campaign; source limits/rights; outline approval; Module Gen Skill lookup; persistent lease/recovery/cancel/retry; strict Agent decisions; real `module_draft` evidence/edit/finalize; revision and idempotency; project quota; SSE/notification |
+| Module Studio | hidden authoring campaign; source limits/rights; outline approval; Module Gen Skill lookup; persistent lease/recovery/cancel/retry; strict Agent decisions; real `module_draft` evidence/edit/finalize; modern long-tool Tasks claim/poll/cancel contract; revision and idempotency; project quota; SSE/notification |
 | Module delivery | immutable compiled artifact; direct and published cross-campaign import; optional activation; version collision; restart/resume; source publication boundary |
 | quota | no grant, concurrent reservations, lease renewal, active-job expiry protection, abandoned expiry, settle/release, provider retry, exact usage ledger, admin grant audit |
 | durable room turns | same/different idempotency keys, stale revision, queued cancellation, expired worker lease/startup recovery, Agent result saved before projection retry, Web restart, timeout polling, terminal result references |
@@ -34,11 +34,14 @@ database and uses headless Chromium to exercise the shipped HTML, JavaScript, co
 password rotation, responsive account layout, and deactivation. It does not use a production host,
 real account, external model, or domain MCP.
 
-The container acceptance provider is deterministic but the host is real: it opens exposure as a
-authenticated principal, selects only the MCP matching the campaign `system_id`, searches and
-selects `character_query`, observes `tools/list_changed`, and calls the newly registered native
-tool in both D&D and CoC. The same run imports and activates a structurally valid, synthetic,
-Agent-finalized D&D module Pack through MinIO and the public MCP facade.
+The container acceptance provider is deterministic but the host is real: Agent performs
+`server/discover`, selects only the MCP matching the campaign `system_id`, intersects Web's bounded
+allowlist with the stable private catalog, and calls `character_query`/`actor_query` through modern
+D&D, CoC and Narrative transports. Retained v2 receipts prove the browser requester remains
+separate from a hosted Identity acting Host. The same run imports and activates a structurally
+valid, synthetic, Agent-finalized D&D module Pack through MinIO and the public MCP facade. Agent's
+pinned conformance suite supplies the positive stdio/HTTP SEP-2663 Tasks claim/poll result gate for
+the exact D&D revision; Web separately treats its durable RoomTurnJob as a Host job, not an MCP Task.
 
 With an isolated D&D MCP running, execute
 `uv run python scripts/real_mcp_smoke.py --url http://127.0.0.1:8767/mcp` to prove campaign creation

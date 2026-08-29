@@ -18,6 +18,7 @@ from sagasmith_service.auth_context import (
     exposure_revision,
     sign_auth_context,
 )
+from sagasmith_service.mcp_result import is_tool_error, structured_tool_content
 
 NarrativeOperation = Literal[
     "create_campaign",
@@ -140,7 +141,7 @@ class NarrativeControlClient:
                 authorization_epoch=authorization_epoch,
             ),
         )
-        if result.isError:
+        if is_tool_error(result):
             detail = result.content[0].text if result.content else f"Narrative tool {tool} failed"
             raise RuntimeError(detail)
         receipt = None
@@ -151,8 +152,9 @@ class NarrativeControlClient:
                 if isinstance(candidate, Mapping):
                     receipt = dict(candidate)
                     break
-        if isinstance(result.structuredContent, dict):
-            payload = dict(result.structuredContent)
+        structured = structured_tool_content(result)
+        if isinstance(structured, dict):
+            payload = dict(structured)
             if receipt is not None:
                 payload["auth_context_receipt"] = receipt
             return payload

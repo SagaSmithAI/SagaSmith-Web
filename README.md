@@ -67,10 +67,15 @@ remain compatible: the Python package is `sagasmith_service`, the distribution a
 
 ## Verified integration baseline
 
-The hosted stack is rebuilt from reviewed revisions in `component-versions.json`.
+The hosted stack is rebuilt from the coordinated `sagasmith.release-lock/v3` revisions in
+`component-versions.json`. The locked authority contract is `sagasmith.authoritative-mcp/v2` over
+MCP 2026-07-28; legacy protocol support is an explicit all-component rollback path, not the hosted
+default.
 SagaSmith Web persists a short-lived `sagasmith.auth-context/v2` authority envelope on every
 durable room turn. Browser text remains an untrusted input, browser credentials are never stored
-in the job, and the Agent uses a target-specific delegation for each MCP request. Domain MCPs
+in the job, and the Agent uses a target-specific delegation for each MCP request and Task poll.
+Web exposes at most 16 deterministic task/phase tools to the model while the full private catalog
+remains server-owned. Domain MCPs
 still revalidate campaign, role, actor, phase, revision, and idempotency at every tool boundary.
 
 The content runner preserves build revisions, per-campaign logs, gaps, discovered

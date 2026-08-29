@@ -38,6 +38,7 @@ jobs:
           MINIO_ROOT_PASSWORD: ci-only
           OPENAI_API_KEY: ci-only
           SAGASMITH_AGENT_INTERNAL_KEY: ci-only
+          SAGASMITH_WORKER_SERVICE_TOKEN: ci-worker-service-token-at-least-32-bytes
           SAGASMITH_AUTH_CONTEXT_SECRET: ci-auth-context-secret-at-least-32-bytes
       - run: >-
           docker compose -f compose.yaml -f compose.observability.yaml
@@ -47,6 +48,7 @@ jobs:
           MINIO_ROOT_PASSWORD: ci-only
           OPENAI_API_KEY: ci-only
           SAGASMITH_AGENT_INTERNAL_KEY: ci-only
+          SAGASMITH_WORKER_SERVICE_TOKEN: ci-worker-service-token-at-least-32-bytes
           SAGASMITH_AUTH_CONTEXT_SECRET: ci-auth-context-secret-at-least-32-bytes
       - run: docker build .
 
@@ -58,6 +60,7 @@ jobs:
       MINIO_ROOT_PASSWORD: e2e-minio-secret
       OPENAI_API_KEY: e2e-only-key
       SAGASMITH_AGENT_INTERNAL_KEY: e2e-internal-agent-key
+      SAGASMITH_WORKER_SERVICE_TOKEN: e2e-worker-service-token-at-least-32-bytes
       SAGASMITH_AUTH_CONTEXT_SECRET: e2e-auth-context-secret-at-least-32-bytes
     steps:
       - uses: actions/checkout@v7

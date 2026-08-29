@@ -487,6 +487,76 @@ def test_worker_manager_does_not_reuse_port_until_idle_worker_exits(
     asyncio.run(scenario())
 
 
+def test_worker_restart_reuses_host_workspace_id_across_ports(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class FakeProcess:
+        returncode: int | None = None
+        pid: int | None = None
+
+        def terminate(self) -> None:
+            self.returncode = 0
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            return self.returncode or 0
+
+    class FakeResponse:
+        status_code = 200
+
+    class FakeClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def get(self, _url: str) -> FakeResponse:
+            return FakeResponse()
+
+        async def aclose(self) -> None:
+            return None
+
+    commands: list[tuple[Any, ...]] = []
+
+    async def fake_spawn(*arguments: Any) -> FakeProcess:
+        commands.append(arguments)
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
+    monkeypatch.setattr("sagasmith_service.agent_supervisor.httpx.AsyncClient", FakeClient)
+    config = tmp_path / "config.json"
+    config.write_text("{}", encoding="utf-8")
+    manager = WorkerManager(
+        config_path=str(config),
+        workspace_root=str(tmp_path / "workspaces"),
+        worker_api_key="secret",
+    )
+    key = "campaign-a:user-a:conversation-a"
+    other_key = "campaign-b:user-b:conversation-b"
+
+    def option(command: tuple[Any, ...], name: str) -> str:
+        index = command.index(name)
+        return str(command[index + 1])
+
+    async def scenario() -> None:
+        first = await manager._spawn(key, 19000)
+        await manager._stop(first)
+        restarted = await manager._spawn(key, 19001)
+        await manager._stop(restarted)
+        other = await manager._spawn(other_key, 19002)
+        await manager._stop(other)
+        await manager.close()
+
+    asyncio.run(scenario())
+
+    assert option(commands[0], "--port") != option(commands[1], "--port")
+    assert option(commands[0], "--workspace-id") == option(commands[1], "--workspace-id")
+    assert option(commands[0], "--workspace-id") == manager._workspace(key).name
+    assert option(commands[2], "--workspace-id") == manager._workspace(other_key).name
+    assert option(commands[2], "--workspace-id") != option(commands[0], "--workspace-id")
+
+
 def test_worker_runtime_config_uses_exact_trusted_host_cidrs(monkeypatch, tmp_path: Path) -> None:
     def fake_getaddrinfo(host: str, *_args):
         assert host == "dnd-mcp"

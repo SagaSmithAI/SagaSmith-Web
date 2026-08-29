@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import httpx
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 from prometheus_client import REGISTRY
@@ -53,6 +54,7 @@ def test_app_lifespan_owns_and_closes_each_default_http_client(monkeypatch, tmp_
                 raise RuntimeError("simulated close failure")
 
     monkeypatch.setattr("sagasmith_service.main.httpx.AsyncClient", TrackingClient)
+    monkeypatch.setattr("sagasmith_service.main.httpx2.AsyncClient", TrackingClient)
     database_url = f"sqlite:///{(tmp_path / 'http-lifecycle.db').as_posix()}"
     app = create_app(
         Settings(env="test", database_url=database_url),
@@ -72,7 +74,7 @@ def test_app_lifespan_owns_and_closes_each_default_http_client(monkeypatch, tmp_
     assert all(client.closed for client in created)
 
 
-def test_agent_runtime_reuses_injected_client_and_records_success_and_error() -> None:
+def test_legacy_agent_runtime_reuses_injected_client_and_records_success_and_error() -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -103,7 +105,11 @@ def test_agent_runtime_reuses_injected_client_and_records_success_and_error() ->
 
     async def exercise() -> None:
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        runtime = HttpAgentRuntime("http://agent.test", http_client=client)
+        runtime = HttpAgentRuntime(
+            "http://agent.test",
+            boundary_mode="legacy",
+            http_client=client,
+        )
         await runtime.probe()
         result = await runtime.complete(
             session_id="conversation/1",
@@ -222,6 +228,15 @@ def test_modern_agent_payload_matches_merged_hosted_worker_contract_fixture() ->
             },
             idempotency_key="room-turn:job-1",
         )
+        overflow = dict(authority)
+        overflow["allowed_operations"] = [f"tool_{index:02d}" for index in range(17)]
+        with pytest.raises(ValueError):
+            await runtime.complete(
+                session_id="campaign-1:user-1:conversation-1",
+                content="I inspect the gate.",
+                context={"authority_context": overflow},
+                idempotency_key="room-turn:job-overflow",
+            )
         await client.aclose()
 
     asyncio.run(exercise())
@@ -238,13 +253,13 @@ def test_modern_agent_payload_matches_merged_hosted_worker_contract_fixture() ->
 
 
 def test_mcp_calls_reuse_http_pool_but_keep_sessions_isolated(monkeypatch) -> None:
-    seen_clients: list[httpx.AsyncClient] = []
+    seen_clients: list[httpx2.AsyncClient] = []
     sessions: list[Any] = []
 
     @asynccontextmanager
-    async def fake_transport(_url: str, *, http_client: httpx.AsyncClient):
+    async def fake_transport(_url: str, *, http_client: httpx2.AsyncClient):
         seen_clients.append(http_client)
-        yield object(), object(), lambda: None
+        yield object(), object()
 
     class FakeSession:
         async def __aenter__(self):
@@ -302,7 +317,7 @@ def test_mcp_calls_reuse_http_pool_but_keep_sessions_isolated(monkeypatch) -> No
     before = {name: _sample(name, base_labels) for name in metric_names}
 
     async def exercise() -> None:
-        client = httpx.AsyncClient()
+        client = httpx2.AsyncClient()
         runtime = StreamableHttpDndRuntime("http://dnd.test/mcp", http_client=client)
         first = await runtime.get_campaign(campaign_id="campaign-1", principal_id="user:1")
         second = await runtime.get_campaign(campaign_id="campaign-1", principal_id="user:1")
@@ -345,15 +360,15 @@ def test_panel_snapshot_uses_one_principal_scoped_session_and_revision_short_cir
     system: str,
     campaign_arguments: dict[str, Any],
 ) -> None:
-    transports: list[httpx.AsyncClient] = []
+    transports: list[httpx2.AsyncClient] = []
     sessions: list[Any] = []
     signed_contexts: list[dict[str, Any]] = []
     actual_calls: list[tuple[str, dict[str, Any]]] = []
 
     @asynccontextmanager
-    async def fake_transport(_url: str, *, http_client: httpx.AsyncClient):
+    async def fake_transport(_url: str, *, http_client: httpx2.AsyncClient):
         transports.append(http_client)
-        yield object(), object(), lambda: None
+        yield object(), object()
 
     class FakeSession:
         def __init__(self) -> None:
@@ -436,7 +451,7 @@ def test_panel_snapshot_uses_one_principal_scoped_session_and_revision_short_cir
     monkeypatch.setattr(f"{module_path}.ClientSession", lambda *_args: FakeSession())
 
     async def exercise() -> None:
-        client = httpx.AsyncClient()
+        client = httpx2.AsyncClient()
         runtime = runtime_type(
             "http://domain.test/mcp",
             http_client=client,

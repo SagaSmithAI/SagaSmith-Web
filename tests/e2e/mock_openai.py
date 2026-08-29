@@ -47,12 +47,21 @@ class Handler(BaseHTTPRequestHandler):
         context = (
             str(context_message.get("content", "")) if isinstance(context_message, dict) else ""
         )
+        # Modern Hosted requests keep authority out of the player message and no
+        # longer render the legacy authenticated-context prompt. Module Studio
+        # task routing is test-provider behavior, not an authorization signal, so
+        # inspect ordinary message content without setting ``authenticated``.
+        task_context = "\n".join(
+            str(message.get("content", ""))
+            for message in messages
+            if isinstance(message, dict) and isinstance(message.get("content"), str)
+        )
         authenticated = bool(context)
         campaign_match = re.search(r"^campaign_id=(.+)$", context, re.MULTILINE)
         system_match = re.search(r"^system_id=(.+)$", context, re.MULTILINE)
         principal_match = re.search(r"^principal_id=(.+)$", context, re.MULTILINE)
         module_result = None
-        if "Task: Design a playable outline" in context:
+        if "Task: Design a playable outline" in task_context:
             module_result = {
                 "outline": {
                     "premise": "A lantern gate is failing.",
@@ -63,7 +72,7 @@ class Handler(BaseHTTPRequestHandler):
                 },
                 "summary": "Deterministic Module Studio outline.",
             }
-        elif "Task: Generate the complete canonical D&D module source" in context:
+        elif "Task: Generate the complete canonical D&D module source" in task_context:
             module_result = {
                 "canonical_source": (
                     "# Lantern Gate\n\n"
@@ -78,9 +87,9 @@ class Handler(BaseHTTPRequestHandler):
                 "package_decisions": {"version": "1.0.0"},
                 "summary": "Deterministic complete module source.",
             }
-        elif "Task: Review the mechanically imported draft" in context:
-            source_key_match = re.search(r'"source_key"\s*:\s*"([^"]+)"', context)
-            chunk_hash_match = re.search(r'"chunk_hash"\s*:\s*"([a-f0-9]+)"', context)
+        elif "Task: Review the mechanically imported draft" in task_context:
+            source_key_match = re.search(r'"source_key"\s*:\s*"([^"]+)"', task_context)
+            chunk_hash_match = re.search(r'"chunk_hash"\s*:\s*"([a-f0-9]+)"', task_context)
             source_ref = {
                 "source_key": source_key_match.group(1) if source_key_match else "module-source",
                 "page": None,
@@ -125,7 +134,7 @@ class Handler(BaseHTTPRequestHandler):
                     },
                 },
             }
-        elif "Task: Confirm finalization" in context:
+        elif "Task: Confirm finalization" in task_context:
             module_result = {
                 "confirmed": True,
                 "note": "Deterministic evidence review passed before finalization.",
@@ -156,7 +165,7 @@ class Handler(BaseHTTPRequestHandler):
                 },
             )
             return
-        if campaign_match and campaign_match.group(1) == "community":
+        if "Review this SagaSmith community artifact release" in task_context:
             self._json(
                 200,
                 {
@@ -188,27 +197,52 @@ class Handler(BaseHTTPRequestHandler):
                 },
             )
             return
+        tool_definitions = [
+            tool for tool in request.get("tools") or [] if isinstance(tool, dict)
+        ]
         tool_names = {
             str((tool.get("function") or tool).get("name") or "")
-            for tool in request.get("tools") or []
-            if isinstance(tool, dict)
+            for tool in tool_definitions
         }
+        current_turn_index = max(
+            (
+                index
+                for index, message in enumerate(messages)
+                if isinstance(message, dict) and message.get("role") == "user"
+            ),
+            default=context_index,
+        )
         tool_messages = [
             message
-            for message in messages[context_index:]
+            for message in messages[current_turn_index:]
             if isinstance(message, dict) and message.get("role") == "tool"
         ]
+        modern_projection = not authenticated and any(
+            name.startswith("mcp_") for name in tool_names
+        )
         selected_tools = tool_names
-        system_id = system_match.group(1) if system_match else ""
-        target_tool_id = "actor_query" if system_id == "narrative" else "character_query"
         if system_match:
-            marker = {"coc7e": "coc", "narrative": "narrative"}.get(system_id, "dnd")
-            selected_tools = {name for name in tool_names if marker in name.casefold()}
+            system_id = system_match.group(1)
+        elif any("narrative" in name.casefold() for name in tool_names):
+            system_id = "narrative"
+        elif any("coc" in name.casefold() for name in tool_names):
+            system_id = "coc7e"
+        else:
+            system_id = "dnd5e"
+        target_tool_id = "actor_query" if system_id == "narrative" else "character_query"
+        marker = {"coc7e": "coc", "narrative": "narrative"}.get(system_id, "dnd")
+        selected_tools = {name for name in tool_names if marker in name.casefold()}
         exposure_name = next((name for name in selected_tools if name.endswith("_exposure")), "")
         query_name = next(
             (name for name in selected_tools if name.endswith(f"_{target_tool_id}")), ""
         )
-        if authenticated and campaign_match and principal_match and not tool_messages:
+        if (
+            authenticated
+            and campaign_match
+            and principal_match
+            and exposure_name
+            and not tool_messages
+        ):
             self._tool_call(
                 exposure_name,
                 {
@@ -219,30 +253,39 @@ class Handler(BaseHTTPRequestHandler):
                 "exposure-open",
             )
             return
-        if authenticated and campaign_match and principal_match and query_name:
+        if (authenticated or modern_projection) and query_name:
             if not any(
                 str(message.get("name", "")).endswith(f"_{target_tool_id}")
                 for message in tool_messages
             ):
                 is_coc = system_id == "coc7e"
+                trusted_arguments = {}
+                if campaign_match:
+                    trusted_arguments["campaign_id"] = campaign_match.group(1)
+                if principal_match:
+                    trusted_arguments["principal_id"] = principal_match.group(1)
                 self._tool_call(
                     query_name,
                     (
-                        {
-                            "campaign_id": campaign_match.group(1),
-                            "principal_id": principal_match.group(1),
-                        }
+                        trusted_arguments
                         if system_id == "narrative"
                         else {
                             "action": "list",
-                            "campaign_id": campaign_match.group(1),
-                            "principal_id": principal_match.group(1),
+                            **trusted_arguments,
                         }
                         if is_coc
                         else {
                             "view": "list",
-                            "payload": {"campaign_id": campaign_match.group(1)},
-                            "principal_id": principal_match.group(1),
+                            "payload": (
+                                {"campaign_id": campaign_match.group(1)}
+                                if campaign_match
+                                else {}
+                            ),
+                            **(
+                                {"principal_id": principal_match.group(1)}
+                                if principal_match
+                                else {}
+                            ),
                         }
                     ),
                     "character-query",
@@ -280,22 +323,39 @@ class Handler(BaseHTTPRequestHandler):
             str(message.get("name", "")).endswith(f"_{target_tool_id}") for message in tool_messages
         )
         submit_name = next((name for name in tool_names if name == "submit_room_turn"), "")
+        submit_definition = next(
+            (
+                tool.get("function") or tool
+                for tool in tool_definitions
+                if str((tool.get("function") or tool).get("name") or "") == submit_name
+            ),
+            {},
+        )
+        run_id_schema = (
+            ((submit_definition.get("parameters") or {}).get("properties") or {}).get("run_id")
+            or {}
+        )
         submit_completed = any(
             str(message.get("name", "")) == "submit_room_turn" for message in tool_messages
         )
         run_match = re.search(r"^run_id=(.+)$", context, re.MULTILINE)
+        bound_run_id = (
+            run_match.group(1)
+            if run_match
+            else str(run_id_schema.get("const") or run_id_schema.get("default") or "")
+        )
         if (
-            authenticated
+            (authenticated or modern_projection)
             and native_call_completed
             and submit_name
             and not submit_completed
-            and run_match
+            and bound_run_id
         ):
             self._tool_call(
                 submit_name,
                 {
                     "schema": "sagasmith.room-turn/v1",
-                    "run_id": run_match.group(1),
+                    "run_id": bound_run_id,
                     "messages": [
                         {
                             "output_id": "container-room-output",
@@ -316,7 +376,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         content = (
             "SagaSmith container E2E dynamic MCP call completed."
-            if authenticated and native_call_completed
+            if (authenticated or modern_projection) and native_call_completed
             else "SagaSmith mock provider reached."
         )
         self._json(

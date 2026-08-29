@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
+import httpx2
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -107,10 +108,15 @@ def create_app(
         settings.redis_url if settings.rate_limit_backend == "redis" else None
     )
     outbox_dispatcher = OutboxDispatcher(session_factory, realtime_hub)
-    managed_http_clients: dict[str, httpx.AsyncClient] = {}
+    managed_http_clients: dict[str, Any] = {}
 
     def managed_http_client(name: str, **kwargs: Any) -> httpx.AsyncClient:
         client = httpx.AsyncClient(**kwargs)
+        managed_http_clients[name] = client
+        return client
+
+    def managed_mcp_http_client(name: str, **kwargs: Any) -> httpx2.AsyncClient:
+        client = httpx2.AsyncClient(**kwargs)
         managed_http_clients[name] = client
         return client
 
@@ -164,17 +170,17 @@ def create_app(
     app.state.dnd_runtime = dnd_runtime or StreamableHttpDndRuntime(
         settings.dnd_mcp_url,
         auth_context_secret=auth_context_secret,
-        http_client=managed_http_client(
+        http_client=managed_mcp_http_client(
             "dnd",
-            timeout=httpx.Timeout(30, connect=10),
+            timeout=httpx2.Timeout(30, connect=10),
         ),
     )
     app.state.coc_runtime = coc_runtime or StreamableHttpCocRuntime(
         settings.coc_mcp_url,
         auth_context_secret=auth_context_secret,
-        http_client=managed_http_client(
+        http_client=managed_mcp_http_client(
             "coc",
-            timeout=httpx.Timeout(30, connect=10),
+            timeout=httpx2.Timeout(30, connect=10),
         ),
     )
     app.state.narrative_runtime = narrative_runtime or HttpNarrativeRuntime(

@@ -40,6 +40,9 @@ uv run pytest
 uv run ruff check .
 ```
 
-生产环境只使用 [`component-versions.json`](component-versions.json) 中经审查的固定提交，不以归档
+生产环境只使用 [`component-versions.json`](component-versions.json) 中
+`sagasmith.release-lock/v3` 审查固定的 MCP 2026-07-28 组件，并以
+`sagasmith.authoritative-mcp/v2` 作为权威契约。Host 每轮只向模型投影最多 16 个确定排序的工具；
+legacy 仅用于 Agent 与三个领域组件一起回滚，不是默认身份边界。不得以归档
 仓库作为 release input 或 fallback。升级、监控、排空与回滚步骤见
 [`docs/room-turn-jobs.md`](docs/room-turn-jobs.md) 和 [`docs/operations.md`](docs/operations.md)。

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from decimal import Decimal
 from typing import Annotated, Any
 
@@ -29,6 +30,7 @@ from sagasmith_service.models import (
     now_utc,
 )
 from sagasmith_service.quota import QuotaExceededError, release, reserve, settle
+from sagasmith_service.room_tool_policy import service_for_system
 from sagasmith_service.schemas import (
     ArtifactCreate,
     ArtifactForkCreate,
@@ -674,7 +676,7 @@ async def agent_review_release(
             metric="llm_tokens",
             quantity=reservation_quantity,
             idempotency_key=f"artifact-review:{user.id}:{idempotency_key}",
-            ttl_seconds=300,
+            ttl_seconds=request.app.state.settings.agent_reservation_ttl_seconds,
         )
     except QuotaExceededError as exc:
         raise HTTPException(status.HTTP_402_PAYMENT_REQUIRED, str(exc)) from exc
@@ -707,6 +709,39 @@ async def agent_review_release(
         ensure_ascii=False,
     )
     runtime: AgentRuntime = request.app.state.agent_runtime
+    runtime_system_id = (
+        "narrative" if artifact.system_id == "system-neutral" else artifact.system_id
+    )
+    target_service = service_for_system(runtime_system_id)
+    agent_idempotency_key = f"artifact-review-agent:{item.id}:{idempotency_key}"
+    authority_context = {
+        "schema": "sagasmith.auth-context/v2",
+        "target_service": target_service,
+        "caller_principal": "service:sagasmith-web",
+        "workload_identity": "workload:community-artifact-review",
+        "requester_principal": user.principal_id,
+        "resource_owner_principal": f"user:{artifact.owner_user_id}",
+        "acting_host_principal": user.principal_id,
+        "acting_character_id": "",
+        "authorized_audience": target_service,
+        # The review workload never calls MCP. A single read-only facade keeps the
+        # modern Worker catalog fail-closed without exposing campaign mutation tools.
+        "allowed_operations": ["server_capabilities"],
+        "room_turn_id": item.id,
+        "campaign_id": "community",
+        "system_id": runtime_system_id,
+        "base_revision": 0,
+        "expires_at": (
+            now_utc()
+            + timedelta(seconds=request.app.state.settings.agent_delegation_ttl_seconds)
+        ).isoformat(),
+        "idempotency_key": agent_idempotency_key,
+        "conversation_principal": f"community-release:{item.id}",
+        "tenant_id": "",
+        "traceparent": request.headers.get("traceparent", ""),
+        "tracestate": request.headers.get("tracestate", ""),
+        "baggage": request.headers.get("baggage", ""),
+    }
     try:
         result = await runtime.complete(
             session_id=f"community:{user.id}:{item.id}",
@@ -716,10 +751,17 @@ async def agent_review_release(
                 "system_id": artifact.system_id,
                 "principal_id": user.principal_id,
                 "campaign_role": "author",
+                "authority_context": authority_context,
+            },
+            idempotency_key=agent_idempotency_key,
+            trace_context={
+                "traceparent": authority_context["traceparent"],
+                "tracestate": authority_context["tracestate"],
+                "baggage": authority_context["baggage"],
             },
         )
         review = _review_json(result.content)
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
         release(session, reservation.id)
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     settle(

@@ -49,7 +49,8 @@ def test_benchmark_covers_remaining_hot_paths_and_transaction_boundaries(tmp_pat
         "p95_upper_bound_ms" in statement for item in scenarios.values() for statement in item["db"]
     )
     assert scenarios["agent_message"]["upstream_transaction_probes"] == {
-        "agent.complete": {"in_transaction": 0, "released": 2, "samples": 2}
+        "agent.complete": {"in_transaction": 0, "released": 2, "samples": 2},
+        "mcp.campaign": {"in_transaction": 0, "released": 2, "samples": 2},
     }
     assert scenarios["projection_refresh"]["upstream_transaction_probes"] == {
         "mcp.panel_state": {"in_transaction": 0, "released": 2, "samples": 2}

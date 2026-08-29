@@ -24,7 +24,7 @@ quota, commercial Pack archives, extracted source content, backups, and audit tr
 | path traversal | server-generated object keys; resolved paths constrained to storage/exchange roots |
 | SSRF | MCP and Agent URLs are deployment configuration, never user input; worker grants only exact DNS-resolved MCP host CIDRs, not a private-network wildcard |
 | prompt/tool injection | Agent owns conversational judgment but cannot redefine MCP tool semantics or bypass native schemas, authorization, revision, or idempotency checks |
-| stale dynamic tools | real MCP session listens to `tools/list_changed`; call-time MCP checks remain final |
+| stale or oversized model tool catalog | MCP 2026-07-28 catalog is deterministic for one authorization and privately cached; Host projects at most 16 sorted exact IDs; per-request MCP checks remain final |
 | service compromise | containers run non-root, only proxy is public, databases and MCP are internal, secrets are mounted/env and excluded from Git |
 | ransomware/operator error | timestamped PostgreSQL/object/D&D/Agent backups, off-host encrypted copy, restore drills |
 

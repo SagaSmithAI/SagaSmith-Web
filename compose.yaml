@@ -67,8 +67,8 @@ services:
       context: .
       dockerfile: infrastructure/Dockerfile.dnd-mcp
       additional_contexts:
-        core: ${SAGASMITH_CORE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-core.git#0ac316655687757203a9df1b2eb81669ec1d2d78}
-        dnd_domain: ${SAGASMITH_DND_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-dnd.git#e5b87e55e1f08564d154e4d7cb568d936bc6edfe}
+        core: ${SAGASMITH_CORE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-core.git#eef98fcfcaa96d08c069708b33ee7717ba1625c3}
+        dnd_domain: ${SAGASMITH_DND_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-dnd.git#587f66e0673b686a7d47d1ee266d8404ef221741}
     environment:
       SAGASMITH_DND_MCP_TRANSPORT: streamable-http
       SAGASMITH_DND_MCP_HTTP_HOST: 0.0.0.0
@@ -96,8 +96,8 @@ services:
       context: .
       dockerfile: infrastructure/Dockerfile.coc-mcp
       additional_contexts:
-        core: ${SAGASMITH_CORE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-core.git#0ac316655687757203a9df1b2eb81669ec1d2d78}
-        coc_domain: ${SAGASMITH_COC_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-coc.git#36ded279e27acda86609bc3c6ee0c99c568218c7}
+        core: ${SAGASMITH_CORE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-core.git#eef98fcfcaa96d08c069708b33ee7717ba1625c3}
+        coc_domain: ${SAGASMITH_COC_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-coc.git#515f6a7e3ba3c2a41fff7de2624ee19e4deb6190}
     environment:
       SAGASMITH_COC_MCP_TRANSPORT: streamable-http
       SAGASMITH_COC_MCP_HTTP_HOST: 0.0.0.0
@@ -124,16 +124,16 @@ services:
       context: .
       dockerfile: infrastructure/Dockerfile.agent-supervisor
       additional_contexts:
-        agent_source: ${SAGASMITH_AGENT_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-agent.git#00101286bed728758da9dbddc21003cd17c8db00}
-        core: ${SAGASMITH_CORE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-core.git#0ac316655687757203a9df1b2eb81669ec1d2d78}
-        dnd_domain: ${SAGASMITH_DND_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-dnd.git#e5b87e55e1f08564d154e4d7cb568d936bc6edfe}
-        coc_domain: ${SAGASMITH_COC_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-coc.git#36ded279e27acda86609bc3c6ee0c99c568218c7}
-        narrative_domain: ${SAGASMITH_NARRATIVE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-narrative.git#35c1510996237648298fb56d23ef4b9e5ff39a81}
+        agent_source: ${SAGASMITH_AGENT_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-agent.git#056f295360bcfa56a9ade7c6c151e9aea447df41}
+        core: ${SAGASMITH_CORE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-core.git#eef98fcfcaa96d08c069708b33ee7717ba1625c3}
+        dnd_domain: ${SAGASMITH_DND_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-dnd.git#587f66e0673b686a7d47d1ee266d8404ef221741}
+        coc_domain: ${SAGASMITH_COC_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-coc.git#515f6a7e3ba3c2a41fff7de2624ee19e4deb6190}
+        narrative_domain: ${SAGASMITH_NARRATIVE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-narrative.git#3f3694401dace148684f7fab9adda5b12679dfa0}
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY}
       SAGASMITH_AGENT_INTERNAL_KEY: ${SAGASMITH_AGENT_INTERNAL_KEY:?set SAGASMITH_AGENT_INTERNAL_KEY}
-      SAGASMITH_AGENT_BOUNDARY_MODE: ${SAGASMITH_AGENT_BOUNDARY_MODE:-legacy}
-      SAGASMITH_WORKER_SERVICE_TOKEN: ${SAGASMITH_WORKER_SERVICE_TOKEN:-}
+      SAGASMITH_AGENT_BOUNDARY_MODE: ${SAGASMITH_AGENT_BOUNDARY_MODE:-modern}
+      SAGASMITH_WORKER_SERVICE_TOKEN: ${SAGASMITH_WORKER_SERVICE_TOKEN:?set SAGASMITH_WORKER_SERVICE_TOKEN}
       SAGASMITH_AGENT_CONFIG: /config/agent-config.json
       SAGASMITH_AGENT_WORKSPACES: /workspaces
       SAGASMITH_AGENT_COMPLETION_TIMEOUT_SECONDS: ${SAGASMITH_AGENT_COMPLETION_TIMEOUT_SECONDS:-900}

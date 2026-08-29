@@ -36,6 +36,7 @@ from sagasmith_service.observability import MODULE_BLOCKING_IO_SECONDS
 from sagasmith_service.quota import QuotaExceededError, reserve, settle
 from sagasmith_service.quota import release as release_quota
 from sagasmith_service.realtime import install_transactional_outbox
+from sagasmith_service.room_tool_policy import campaign_phase_and_revision
 from sagasmith_service.storage import LocalPrivateStorage, S3PrivateStorage
 
 logger = logging.getLogger("sagasmith_service.module_worker")
@@ -326,6 +327,42 @@ class ModuleJobProcessor:
             }
             principal_id = user.principal_id
             campaign_id = project.authoring_campaign_id
+            resource_owner_principal = f"user:{project.owner_user_id}"
+            conversation_principal = f"module-project:{project.id}"
+        runtime_state = await self.dnd.get_campaign(
+            campaign_id=campaign_id,
+            principal_id=principal_id,
+        )
+        _, base_revision = campaign_phase_and_revision("dnd5e", runtime_state)
+        agent_idempotency_key = f"module-agent:{run_id}"
+        authority_context = {
+            "schema": "sagasmith.auth-context/v2",
+            "target_service": "sagasmith-dnd-mcp",
+            "caller_principal": "service:sagasmith-web",
+            "workload_identity": "workload:module-worker",
+            "requester_principal": principal_id,
+            "resource_owner_principal": resource_owner_principal,
+            "acting_host_principal": principal_id,
+            "acting_character_id": "",
+            "authorized_audience": "sagasmith-dnd-mcp",
+            # The Agent may inspect the authoritative authoring campaign but cannot
+            # mutate it. Web validates its JSON decision before calling module_draft.
+            "allowed_operations": ["module_query"],
+            "room_turn_id": run_id,
+            "campaign_id": campaign_id,
+            "system_id": "dnd5e",
+            "base_revision": base_revision,
+            "expires_at": (
+                now_utc()
+                + timedelta(seconds=self.settings.agent_delegation_ttl_seconds)
+            ).isoformat(),
+            "idempotency_key": agent_idempotency_key,
+            "conversation_principal": conversation_principal,
+            "tenant_id": "",
+            "traceparent": "",
+            "tracestate": "",
+            "baggage": "",
+        }
         prompt = (
             "Follow the installed sagasmith-modulegen Skill. This is a D&D module authoring "
             "decision, not a runtime narration. The Service will transport your explicit "
@@ -342,7 +379,9 @@ class ModuleJobProcessor:
                 "system_id": "dnd5e",
                 "principal_id": principal_id,
                 "campaign_role": "owner",
+                "authority_context": authority_context,
             },
+            idempotency_key=agent_idempotency_key,
         )
         decision = _strict_json(agent_result.content)
         with self.factory() as session:
@@ -962,6 +1001,7 @@ async def run_workers(settings: Settings) -> None:
         settings.agent_api_url,
         settings.agent_api_key.get_secret_value(),
         timeout_seconds=settings.agent_completion_timeout_seconds,
+        boundary_mode=settings.agent_boundary_mode,
     )
     storage = await asyncio.to_thread(_storage, settings)
     blocking_io = BoundedBlockingIo(settings.module_worker_io_concurrency)

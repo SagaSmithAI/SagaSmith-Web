@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
-import httpx
+import httpx2
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
@@ -16,6 +16,7 @@ from sagasmith_service.auth_context import (
     exposure_revision,
     sign_auth_context,
 )
+from sagasmith_service.mcp_result import is_tool_error, structured_tool_content
 from sagasmith_service.observability import (
     MCP_EXPOSURE_SECONDS,
     MCP_INITIALIZE_SECONDS,
@@ -28,7 +29,7 @@ from sagasmith_service.observability import (
 
 
 def _tool_payload(result: Any) -> dict[str, Any]:
-    if getattr(result, "isError", False):
+    if is_tool_error(result):
         content = getattr(result, "content", [])
         message = getattr(content[0], "text", None) if content else None
         raise RuntimeError(message or "CoC MCP rejected the request")
@@ -40,7 +41,7 @@ def _tool_payload(result: Any) -> dict[str, Any]:
             if isinstance(candidate, Mapping):
                 receipt = dict(candidate)
                 break
-    structured = getattr(result, "structuredContent", None)
+    structured = structured_tool_content(result)
     if isinstance(structured, dict):
         payload = dict(structured)
         if receipt is not None:
@@ -66,7 +67,7 @@ class StreamableHttpCocRuntime:
         *,
         bearer_token: str | None = None,
         auth_context_secret: str = "",
-        http_client: httpx.AsyncClient | None = None,
+        http_client: httpx2.AsyncClient | None = None,
     ) -> None:
         self.url = url
         self.bearer_token = bearer_token
@@ -80,9 +81,9 @@ class StreamableHttpCocRuntime:
         self.http_client = (
             http_client
             if http_client is not None
-            else httpx.AsyncClient(
+            else httpx2.AsyncClient(
                 headers=headers,
-                timeout=httpx.Timeout(30, connect=10),
+                timeout=httpx2.Timeout(30, connect=10),
             )
         )
         if http_client is not None and headers:
@@ -111,7 +112,7 @@ class StreamableHttpCocRuntime:
                     operation_class="probe",
                     transport="streamable_http",
                 ):
-                    read, write, _ = await stack.enter_async_context(
+                    read, write = await stack.enter_async_context(
                         streamable_http_client(self.url, http_client=self.http_client)
                     )
                 session = await stack.enter_async_context(ClientSession(read, write))
@@ -164,7 +165,7 @@ class StreamableHttpCocRuntime:
                     operation_class=operation_class,
                     transport="streamable_http",
                 ):
-                    read, write, _ = await stack.enter_async_context(
+                    read, write = await stack.enter_async_context(
                         streamable_http_client(self.url, http_client=self.http_client)
                     )
                 session = await stack.enter_async_context(ClientSession(read, write))

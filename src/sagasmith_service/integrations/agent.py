@@ -80,7 +80,7 @@ class ModernWorkerTrustedContext(BaseModel):
     acting_host_principal: str = Field(min_length=1, max_length=300)
     acting_character_id: str = Field(default="", max_length=300)
     authorized_audience: str = Field(min_length=1, max_length=300)
-    allowed_operations: list[str] = Field(min_length=1, max_length=100)
+    allowed_operations: list[str] = Field(min_length=1, max_length=16)
     room_turn_id: str = Field(min_length=1, max_length=300)
     campaign_id: str = Field(min_length=1, max_length=300)
     system_id: str = Field(min_length=1, max_length=100)
@@ -217,7 +217,7 @@ class HttpAgentRuntime:
         api_key: str = "",
         *,
         timeout_seconds: int = 180,
-        boundary_mode: Literal["legacy", "modern"] = "legacy",
+        boundary_mode: Literal["legacy", "modern"] = "modern",
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
