@@ -204,9 +204,17 @@ class Handler(BaseHTTPRequestHandler):
             str((tool.get("function") or tool).get("name") or "")
             for tool in tool_definitions
         }
+        current_turn_index = max(
+            (
+                index
+                for index, message in enumerate(messages)
+                if isinstance(message, dict) and message.get("role") == "user"
+            ),
+            default=context_index,
+        )
         tool_messages = [
             message
-            for message in messages[context_index:]
+            for message in messages[current_turn_index:]
             if isinstance(message, dict) and message.get("role") == "tool"
         ]
         modern_projection = not authenticated and any(
@@ -337,7 +345,7 @@ class Handler(BaseHTTPRequestHandler):
             else str(run_id_schema.get("const") or run_id_schema.get("default") or "")
         )
         if (
-            authenticated
+            (authenticated or modern_projection)
             and native_call_completed
             and submit_name
             and not submit_completed
