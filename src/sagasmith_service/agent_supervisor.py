@@ -24,7 +24,7 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from sagasmith_service.narrative_control import NarrativeControlClient, NarrativeOperation
 
@@ -53,10 +53,15 @@ WORKER_CAPACITY_REJECTIONS = Counter(
 
 
 class CompletionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     messages: list[dict[str, Any]]
-    principal_id: str
+    principal_id: str | None = None
+    trusted_context: dict[str, Any] | None = None
     stream: bool = False
     response_contract: dict[str, Any] | None = None
+    terminal: bool = False
+    idempotency_key: str | None = None
 
 
 class NarrativeOperationRequest(BaseModel):
@@ -104,14 +109,20 @@ def conversation_matches_principal(conversation_key: str, principal_id: str) -> 
 
 
 class WorkerManager:
-    """One Nanobot process and one real MCP session per conversation."""
+    """One bounded worker process and MCP connection set per conversation.
+
+    Modern MCP requests carry authority explicitly and do not treat a protocol
+    session as an identity boundary. Legacy workers may still use their
+    connection-local adapter while the component lock remains on that era.
+    """
 
     def __init__(
         self,
         *,
         config_path: str,
         workspace_root: str,
-        worker_api_key: str,
+        worker_api_key: str | None = None,
+        worker_service_token: str | None = None,
         first_port: int = 19000,
         idle_seconds: int = 1800,
         completion_timeout_seconds: int = 900,
@@ -122,7 +133,7 @@ class WorkerManager:
         self.config_path = str(Path(config_path).resolve())
         self.workspace_root = Path(workspace_root).resolve()
         self.workspace_root.mkdir(parents=True, exist_ok=True)
-        self.worker_api_key = worker_api_key
+        self.worker_service_token = worker_service_token or worker_api_key or ""
         self.first_port = first_port
         self.idle_seconds = idle_seconds
         self.completion_timeout_seconds = max(30, int(completion_timeout_seconds))
@@ -138,7 +149,7 @@ class WorkerManager:
         self.cleanup_task: asyncio.Task[None] | None = None
         self._narrative_probe_lock = asyncio.Lock()
         self._narrative_probe_success_at = 0.0
-        headers = {"Authorization": f"Bearer {self.worker_api_key}"}
+        headers = {"Authorization": f"Bearer {self.worker_service_token}"}
         self.readiness_client = httpx.AsyncClient(headers=headers, timeout=1)
         self.completion_client = httpx.AsyncClient(
             headers=headers,
@@ -290,9 +301,7 @@ class WorkerManager:
                 if process.returncode is not None:
                     raise RuntimeError(f"Agent worker exited with code {process.returncode}")
                 try:
-                    response = await self.readiness_client.get(
-                        f"http://127.0.0.1:{port}/health"
-                    )
+                    response = await self.readiness_client.get(f"http://127.0.0.1:{port}/health")
                     if response.status_code == 200:
                         return worker
                 except httpx.HTTPError:
@@ -383,9 +392,7 @@ class WorkerManager:
                     allocated = len(self.workers) + len(self.spawn_tasks)
                     if allocated >= self.max_workers:
                         candidates = [
-                            item
-                            for item in self.workers.values()
-                            if item.active_requests == 0
+                            item for item in self.workers.values() if item.active_requests == 0
                         ]
                         if not candidates:
                             WORKER_CAPACITY_REJECTIONS.inc()
@@ -556,13 +563,29 @@ def create_supervisor_app(manager: WorkerManager, internal_key: str) -> FastAPI:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid internal credential")
         if len(conversation_key) > 300 or not conversation_key:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid conversation key")
-        if not conversation_matches_principal(conversation_key, payload.principal_id):
+        trusted = payload.trusted_context or {}
+        trusted_principals = {
+            value
+            for value in (
+                payload.principal_id,
+                trusted.get("requester_principal"),
+                trusted.get("acting_host_principal"),
+            )
+            if isinstance(value, str) and value
+        }
+        if not trusted_principals or not any(
+            conversation_matches_principal(conversation_key, principal)
+            for principal in trusted_principals
+        ):
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN,
                 "conversation principal does not match the authenticated service context",
             )
         try:
-            return await manager.complete(conversation_key, payload.model_dump())
+            return await manager.complete(
+                conversation_key,
+                payload.model_dump(exclude_none=True),
+            )
         except WorkerCapacityError as exc:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
         except RuntimeError as exc:
@@ -573,11 +596,18 @@ def create_supervisor_app(manager: WorkerManager, internal_key: str) -> FastAPI:
 
 def main() -> None:
     internal_key = os.environ["SAGASMITH_AGENT_INTERNAL_KEY"]
+    worker_service_token = os.environ.get("SAGASMITH_WORKER_SERVICE_TOKEN", "")
+    boundary_mode = os.environ.get("SAGASMITH_AGENT_BOUNDARY_MODE", "legacy")
+    if boundary_mode not in {"legacy", "modern"}:
+        raise RuntimeError("SAGASMITH_AGENT_BOUNDARY_MODE must be legacy or modern")
+    if boundary_mode == "modern" and len(worker_service_token.encode("utf-8")) < 32:
+        raise RuntimeError("SAGASMITH_WORKER_SERVICE_TOKEN must contain at least 32 bytes")
+    child_token = worker_service_token if boundary_mode == "modern" else internal_key
     config_path = os.environ.get("SAGASMITH_AGENT_CONFIG", "/config/agent-config.json")
     manager = WorkerManager(
         config_path=config_path,
         workspace_root=os.environ.get("SAGASMITH_AGENT_WORKSPACES", "/workspaces"),
-        worker_api_key=internal_key,
+        worker_service_token=child_token,
         first_port=int(os.environ.get("SAGASMITH_AGENT_FIRST_PORT", "19000")),
         idle_seconds=int(os.environ.get("SAGASMITH_AGENT_IDLE_SECONDS", "1800")),
         completion_timeout_seconds=int(

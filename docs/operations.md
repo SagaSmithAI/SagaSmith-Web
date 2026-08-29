@@ -63,10 +63,11 @@ The server checks out this private repository beside the required open repositor
 Start the hosted stack with `docker compose up -d --build`; inspect it with
 `docker compose ps` and stop it with `docker compose down`.
 
-The six `SAGASMITH_*_CONTEXT` values select the open-source build inputs, including
-`SAGASMITH_MODULE_GEN_SKILLS_CONTEXT`. Pin reviewed tags or
-commit SHAs for production; never deploy moving branch references. Remote Git contexts deliberately
-avoid sending unrelated local worktrees, virtual environments or private content to Docker.
+The five `SAGASMITH_*_CONTEXT` values select Core, Agent, D&D, CoC, and Narrative build inputs.
+Domain-owned Skills are built from those domain monorepos; the archived standalone Module Gen
+repository is not a release input. Pin reviewed tags or commit SHAs for production; never deploy
+moving branch references. Remote Git contexts deliberately avoid sending unrelated local worktrees,
+virtual environments or private content to Docker.
 
 The private stack contains Caddy, SagaSmith Web API/frontend, persistent Module worker, PostgreSQL, Redis,
 MinIO, D&D MCP, CoC MCP and the Agent Supervisor. Narrative remains process-local to each Hosted
@@ -81,6 +82,14 @@ bounded parallelism, and coalesces concurrent starts for the same conversation. 
 `SAGASMITH_AGENT_IDLE_SECONDS` for the desired warm-worker/LRU tradeoff. When capacity is full and
 all workers are serving requests, new cold conversations receive HTTP 503 instead of creating
 unbounded processes; clients should retry with backoff.
+
+`SAGASMITH_AGENT_BOUNDARY_MODE=legacy` is the rollback-compatible default while the component lock
+still points at the pre-v2 Hosted Worker. After the Agent and all three domain MCP revisions are
+locked to the modern contract, set it to `modern`. Modern mode requires a dedicated random
+`SAGASMITH_WORKER_SERVICE_TOKEN` of at least 32 bytes; this token authenticates Supervisor-to-worker
+requests and is never a browser or provider token. `SAGASMITH_AGENT_DELEGATION_TTL_SECONDS` defaults
+to 600 and may not exceed the Agent's 900-second trusted-context limit. It is independent from the
+longer renewable quota reservation lease.
 
 ## Health and observability
 

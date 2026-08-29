@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -28,6 +30,8 @@ from sagasmith_service.observability import (
     ROOM_PROJECTION_BATCH_SECONDS,
     ROOM_PROJECTION_JOBS,
 )
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _sample(name: str, labels: dict[str, str]) -> float:
@@ -155,6 +159,82 @@ def test_agent_runtime_reuses_injected_client_and_records_success_and_error() ->
     assert requests[1].headers["traceparent"].startswith("00-")
     assert _sample("sagasmith_agent_upstream_seconds_count", labels) == success_before + 1
     assert _sample("sagasmith_agent_upstream_seconds_count", error_labels) == error_before + 1
+
+
+def test_modern_agent_payload_matches_merged_hosted_worker_contract_fixture() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "id": "request-modern-1",
+                "model": "test-model",
+                "choices": [{"message": {"content": "ready"}}],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 1},
+            },
+        )
+
+    fixture = json.loads(
+        (ROOT / "tests/fixtures/agent-modern-worker-contract.json").read_text(encoding="utf-8")
+    )
+    authority = {
+        "schema": "sagasmith.auth-context/v2",
+        "target_service": "sagasmith-dnd-mcp",
+        "caller_principal": "service:sagasmith-web",
+        "workload_identity": "workload:room-turn-worker",
+        "requester_principal": "user:1",
+        "resource_owner_principal": "user:owner",
+        "acting_host_principal": "user:1",
+        "acting_character_id": "hero",
+        "authorized_audience": "sagasmith-dnd-mcp",
+        "allowed_operations": ["campaign_query", "character_action"],
+        "room_turn_id": "job-1",
+        "campaign_id": "campaign-1",
+        "system_id": "dnd5e",
+        "base_revision": 7,
+        "expires_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+        "idempotency_key": "room-turn:job-1",
+        "conversation_principal": "room:room-1",
+        "tenant_id": "",
+        "traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+        "tracestate": "",
+        "baggage": "",
+        "catalog_phase": "play",
+        "catalog_role": "player",
+        "catalog_task": "action",
+    }
+
+    async def exercise() -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        runtime = HttpAgentRuntime(
+            "http://agent.test",
+            boundary_mode="modern",
+            http_client=client,
+        )
+        await runtime.complete(
+            session_id="campaign-1:user-1:conversation-1",
+            content="I inspect the gate.",
+            context={
+                "authority_context": authority,
+                "response_contract": {"name": "submit_room_turn"},
+            },
+            idempotency_key="room-turn:job-1",
+        )
+        await client.aclose()
+
+    asyncio.run(exercise())
+    payload = json.loads(requests[0].read())
+    assert sorted(payload) == fixture["request_fields"]
+    assert sorted(payload["trusted_context"]) == fixture["trusted_context_fields"]
+    assert payload["messages"] == [{"role": "user", "content": "I inspect the gate."}]
+    assert payload["trusted_context"]["authorized_audience"] == fixture["services"]["dnd5e"]
+    assert "principal_id" not in payload
+    assert "idempotency_key" not in payload
+    assert "session_id" not in payload
+    assert "catalog_phase" not in payload["trusted_context"]
+    assert requests[0].headers["Idempotency-Key"] == "room-turn:job-1"
 
 
 def test_mcp_calls_reuse_http_pool_but_keep_sessions_isolated(monkeypatch) -> None:
@@ -345,11 +425,7 @@ def test_panel_snapshot_uses_one_principal_scoped_session_and_revision_short_cir
                 isError=False,
                 content=[
                     SimpleNamespace(
-                        meta={
-                            "sagasmith_auth_context_receipt": {
-                                "revision": self.epoch
-                            }
-                        }
+                        meta={"sagasmith_auth_context_receipt": {"revision": self.epoch}}
                     )
                 ],
                 structuredContent={"result": payload},
@@ -366,9 +442,7 @@ def test_panel_snapshot_uses_one_principal_scoped_session_and_revision_short_cir
             http_client=client,
             auth_context_secret="x" * 32,
         )
-        panel = await runtime.get_panel_state(
-            campaign_id="campaign-1", principal_id="user:one"
-        )
+        panel = await runtime.get_panel_state(campaign_id="campaign-1", principal_id="user:one")
         assert panel["revision"] == 7
         assert panel["not_modified"] is False
         first_call_count = len(actual_calls)

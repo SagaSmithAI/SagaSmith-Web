@@ -170,12 +170,14 @@ so its draft and selected audience survive expansion. Token, target and destinat
 sent to the Agent as declared action context, not authoritative facts; the Agent must validate them
 through MCP. Agent-positioned Combat never synthesizes coordinates or a fallback grid.
 
-The SagaSmith Web-injected context contains the authenticated campaign and principal. It is a semantic
-aid only; every MCP call remains fail-closed on membership, actor, phase, revision and payload.
-The Supervisor requires either `campaign:user:conversation` or
-`campaign:agent:identity:conversation` to match its authenticated principal. The hosted worker maps
-the principal prefix to Nanobot's trusted inbound channel, so MCP sees exactly `user:<uuid>` or
-`agent:<uuid>`. Internal MCP DNS names are
+SagaSmith Web keeps untrusted player text structurally separate from a durable
+`sagasmith.auth-context/v2` authority envelope. Before a room turn, the Host selects at most 16 exact
+model-visible facade IDs from trusted system, authoritative phase, acting role, and task. The
+selection is guidance, not authorization; every MCP call remains fail-closed on membership, actor,
+phase, revision, audience, and payload. Modern requests carry this authority on every call and do
+not treat a protocol session as an identity boundary. The Supervisor requires either
+`campaign:user:conversation` or `campaign:agent:identity:conversation` to match the trusted requester
+or acting Host principal. Internal MCP DNS names are
 resolved to exact host CIDRs in an ephemeral mode-0600 worker config; no broad private-network SSRF
 exception is granted.
 

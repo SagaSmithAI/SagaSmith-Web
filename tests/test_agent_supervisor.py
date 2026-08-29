@@ -41,9 +41,7 @@ class FakeManager:
         if self.fail:
             raise RuntimeError("narrative failed")
 
-    async def execute_narrative(
-        self, operation: str, arguments: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def execute_narrative(self, operation: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if self.fail:
             raise RuntimeError("narrative failed")
         self.narrative_calls.append((operation, arguments))
@@ -66,6 +64,31 @@ class FakeNarrativeControl:
         self.probes += 1
         if self.fail:
             raise RuntimeError("narrative unavailable")
+
+
+def test_worker_manager_uses_dedicated_service_token_for_child_requests(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured_headers: list[dict[str, str]] = []
+
+    class CapturingClient:
+        def __init__(self, *, headers: dict[str, str], **_kwargs: Any) -> None:
+            captured_headers.append(headers)
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr("sagasmith_service.agent_supervisor.httpx.AsyncClient", CapturingClient)
+    WorkerManager(
+        config_path=str(tmp_path / "config.json"),
+        workspace_root=str(tmp_path / "workspaces"),
+        worker_service_token="dedicated-worker-service-token-at-least-32-bytes",
+    )
+    assert captured_headers == [
+        {"Authorization": "Bearer dedicated-worker-service-token-at-least-32-bytes"},
+        {"Authorization": "Bearer dedicated-worker-service-token-at-least-32-bytes"},
+    ]
 
 
 def test_worker_manager_coalesces_successful_narrative_readiness_probes(
@@ -123,6 +146,70 @@ def test_supervisor_authenticates_and_routes_by_conversation() -> None:
         assert manager.calls[0][1]["stream"] is False
         assert manager.calls[0][1]["response_contract"]["name"] == "submit_result"
     assert manager.closed is True
+
+
+def test_supervisor_forwards_modern_context_without_legacy_extra_fields() -> None:
+    manager = FakeManager()
+    trusted_context = {
+        "caller_principal": "service:sagasmith-web",
+        "workload_identity": "workload:room-turn-worker",
+        "requester_principal": "user:test-user",
+        "resource_owner_principal": "user:owner",
+        "acting_host_principal": "user:test-user",
+        "acting_character_id": "",
+        "authorized_audience": "sagasmith-dnd-mcp",
+        "allowed_operations": ["campaign_query"],
+        "room_turn_id": "turn-1",
+        "campaign_id": "campaign",
+        "system_id": "dnd5e",
+        "base_revision": 0,
+        "expires_at": "2026-08-29T06:00:00Z",
+        "idempotency_key": "room-turn:turn-1",
+        "conversation_principal": "room:one",
+        "tenant_id": "",
+        "traceparent": "",
+        "tracestate": "",
+        "baggage": "",
+    }
+    with TestClient(
+        create_supervisor_app(manager, "internal-secret")  # type: ignore[arg-type]
+    ) as client:
+        response = client.post(
+            "/v1/conversations/campaign:test-user:conversation/completions",
+            headers={"Authorization": "Bearer internal-secret"},
+            json={
+                "messages": [{"role": "user", "content": "hello"}],
+                "trusted_context": trusted_context,
+                "stream": False,
+                "response_contract": None,
+                "terminal": False,
+            },
+        )
+    assert response.status_code == 200, response.text
+    forwarded = manager.calls[0][1]
+    assert forwarded["trusted_context"] == trusted_context
+    assert "session_id" not in forwarded
+    assert "principal_id" not in forwarded
+    assert "idempotency_key" not in forwarded
+
+
+def test_supervisor_accepts_identity_conversation_only_from_acting_host() -> None:
+    manager = FakeManager()
+    with TestClient(
+        create_supervisor_app(manager, "internal-secret")  # type: ignore[arg-type]
+    ) as client:
+        response = client.post(
+            "/v1/conversations/campaign:agent:identity-1:conversation/completions",
+            headers={"Authorization": "Bearer internal-secret"},
+            json={
+                "messages": [{"role": "user", "content": "hello"}],
+                "trusted_context": {
+                    "requester_principal": "user:test-user",
+                    "acting_host_principal": "agent:identity-1",
+                },
+            },
+        )
+    assert response.status_code == 200, response.text
 
 
 def test_supervisor_maps_worker_failure() -> None:

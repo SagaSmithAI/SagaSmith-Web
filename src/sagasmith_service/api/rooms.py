@@ -8,7 +8,7 @@ import json
 import time
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from decimal import Decimal
 from typing import Annotated, Any, TypeVar, cast
@@ -66,6 +66,12 @@ from sagasmith_service.projection_cache import (
 from sagasmith_service.quota import QuotaExceededError, release, reserve, settle
 from sagasmith_service.room_activity import RoomActivitySubmission, room_activity_contract
 from sagasmith_service.room_jobs import TERMINAL_ROOM_JOB_STATES, RoomJobError
+from sagasmith_service.room_tool_policy import (
+    RoomToolPolicyError,
+    campaign_phase_and_revision,
+    select_room_turn_tools,
+    service_for_system,
+)
 from sagasmith_service.room_turn import (
     PerformanceBlock,
     RoomAudience,
@@ -1137,6 +1143,7 @@ class _AgentPreparation:
     room_id: str
     trigger_id: str
     trigger_content: str
+    trigger_mode: str
     trigger_payload: dict[str, Any]
     sender_display_name: str
     session_id: str
@@ -1144,6 +1151,7 @@ class _AgentPreparation:
     room_context: list[dict[str, Any]]
     job_id: str
     base_revision: int | None
+    base_revision_explicit: bool
     trace_context: dict[str, str]
     authority_context: dict[str, Any]
 
@@ -1457,26 +1465,60 @@ def _prepare_agent_transaction(
         session.add(run)
         session.flush()
         job.agent_run_id = run.id
+    target_service = service_for_system(campaign.system_id)
+    previous_authority = dict(job.authority_context or {})
+    previous_selection_matches = (
+        previous_authority.get("schema") == "sagasmith.auth-context/v2"
+        and previous_authority.get("target_service") == target_service
+        and previous_authority.get("campaign_id") == campaign.id
+        and previous_authority.get("system_id") == campaign.system_id
+        and previous_authority.get("catalog_role") == host_role
+        and previous_authority.get("catalog_task") == trigger.message_type
+        and isinstance(previous_authority.get("allowed_operations"), list)
+        and bool(previous_authority.get("allowed_operations"))
+    )
+    durable_base_revision = int(
+        previous_authority.get("base_revision")
+        if previous_selection_matches
+        else (job.base_revision if job.base_revision is not None else campaign.mcp_revision)
+    )
     authority_context = {
         "schema": "sagasmith.auth-context/v2",
-        "target_service": f"sagasmith-{campaign.system_id}-mcp",
-        "caller_identity": "service:sagasmith-web",
+        "target_service": target_service,
+        "caller_principal": "service:sagasmith-web",
         "workload_identity": "workload:room-turn-worker",
-        "requester_identity": user_principal_id,
-        "resource_owner_identity": f"user:{campaign.owner_user_id}",
-        "acting_host_identity": principal_id,
-        "acting_character_identity": (
+        "requester_principal": user_principal_id,
+        "resource_owner_principal": f"user:{campaign.owner_user_id}",
+        "acting_host_principal": principal_id,
+        "acting_character_id": (
             str(trigger.structured_payload.get("actor_id"))
             if trigger.structured_payload.get("actor_id")
-            else None
+            else ""
         ),
-        "allowed_operations": ["campaign.read", "mechanics.resolve", "campaign.write"],
-        "audience": f"sagasmith-{campaign.system_id}-mcp",
+        "authorized_audience": target_service,
+        "allowed_operations": (
+            list(previous_authority["allowed_operations"]) if previous_selection_matches else []
+        ),
         "room_turn_id": job.id,
-        "base_revision": job.base_revision,
+        "campaign_id": campaign.id,
+        "system_id": campaign.system_id,
+        "base_revision": durable_base_revision,
         "expires_at": (
-            now_utc() + timedelta(seconds=app.state.settings.agent_reservation_ttl_seconds)
+            now_utc() + timedelta(seconds=app.state.settings.agent_delegation_ttl_seconds)
         ).isoformat(),
+        "idempotency_key": f"room-turn:{job.id}",
+        "conversation_principal": f"room:{room.id}",
+        "tenant_id": "",
+        "traceparent": str((job.trace_context or {}).get("traceparent") or ""),
+        "tracestate": str((job.trace_context or {}).get("tracestate") or ""),
+        "baggage": str((job.trace_context or {}).get("baggage") or ""),
+        # Web-only durable catalog selection inputs. The Agent wire projection
+        # strips these fields and validates the exact WorkerTrustedContext schema.
+        "catalog_phase": (
+            str(previous_authority.get("catalog_phase") or "") if previous_selection_matches else ""
+        ),
+        "catalog_role": host_role,
+        "catalog_task": trigger.message_type,
     }
     job.authority_context = authority_context
     room_context = _recent_context(
@@ -1506,13 +1548,15 @@ def _prepare_agent_transaction(
         room_id=room.id,
         trigger_id=trigger.id,
         trigger_content=trigger.content,
+        trigger_mode=trigger.message_type,
         trigger_payload=dict(trigger.structured_payload or {}),
         sender_display_name=sender_display_name,
         session_id=session_id,
         identity_context=identity_context,
         room_context=room_context,
         job_id=job.id,
-        base_revision=job.base_revision,
+        base_revision=durable_base_revision,
+        base_revision_explicit=job.base_revision is not None,
         trace_context=dict(job.trace_context or {}),
         authority_context=authority_context,
     )
@@ -1611,6 +1655,103 @@ def _persist_agent_result(
     session.commit()
 
 
+async def _ensure_room_turn_tool_selection(
+    app: FastAPI,
+    preparation: _AgentPreparation,
+) -> _AgentPreparation:
+    """Persist one reviewed catalog selection before the first Agent attempt."""
+
+    authority = dict(preparation.authority_context)
+    selected = authority.get("allowed_operations")
+    if (
+        isinstance(selected, list)
+        and bool(selected)
+        and isinstance(authority.get("catalog_phase"), str)
+        and bool(authority["catalog_phase"])
+    ):
+        return preparation
+
+    runtime_state = await preparation.domain_runtime.get_campaign(
+        campaign_id=preparation.campaign.id,
+        principal_id=preparation.principal_id,
+    )
+    phase, revision_value = campaign_phase_and_revision(
+        preparation.campaign_system_id,
+        runtime_state,
+    )
+    base_revision = preparation.base_revision
+    if preparation.base_revision_explicit and base_revision != revision_value:
+        raise RoomJobError(
+            "stale_revision",
+            (
+                f"Campaign revision changed from {base_revision} to {revision_value}; "
+                "refresh the room panel and submit a new action."
+            ),
+            False,
+            "conflict",
+        )
+    if not preparation.base_revision_explicit:
+        base_revision = revision_value
+    operations = select_room_turn_tools(
+        system_id=preparation.campaign_system_id,
+        phase=phase,
+        role=preparation.host_role,
+        task=preparation.trigger_mode,
+    )
+    authority.update(
+        {
+            "allowed_operations": list(operations),
+            "base_revision": base_revision,
+            "catalog_phase": phase,
+            "catalog_role": preparation.host_role,
+            "catalog_task": preparation.trigger_mode,
+        }
+    )
+    async with app.state.room_turn_jobs.transaction_lock():
+        with app.state.session_factory() as session:
+            job = session.scalar(
+                select(RoomTurnJob).where(RoomTurnJob.id == preparation.job_id).with_for_update()
+            )
+            if job is None:
+                raise RoomJobError("job_not_found", "Room turn job no longer exists", False)
+            if job.cancel_requested:
+                raise RoomJobError("cancelled", "Room turn job was cancelled", False, "cancel")
+            campaign = session.get(CampaignProjection, preparation.campaign.id)
+            if campaign is None:
+                raise RoomJobError(
+                    "campaign_projection_missing",
+                    "Campaign projection is unavailable",
+                    True,
+                    "state",
+                )
+            if campaign.mcp_revision != preparation.campaign.mcp_revision:
+                raise RoomJobError(
+                    "stale_revision",
+                    (
+                        "Campaign revision changed while selecting Agent tools; "
+                        "refresh the room panel and submit a new action."
+                    ),
+                    False,
+                    "conflict",
+                )
+            current_authority = dict(job.authority_context or {})
+            if current_authority.get("allowed_operations") and current_authority.get(
+                "catalog_phase"
+            ):
+                return replace(
+                    preparation,
+                    base_revision=int(current_authority["base_revision"]),
+                    authority_context=current_authority,
+                )
+            job.authority_context = authority
+            session.commit()
+    return replace(
+        preparation,
+        base_revision=base_revision,
+        authority_context=authority,
+    )
+
+
 def _room_job_result(
     session: Session,
     *,
@@ -1674,6 +1815,24 @@ async def execute_room_turn_job(app: FastAPI, job_id: str) -> None:
     if saved_result:
         result = AgentResult.from_json(saved_result)
     else:
+        try:
+            preparation = await _ensure_room_turn_tool_selection(app, preparation)
+        except RoomJobError:
+            raise
+        except RoomToolPolicyError as exc:
+            raise RoomJobError(
+                "agent_tool_policy_denied",
+                str(exc),
+                False,
+                "auth",
+            ) from exc
+        except RuntimeError as exc:
+            raise RoomJobError(
+                "mcp_catalog_preflight_unavailable",
+                str(exc),
+                True,
+                "upstream",
+            ) from exc
         activity_callback = (
             f"{app.state.settings.service_internal_url.rstrip('/')}/api/campaigns/"
             f"{preparation.campaign.id}/room/internal-activity/{preparation.run_id}"
@@ -1758,12 +1917,14 @@ async def execute_room_turn_job(app: FastAPI, job_id: str) -> None:
             campaign_id=preparation.campaign.id,
             principal_id=preparation.principal_id,
         )
-        state = runtime_state.get("result", runtime_state)
-        revision = int(state.get("revision") or state.get("campaign_revision") or 0) or None
-        phase_value = (
-            state.get("effective_game_phase") or state.get("phase") or state.get("game_phase")
+        normalized_phase, normalized_revision = campaign_phase_and_revision(
+            preparation.campaign_system_id,
+            runtime_state,
         )
-        phase = str(phase_value) if phase_value else None
+        revision = normalized_revision
+        phase = normalized_phase
+    except RoomToolPolicyError as exc:
+        raise RoomJobError("mcp_projection_invalid", str(exc), False, "tool_execution") from exc
     except RuntimeError as exc:
         raise RoomJobError("mcp_projection_unavailable", str(exc), True, "upstream") from exc
 
