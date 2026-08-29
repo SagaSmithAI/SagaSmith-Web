@@ -83,6 +83,23 @@ bounded parallelism, and coalesces concurrent starts for the same conversation. 
 all workers are serving requests, new cold conversations receive HTTP 503 instead of creating
 unbounded processes; clients should retry with backoff.
 
+Conversation state is stored below the registered `/workspaces/hosted-v1` namespace. Each managed
+directory has a service-owner marker and opaque SHA-256 ID. On startup the Supervisor converts
+crash-left `active` markers to idle state, expires entries older than
+`SAGASMITH_AGENT_WORKSPACE_TTL_SECONDS`, then enforces
+`SAGASMITH_AGENT_MAX_WORKSPACES` and `SAGASMITH_AGENT_WORKSPACE_MAX_BYTES` by least-recently-used
+cleanup. A successful terminal completion removes its registered directory immediately. Active and
+starting workers are never cleanup candidates; if they alone exhaust a configured bound, new cold
+conversations receive HTTP 503 until capacity is available.
+
+Cleanup is fail closed: it only removes direct children with the expected schema, owner, and
+matching workspace ID. Legacy directories, Narrative state, unknown entries, malformed markers,
+paths outside the managed namespace, and symbolic links are retained for operator review. Do not
+manually add the service marker to an existing directory. The worker health response and metrics
+report managed count/occupied bytes and ignored-entry count/bytes; alert on ignored entries or sustained capacity
+rejections, then audit and remove unknown data manually under the deployment's data-retention
+policy.
+
 `SAGASMITH_AGENT_BOUNDARY_MODE=legacy` is the rollback-compatible default while the component lock
 still points at the pre-v2 Hosted Worker. After the Agent and all three domain MCP revisions are
 locked to the modern contract, set it to `modern`. Modern mode requires a dedicated random
@@ -128,7 +145,8 @@ longer renewable quota reservation lease.
 - `module-worker:9101/metrics`: Module task outcomes and expired-lease recovery counters on the
   private network.
 - `agent:8910/metrics`: Agent worker spawn latency, bounded spawn queue, ready/busy/spawning/
-  retiring worker counts, capacity rejections, and aggregate tracked-worker RSS. The endpoint is
+  retiring worker counts, capacity rejections, aggregate tracked-worker RSS, registered workspace
+  count/bytes, ignored workspace entries, and bounded cleanup outcomes. The endpoint is
   private-network only and is included in the observability profile's Prometheus scrape targets.
 - `X-Request-ID`: accepted only in a safe shape or generated, echoed, and logged.
 - Alert on readiness failures, 5xx rate, Agent/D&D MCP failures, p95 latency, quota settlement lag,

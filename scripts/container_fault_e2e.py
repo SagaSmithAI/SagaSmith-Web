@@ -146,8 +146,7 @@ def run(*, base_url: str, agent_url: str, project: str, files: list[str]) -> Non
         )
         first = _require(
             client.post(
-                f"/api/campaigns/{dnd['id']}/agent/conversations/"
-                f"{conversation['id']}/messages",
+                f"/api/campaigns/{dnd['id']}/agent/conversations/{conversation['id']}/messages",
                 headers={"Idempotency-Key": f"fault-before-{uuid.uuid4().hex}"},
                 json={"content": "Query the current character list through the native MCP."},
             )
@@ -172,9 +171,7 @@ def run(*, base_url: str, agent_url: str, project: str, files: list[str]) -> Non
                 json={"content": "Query the Narrative actors through the native MCP."},
             )
         )
-        if "dynamic MCP call completed" not in str(
-            narrative_first.get("assistant_content") or ""
-        ):
+        if "dynamic MCP call completed" not in str(narrative_first.get("assistant_content") or ""):
             raise RuntimeError("pre-restart Narrative call did not use native MCP")
 
         _docker(project, files, "restart", "dnd-mcp", "coc-mcp")
@@ -182,14 +179,29 @@ def run(*, base_url: str, agent_url: str, project: str, files: list[str]) -> Non
         _wait_status(client, "/api/ready", 200)
         second = _require(
             client.post(
-                f"/api/campaigns/{dnd['id']}/agent/conversations/"
-                f"{conversation['id']}/messages",
+                f"/api/campaigns/{dnd['id']}/agent/conversations/{conversation['id']}/messages",
                 headers={"Idempotency-Key": f"fault-after-{uuid.uuid4().hex}"},
                 json={"content": "Query the character list again after the MCP restart."},
             )
         )
         if "dynamic MCP call completed" not in str(second.get("assistant_content") or ""):
             raise RuntimeError("Agent did not recover its native MCP session after restart")
+
+        worker_headers = {"Authorization": "Bearer e2e-internal-agent-key"}
+        with httpx.Client(
+            base_url=agent_url.rstrip("/"), headers=worker_headers, timeout=10
+        ) as agent:
+            workspace_before_restart = _require(agent.get("/health/workers"))
+        if workspace_before_restart["workspace_count"] < 2:
+            raise RuntimeError(
+                "Hosted workspace registry did not retain both active conversations: "
+                f"{workspace_before_restart}"
+            )
+        if workspace_before_restart["workspace_unknown_entries"] != 0:
+            raise RuntimeError(
+                "Hosted workspace registry reported unknown managed entries before restart: "
+                f"{workspace_before_restart}"
+            )
 
         _docker(project, files, "restart", "agent")
         _docker(project, files, "up", "-d", "--wait", "agent")
@@ -201,9 +213,7 @@ def run(*, base_url: str, agent_url: str, project: str, files: list[str]) -> Non
                 json={"content": "Query the Narrative actors after the Worker restart."},
             )
         )
-        if "dynamic MCP call completed" not in str(
-            narrative_second.get("assistant_content") or ""
-        ):
+        if "dynamic MCP call completed" not in str(narrative_second.get("assistant_content") or ""):
             raise RuntimeError("Narrative MCP did not recover after the Worker restart")
 
         _docker(project, files, "stop", "redis")
@@ -239,7 +249,6 @@ def run(*, base_url: str, agent_url: str, project: str, files: list[str]) -> Non
         )
         _wait_status(client, "/api/ready", 200)
 
-    worker_headers = {"Authorization": "Bearer e2e-internal-agent-key"}
     with httpx.Client(base_url=agent_url.rstrip("/"), headers=worker_headers, timeout=10) as agent:
         for _ in range(30):
             status = _require(agent.get("/health/workers"))
@@ -248,6 +257,13 @@ def run(*, base_url: str, agent_url: str, project: str, files: list[str]) -> Non
             time.sleep(0.5)
         else:
             raise RuntimeError(f"Hosted Worker processes were not reaped: {status}")
+        if status["workspace_count"] < workspace_before_restart["workspace_count"]:
+            raise RuntimeError(
+                "Hosted workspace registry lost a non-terminal conversation across restart: "
+                f"before={workspace_before_restart}, after={status}"
+            )
+        if status["workspace_unknown_entries"] != 0:
+            raise RuntimeError(f"Hosted workspace registry found unknown managed entries: {status}")
     print(
         json.dumps(
             {
@@ -256,6 +272,7 @@ def run(*, base_url: str, agent_url: str, project: str, files: list[str]) -> Non
                 "mcp": "reconnected",
                 "narrative_worker": "restarted-and-recovered",
                 "workers": "reaped-without-orphans",
+                "workspaces": "registered-and-recovered-across-restart",
             }
         )
     )

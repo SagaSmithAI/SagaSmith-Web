@@ -1,6 +1,7 @@
 import asyncio
 import json
 import socket
+import time
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sagasmith_service.agent_supervisor import (
+    WORKSPACE_MARKER,
     Worker,
     WorkerCapacityError,
     WorkerManager,
@@ -626,3 +628,327 @@ def test_supervisor_exposes_worker_metrics() -> None:
     assert response.status_code == 200
     assert "sagasmith_agent_workers" in response.text
     assert "sagasmith_agent_worker_rss_bytes" in response.text
+    assert "sagasmith_agent_workspace_bytes" in response.text
+    assert "sagasmith_agent_workspace_cleanup_total" in response.text
+
+
+def _register_test_workspace(
+    manager: WorkerManager,
+    key: str,
+    *,
+    state: str = "active",
+    last_used_at: float | None = None,
+) -> Path:
+    manager._initialize_workspace_store()
+    workspace = manager._workspace(key)
+    workspace.mkdir(mode=0o700)
+    timestamp = last_used_at or time.time()
+    manager._write_workspace_marker(
+        workspace,
+        state=state,
+        created_at=min(timestamp, time.time()),
+        last_used_at=timestamp,
+    )
+    return workspace
+
+
+def test_workspace_startup_recovers_recent_crash_and_expires_stale_active(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    manager = WorkerManager(
+        config_path=str(tmp_path / "config.json"),
+        workspace_root=str(workspace_root),
+        worker_api_key="secret",
+        workspace_ttl_seconds=60,
+    )
+    recent = _register_test_workspace(
+        manager,
+        "campaign-a:user-a:recent",
+        last_used_at=time.time(),
+    )
+    stale = _register_test_workspace(
+        manager,
+        "campaign-a:user-a:stale",
+        last_used_at=time.time() - 120,
+    )
+
+    restarted = WorkerManager(
+        config_path=str(tmp_path / "config.json"),
+        workspace_root=str(workspace_root),
+        worker_api_key="secret",
+        workspace_ttl_seconds=60,
+    )
+    restarted._initialize_workspace_store()
+
+    assert recent.is_dir()
+    assert json.loads((recent / WORKSPACE_MARKER).read_text())["state"] == "idle"
+    assert not stale.exists()
+    assert restarted._workspace_snapshot.records[0].workspace_id == recent.name
+
+
+def test_workspace_startup_enforces_lru_count_for_crash_leftovers(tmp_path: Path) -> None:
+    manager = WorkerManager(
+        config_path=str(tmp_path / "config.json"),
+        workspace_root=str(tmp_path / "workspaces"),
+        worker_api_key="secret",
+        workspace_ttl_seconds=3600,
+        max_workspaces=2,
+    )
+    oldest = _register_test_workspace(
+        manager,
+        "campaign-a:user-a:oldest",
+        last_used_at=time.time() - 30,
+    )
+    middle = _register_test_workspace(
+        manager,
+        "campaign-a:user-a:middle",
+        last_used_at=time.time() - 20,
+    )
+    newest = _register_test_workspace(
+        manager,
+        "campaign-a:user-a:newest",
+        last_used_at=time.time() - 10,
+    )
+
+    restarted = WorkerManager(
+        config_path=str(tmp_path / "config.json"),
+        workspace_root=str(tmp_path / "workspaces"),
+        worker_api_key="secret",
+        workspace_ttl_seconds=3600,
+        max_workspaces=2,
+    )
+    restarted._initialize_workspace_store()
+
+    assert not oldest.exists()
+    assert middle.is_dir()
+    assert newest.is_dir()
+    assert len(restarted._workspace_snapshot.records) == 2
+
+
+def test_workspace_byte_capacity_rejects_when_only_workspace_is_protected(
+    tmp_path: Path,
+) -> None:
+    manager = WorkerManager(
+        config_path=str(tmp_path / "config.json"),
+        workspace_root=str(tmp_path / "workspaces"),
+        worker_api_key="secret",
+        workspace_max_bytes=32,
+    )
+    key = "campaign-a:user-a:oversized"
+    workspace = _register_test_workspace(manager, key, state="idle")
+    (workspace / "payload.bin").write_bytes(b"x" * 128)
+
+    with pytest.raises(WorkerCapacityError, match="workspace capacity is full"):
+        asyncio.run(manager._prepare_workspace(key))
+    assert workspace.is_dir()
+
+
+def test_workspace_touch_does_not_rescan_every_registered_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    manager = WorkerManager(
+        config_path=str(tmp_path / "config.json"),
+        workspace_root=str(tmp_path / "workspaces"),
+        worker_api_key="secret",
+    )
+    workspace = _register_test_workspace(manager, "campaign-a:user-a:hot-path")
+    previous = manager._registered_workspace(workspace)
+    assert previous is not None
+
+    def fail_full_scan():
+        raise AssertionError("request completion must not scan the full workspace namespace")
+
+    monkeypatch.setattr(manager, "_scan_workspace_store", fail_full_scan)
+    manager._touch_workspace(workspace)
+
+    refreshed = next(
+        item for item in manager._workspace_snapshot.records if item.workspace_id == workspace.name
+    )
+    assert refreshed.last_used_at >= previous.last_used_at
+
+
+def test_new_workspace_rolls_back_when_registration_exceeds_byte_capacity(
+    tmp_path: Path,
+) -> None:
+    manager = WorkerManager(
+        config_path=str(tmp_path / "config.json"),
+        workspace_root=str(tmp_path / "workspaces"),
+        worker_api_key="secret",
+        workspace_max_bytes=32,
+    )
+    key = "campaign-a:user-a:new-oversized"
+
+    with pytest.raises(WorkerCapacityError, match="workspace capacity is full"):
+        asyncio.run(manager._prepare_workspace(key))
+    assert not manager._workspace(key).exists()
+
+
+def test_workspace_cleanup_never_deletes_unknown_or_outside(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspaces"
+    legacy = workspace_root / "legacy-conversation"
+    legacy.mkdir(parents=True)
+    (legacy / "keep.txt").write_text("keep", encoding="utf-8")
+    manager = WorkerManager(
+        config_path=str(tmp_path / "config.json"),
+        workspace_root=str(workspace_root),
+        worker_api_key="secret",
+        workspace_ttl_seconds=1,
+        max_workspaces=1,
+    )
+    manager._initialize_workspace_store()
+    unknown = manager.managed_workspace_root / ("a" * 64)
+    unknown.mkdir()
+    (unknown / "keep.txt").write_text("keep", encoding="utf-8")
+    (unknown / WORKSPACE_MARKER).write_text(
+        json.dumps(
+            {
+                "schema": "sagasmith.agent-workspace/v1",
+                "owner": "not-sagasmith",
+                "workspace_id": unknown.name,
+                "state": "idle",
+                "created_at": time.time() - 100,
+                "last_used_at": time.time() - 100,
+            }
+        ),
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep", encoding="utf-8")
+
+    with pytest.raises(WorkerCapacityError, match="workspace capacity is full"):
+        manager._prune_workspace_store(set(), 1)
+
+    assert (legacy / "keep.txt").read_text(encoding="utf-8") == "keep"
+    assert (unknown / "keep.txt").read_text(encoding="utf-8") == "keep"
+    assert manager._delete_registered_workspace(outside, "test") is False
+    assert (outside / "keep.txt").read_text(encoding="utf-8") == "keep"
+    assert manager._workspace_snapshot.unknown_entries == 1
+    assert manager._workspace_snapshot.unknown_bytes > 0
+
+
+def test_workspace_cleanup_never_deletes_top_level_symlink(tmp_path: Path) -> None:
+    manager = WorkerManager(
+        config_path=str(tmp_path / "config.json"),
+        workspace_root=str(tmp_path / "workspaces"),
+        worker_api_key="secret",
+    )
+    manager._initialize_workspace_store()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep", encoding="utf-8")
+    link = manager.managed_workspace_root / ("b" * 64)
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are not available on this host")
+
+    manager._prune_workspace_store(set(), 0)
+
+    assert link.is_symlink()
+    assert (outside / "keep.txt").read_text(encoding="utf-8") == "keep"
+    assert manager._workspace_snapshot.unknown_entries == 1
+
+
+def test_workspace_secure_delete_refuses_registered_tree_with_nested_symlink(
+    tmp_path: Path,
+) -> None:
+    manager = WorkerManager(
+        config_path=str(tmp_path / "config.json"),
+        workspace_root=str(tmp_path / "workspaces"),
+        worker_api_key="secret",
+    )
+    workspace = _register_test_workspace(
+        manager,
+        "campaign-a:user-a:linked",
+        state="idle",
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep", encoding="utf-8")
+    nested_link = workspace / "outside-link"
+    try:
+        nested_link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are not available on this host")
+
+    assert manager._delete_registered_workspace(workspace, "test") is False
+    assert workspace.is_dir()
+    assert nested_link.is_symlink()
+    assert (outside / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+
+def test_terminal_completion_stops_worker_and_securely_deletes_registered_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class FakeProcess:
+        returncode: int | None = None
+        pid: int | None = 123
+
+        def __init__(self) -> None:
+            self.terminated = False
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = 0
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            return self.returncode or 0
+
+    class FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict[str, Any]:
+            return {"id": "completion", "choices": []}
+
+    class FakeClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def aclose(self) -> None:
+            return None
+
+        async def get(self, _url: str) -> FakeResponse:
+            return FakeResponse()
+
+        async def post(self, _url: str, json: dict[str, Any]) -> FakeResponse:
+            return FakeResponse()
+
+    process = FakeProcess()
+
+    async def fake_spawn(*_args: Any) -> FakeProcess:
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
+    monkeypatch.setattr("sagasmith_service.agent_supervisor.httpx.AsyncClient", FakeClient)
+    config = tmp_path / "config.json"
+    config.write_text("{}", encoding="utf-8")
+    manager = WorkerManager(
+        config_path=str(config),
+        workspace_root=str(tmp_path / "workspaces"),
+        worker_api_key="secret",
+    )
+    key = "campaign-a:user-a:terminal"
+
+    async def scenario() -> None:
+        await manager.complete(key, {"messages": [], "terminal": False})
+        (manager._workspace(key) / "oversized.bin").write_bytes(b"x" * 1024)
+        manager._touch_workspace(manager._workspace(key))
+        manager.workspace_max_bytes = 32
+        result = await manager.complete(key, {"messages": [], "terminal": True})
+        assert result["id"] == "completion"
+        assert key not in manager.workers
+        assert not manager._workspace(key).exists()
+        await manager.close()
+
+    asyncio.run(scenario())
+    assert process.terminated is True
