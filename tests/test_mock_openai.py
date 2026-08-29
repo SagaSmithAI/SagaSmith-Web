@@ -8,7 +8,7 @@ import httpx
 from e2e.mock_openai import Handler
 
 
-def test_modern_module_task_returns_strict_json_without_legacy_auth_prompt() -> None:
+def completion(content: str) -> dict:
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -19,10 +19,7 @@ def test_modern_module_task_returns_strict_json_without_legacy_auth_prompt() -> 
                 "messages": [
                     {
                         "role": "user",
-                        "content": (
-                            "Follow the installed sagasmith-modulegen Skill.\n"
-                            "Task: Design a playable outline grounded in evidence."
-                        ),
+                        "content": content,
                     }
                 ]
             },
@@ -33,7 +30,26 @@ def test_modern_module_task_returns_strict_json_without_legacy_auth_prompt() -> 
         thread.join(timeout=5)
 
     response.raise_for_status()
-    content = response.json()["choices"][0]["message"]["content"]
-    decision = json.loads(content)
+    return response.json()
+
+
+def test_modern_module_task_returns_strict_json_without_legacy_auth_prompt() -> None:
+    payload = completion(
+        "Follow the installed sagasmith-modulegen Skill.\n"
+        "Task: Design a playable outline grounded in evidence."
+    )
+    decision = json.loads(payload["choices"][0]["message"]["content"])
     assert decision["outline"]["premise"] == "A lantern gate is failing."
     assert decision["summary"] == "Deterministic Module Studio outline."
+
+
+def test_modern_community_review_returns_strict_json_without_legacy_auth_prompt() -> None:
+    payload = completion(
+        "Review this SagaSmith community artifact release for semantic completeness."
+    )
+    decision = json.loads(payload["choices"][0]["message"]["content"])
+    assert decision == {
+        "approved": True,
+        "summary": "Synthetic original fixture is publishable.",
+        "findings": [],
+    }

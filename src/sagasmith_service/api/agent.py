@@ -304,6 +304,7 @@ async def send_message(
                 "authority_context": authority_context,
                 **identity_context,
             },
+            idempotency_key=f"agent-turn:{run.id}",
         )
     except (RoomToolPolicyError, RuntimeError, ValueError) as exc:
         release(session, reservation.id)

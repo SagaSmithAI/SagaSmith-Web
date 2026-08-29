@@ -86,6 +86,7 @@ def test_agent_call_has_authenticated_scope_and_settles_usage(
     assert authority["base_revision"] == 7
     assert authority["room_turn_id"] == response.json()["id"]
     assert authority["idempotency_key"] == f"agent-turn:{response.json()['id']}"
+    assert call["idempotency_key"] == authority["idempotency_key"]
     assert authority["conversation_principal"] == f"agent-conversation:{conversation['id']}"
     assert call["session_id"].startswith(f"campaign-1:{user['id']}:")
     balance = client.get("/api/usage/balance").json()

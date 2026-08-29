@@ -165,7 +165,7 @@ class Handler(BaseHTTPRequestHandler):
                 },
             )
             return
-        if campaign_match and campaign_match.group(1) == "community":
+        if "Review this SagaSmith community artifact release" in task_context:
             self._json(
                 200,
                 {
