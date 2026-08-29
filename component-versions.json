@@ -2,7 +2,7 @@
   "schema": "sagasmith.release-lock/v3",
   "lock": "2026.8.29-hosted-mcp-modern",
   "generated_at": "2026-08-29T20:42:30+08:00",
-  "audited_at": "2026-08-29T20:42:30+08:00",
+  "audited_at": "2026-08-29T21:49:00+08:00",
   "release_status": "compatibility-lock-not-published",
   "product_scope": "hosted-dnd-coc-narrative",
   "compatibility": {
@@ -78,7 +78,7 @@
     {
       "repository": "SagaSmith-agent",
       "branch": "main",
-      "revision": "c274c178c13c6d47b99e593ccd49366bb03a1593",
+      "revision": "056f295360bcfa56a9ade7c6c151e9aea447df41",
       "remote": "https://github.com/SagaSmithAI/SagaSmith-agent.git",
       "usage": "build",
       "enforced": true

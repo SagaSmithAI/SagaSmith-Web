@@ -124,7 +124,7 @@ services:
       context: .
       dockerfile: infrastructure/Dockerfile.agent-supervisor
       additional_contexts:
-        agent_source: ${SAGASMITH_AGENT_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-agent.git#c274c178c13c6d47b99e593ccd49366bb03a1593}
+        agent_source: ${SAGASMITH_AGENT_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-agent.git#056f295360bcfa56a9ade7c6c151e9aea447df41}
         core: ${SAGASMITH_CORE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-core.git#eef98fcfcaa96d08c069708b33ee7717ba1625c3}
         dnd_domain: ${SAGASMITH_DND_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-dnd.git#587f66e0673b686a7d47d1ee266d8404ef221741}
         coc_domain: ${SAGASMITH_COC_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-coc.git#515f6a7e3ba3c2a41fff7de2624ee19e4deb6190}
