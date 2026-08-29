@@ -1851,7 +1851,7 @@ async def execute_room_turn_job(app: FastAPI, job_id: str) -> None:
             "trigger_message_id": preparation.trigger_id,
             "authority_context": preparation.authority_context,
             "response_contract": {
-                "terminal": room_turn_contract(),
+                "terminal": room_turn_contract(run_id=preparation.run_id),
                 "activity": room_activity_contract(),
                 "activity_callback": {
                     "url": activity_callback,

@@ -360,6 +360,11 @@ def test_room_turn_persists_trusted_authority_trace_and_stable_upstream_key(
     assert call["content"] == "I inspect the sealed gate."
     assert "I inspect the sealed gate." not in json.dumps(call["context"]["authority_context"])
     assert call["context"]["authority_context"]["room_turn_id"] == job_id
+    run_id = call["context"]["run_id"]
+    run_id_schema = call["context"]["response_contract"]["terminal"]["parameters"][
+        "properties"
+    ]["run_id"]
+    assert run_id_schema["const"] == run_id_schema["default"] == run_id
 
 
 def test_room_turn_rejects_stale_base_revision_with_recovery_details(

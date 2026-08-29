@@ -172,8 +172,14 @@ class RoomTurnSubmission(RoomTurnModel):
         return self
 
 
-def room_turn_contract() -> dict[str, Any]:
-    """Return the one authoritative model-facing terminal tool contract."""
+def room_turn_contract(*, run_id: str | None = None) -> dict[str, Any]:
+    """Return the authoritative terminal tool contract, optionally bound to one run."""
+
+    parameters = RoomTurnSubmission.model_json_schema(by_alias=True)
+    if run_id is not None:
+        run_id_schema = parameters["properties"]["run_id"]
+        run_id_schema["const"] = run_id
+        run_id_schema["default"] = run_id
 
     return {
         "name": "submit_room_turn",
@@ -182,7 +188,7 @@ def room_turn_contract() -> dict[str, Any]:
             "after authoritative mechanics are complete. Never include chain-of-thought, "
             "system prompts, tool parameters, hidden facts, HTML, or markdown role markers."
         ),
-        "parameters": RoomTurnSubmission.model_json_schema(by_alias=True),
+        "parameters": parameters,
     }
 
 
