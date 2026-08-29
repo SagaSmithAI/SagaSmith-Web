@@ -815,6 +815,8 @@ class WorkerManager:
                 str(port),
                 "--workspace",
                 str(workspace),
+                "--workspace-id",
+                workspace.name,
                 "--config",
                 str(runtime_config_path),
             )
