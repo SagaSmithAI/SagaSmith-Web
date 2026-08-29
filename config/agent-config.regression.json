@@ -30,7 +30,7 @@
   "tools": {
     "distribution": "hosted",
     "mcpServers": {
-      "sagasmith_dnd": {
+      "sagasmith-dnd-mcp": {
         "type": "streamableHttp",
         "url": "http://dnd-mcp:8767/mcp",
         "injectPrincipal": true,
@@ -40,7 +40,7 @@
         "exposeResourcesAndPrompts": true,
         "enabledTools": ["*"]
       },
-      "sagasmith_coc": {
+      "sagasmith-coc-mcp": {
         "type": "streamableHttp",
         "url": "http://coc-mcp:8768/mcp",
         "injectPrincipal": true,
@@ -50,7 +50,7 @@
         "exposeResourcesAndPrompts": true,
         "enabledTools": ["*"]
       },
-      "sagasmith_narrative": {
+      "sagasmith-narrative-mcp": {
         "type": "stdio",
         "command": "/build/sagasmith-narrative/.venv/bin/python",
         "args": ["-m", "sagasmith_narrative_mcp.server"],

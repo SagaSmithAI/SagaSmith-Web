@@ -1,0 +1,38 @@
+{
+  "source": "SagaSmith-agent@feef2f7338510abed4ea64ce94343eed2085226f",
+  "request_fields": [
+    "messages",
+    "response_contract",
+    "stream",
+    "terminal",
+    "trusted_context"
+  ],
+  "trusted_context_fields": [
+    "acting_character_id",
+    "acting_host_principal",
+    "allowed_operations",
+    "authorized_audience",
+    "baggage",
+    "base_revision",
+    "caller_principal",
+    "campaign_id",
+    "conversation_principal",
+    "expires_at",
+    "idempotency_key",
+    "requester_principal",
+    "resource_owner_principal",
+    "room_turn_id",
+    "system_id",
+    "tenant_id",
+    "traceparent",
+    "tracestate",
+    "workload_identity"
+  ],
+  "services": {
+    "coc7e": "sagasmith-coc-mcp",
+    "dnd5e": "sagasmith-dnd-mcp",
+    "narrative": "sagasmith-narrative-mcp"
+  },
+  "max_context_ttl_seconds": 900,
+  "max_allowed_operations": 16
+}

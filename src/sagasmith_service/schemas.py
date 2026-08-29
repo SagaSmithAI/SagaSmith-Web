@@ -174,6 +174,11 @@ class CampaignMessageCreate(ApiModel):
     )
     reply_to_message_id: str | None = None
     structured_payload: dict[str, Any] = Field(default_factory=dict)
+    base_revision: int | None = Field(
+        default=None,
+        ge=0,
+        description="Authoritative campaign revision observed before composing an action.",
+    )
 
     @model_validator(mode="after")
     def validate_audience(self) -> CampaignMessageCreate:
@@ -227,6 +232,7 @@ class CampaignPanelAction(ApiModel):
         "combat.intent",
     ]
     payload: dict[str, Any] = Field(default_factory=dict)
+    base_revision: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def limit_payload(self) -> CampaignPanelAction:

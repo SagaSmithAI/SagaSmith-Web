@@ -18,7 +18,10 @@
 | Identity | published Soul pin; invitation/acceptance; `agent:` MCP principal; quota payer; memory namespace/revision; Agent context; authority-first revoke |
 | Module Studio | hidden authoring campaign; source limits/rights; outline approval; Module Gen Skill lookup; persistent lease/recovery/cancel/retry; strict Agent decisions; real `module_draft` evidence/edit/finalize; revision and idempotency; project quota; SSE/notification |
 | Module delivery | immutable compiled artifact; direct and published cross-campaign import; optional activation; version collision; restart/resume; source publication boundary |
-| quota | no grant, concurrent reservations, settle/release, provider retry, exact usage ledger, admin grant audit |
+| quota | no grant, concurrent reservations, lease renewal, active-job expiry protection, abandoned expiry, settle/release, provider retry, exact usage ledger, admin grant audit |
+| durable room turns | same/different idempotency keys, stale revision, queued cancellation, expired worker lease/startup recovery, Agent result saved before projection retry, Web restart, timeout polling, terminal result references |
+| Hosted workspaces | registered owner marker; crash-left active recovery; restart continuity; TTL and LRU cleanup; count/byte refusal; terminal cleanup; unknown, malformed, outside, symlink and mount preservation |
+| MCP media boundary | standard text/image/audio/resource/embedded-resource result retention, HostMediaEnvelope projection, private artifact authorization, checksum and size rejection |
 | recovery | fresh migration; encrypted destination; checksum validation; isolated full restore; restored object re-import through MCP; reconciliation |
 | security | principal spoof attempt, IDOR, CSRF, rate limits, malicious archive, path traversal, secret scan |
 

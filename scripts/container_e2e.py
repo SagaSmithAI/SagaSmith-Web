@@ -690,6 +690,33 @@ def run(base_url: str) -> None:
     )
     if "dynamic MCP call completed" not in (identity_run["assistant_content"] or ""):
         raise RuntimeError("hosted DM Identity did not complete a native MCP call")
+    expect(
+        owner.put(
+            f"/api/campaigns/{campaign_id}/room/host",
+            json={"identity_assignment_id": assignment["id"]},
+        ),
+        200,
+    )
+    room_turn = expect(
+        player.post(
+            f"/api/campaigns/{campaign_id}/room/messages",
+            headers={"Idempotency-Key": f"identity-room-{run_id}"},
+            json={
+                "content": "Inspect the scene as a player while the hosted DM responds.",
+                "mode": "action",
+            },
+        ),
+        200,
+    )
+    if (room_turn.get("job") or {}).get("status") != "succeeded":
+        raise RuntimeError(f"hosted Identity room turn did not settle: {room_turn}")
+    expect(
+        owner.put(
+            f"/api/campaigns/{campaign_id}/room/host",
+            json={"identity_assignment_id": None},
+        ),
+        200,
+    )
     expect(player.delete(f"/api/identities/assignments/{assignment['id']}"), 204)
     expect(
         owner.post(
@@ -706,13 +733,14 @@ def run(base_url: str) -> None:
         204,
     )
     expect(player.get(f"/api/campaigns/{campaign_id}/runtime"), 403)
-    audit = expect(owner.get("/api/admin/audit-events?limit=100"), 200)["items"]
+    audit = expect(owner.get("/api/admin/audit-events?limit=200"), 200)["items"]
     actions = {item["action"] for item in audit}
     required = {
         "account.register",
         "campaign.create",
         "campaign.join.approved",
         "agent.complete",
+        "campaign.room.agent.complete",
         "pack.upload.private",
         "pack.activate",
         "campaign.member.revoke",
@@ -750,6 +778,33 @@ def run(base_url: str) -> None:
         for receipt in narrative_receipts
     ):
         raise RuntimeError(f"Narrative auth-context receipt was not retained: {narrative_receipts}")
+    room_audit = next(
+        (
+            item
+            for item in audit
+            if item["action"] == "campaign.room.agent.complete"
+            and item["details"].get("campaign_id") == campaign_id
+        ),
+        None,
+    )
+    if room_audit is None:
+        raise RuntimeError("Hosted Identity room completion was not audited")
+    room_details = room_audit["details"]
+    operations = room_details.get("allowed_operations") or []
+    if room_details.get("requester_principal") != f"user:{player_user['id']}":
+        raise RuntimeError(f"room requester identity was not preserved: {room_details}")
+    if room_details.get("acting_host_principal") != f"agent:{identity['id']}":
+        raise RuntimeError(f"hosted acting identity was not preserved: {room_details}")
+    if room_details.get("authorized_audience") != "sagasmith-dnd-mcp":
+        raise RuntimeError(f"room MCP audience was not exact: {room_details}")
+    if (
+        not operations
+        or operations != sorted(set(operations))
+        or len(operations) > 16
+        or "character_query" not in operations
+        or {"exposure", "server_capabilities"}.intersection(operations)
+    ):
+        raise RuntimeError(f"room MCP facade was not bounded and deterministic: {operations}")
     print(
         json.dumps(
             {

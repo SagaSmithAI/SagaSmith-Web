@@ -50,9 +50,7 @@ def test_service_release_manifest_pins_every_runtime_layer() -> None:
     lock = json.loads((ROOT / "component-versions.json").read_text(encoding="utf-8"))
     runtime_locks = lock["runtime_locks"]
     assert runtime_locks["service_api"] == "uv.lock"
-    assert runtime_locks["agent_supervisor"] == (
-        "infrastructure/agent-supervisor-requirements.txt"
-    )
+    assert runtime_locks["agent_supervisor"] == ("infrastructure/agent-supervisor-requirements.txt")
     assert runtime_locks["uv_version"] == "0.11.25"
     assert runtime_locks["dependency_cutoff"] == "2026-08-17T12:00:00Z"
     deployment_text = "\n".join(
@@ -71,9 +69,9 @@ def test_service_release_manifest_pins_every_runtime_layer() -> None:
 
 
 def test_agent_supervisor_has_one_hash_locked_dependency_solution() -> None:
-    requirements = (
-        ROOT / "infrastructure" / "agent-supervisor-requirements.txt"
-    ).read_text(encoding="utf-8")
+    requirements = (ROOT / "infrastructure" / "agent-supervisor-requirements.txt").read_text(
+        encoding="utf-8"
+    )
     packages = re.findall(r"^([a-z0-9][a-z0-9._-]*)==", requirements, re.MULTILINE)
     assert packages
     assert len(packages) == len(set(packages))
@@ -87,9 +85,9 @@ def test_agent_supervisor_has_one_hash_locked_dependency_solution() -> None:
 
 
 def test_agent_supervisor_lock_does_not_disclose_local_paths() -> None:
-    requirements = (
-        ROOT / "infrastructure" / "agent-supervisor-requirements.txt"
-    ).read_text(encoding="utf-8")
+    requirements = (ROOT / "infrastructure" / "agent-supervisor-requirements.txt").read_text(
+        encoding="utf-8"
+    )
     assert "file://" not in requirements.casefold()
     assert "# via" not in requirements.casefold()
     assert re.search(r"(?<![a-z])[a-z]:[\\/]", requirements, re.IGNORECASE) is None
@@ -115,9 +113,7 @@ def test_hosted_contract_requires_dynamic_scoped_structured_tools() -> None:
         "storage_status",
         "resolution_presentation",
     ]
-    assert lock["required_contracts"]["narrative_transport"] == (
-        "process-local-stdio-only"
-    )
+    assert lock["required_contracts"]["narrative_transport"] == ("process-local-stdio-only")
 
 
 def test_hosted_agent_uses_current_session_scoped_native_tool_contract() -> None:
@@ -127,13 +123,26 @@ def test_hosted_agent_uses_current_session_scoped_native_tool_contract() -> None
     )
     for path in paths:
         config = json.loads(path.read_text(encoding="utf-8"))
-        for server_name in ("sagasmith_dnd", "sagasmith_coc", "sagasmith_narrative"):
+        expected_servers = {
+            "sagasmith-dnd-mcp",
+            "sagasmith-coc-mcp",
+            "sagasmith-narrative-mcp",
+        }
+        for server_name in expected_servers:
             server = config["tools"]["mcpServers"][server_name]
             assert server["injectPrincipal"] is True
             assert server["sessionScoped"] is True
             assert server["exposeResourcesAndPrompts"] is True
             assert server["toolTimeout"] == 900
             assert server["enabledTools"] == ["*"]
+            # The current component lock pins the pre-v2 Agent schema. Modern
+            # delegation/audience/protocol fields are added only by the atomic
+            # release-lock upgrade so this rollback-compatible config remains
+            # loadable by the pinned worker.
+            assert "delegationSecret" not in server
+            assert "authorizationAudience" not in server
+            assert "systemIds" not in server
+            assert "protocolMode" not in server
         skills = config["agents"]["defaults"]["externalSkillsDirs"]
         assert skills == [
             "/opt/sagasmith/skills/hosted",
@@ -143,15 +152,15 @@ def test_hosted_agent_uses_current_session_scoped_native_tool_contract() -> None
             "/opt/sagasmith/skills/coc-module-generator",
             "/opt/sagasmith/skills/narrative",
         ]
-        narrative = config["tools"]["mcpServers"]["sagasmith_narrative"]
+        narrative = config["tools"]["mcpServers"]["sagasmith-narrative-mcp"]
         assert narrative["type"] == "stdio"
         assert narrative["command"] == "/build/sagasmith-narrative/.venv/bin/python"
 
 
 def test_supervisor_image_preserves_shared_skill_references() -> None:
-    dockerfile = (
-        ROOT / "infrastructure" / "Dockerfile.agent-supervisor"
-    ).read_text(encoding="utf-8")
+    dockerfile = (ROOT / "infrastructure" / "Dockerfile.agent-supervisor").read_text(
+        encoding="utf-8"
+    )
     assert "COPY --from=dnd_domain ./skills/full /opt/sagasmith/skills/dnd/full" in dockerfile
     assert "COPY --from=coc_domain ./skills/full /opt/sagasmith/skills/coc/full" in dockerfile
     assert "/opt/sagasmith/skills/dnd/full/references/mcp-contract.md" in dockerfile
