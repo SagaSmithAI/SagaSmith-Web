@@ -47,12 +47,21 @@ class Handler(BaseHTTPRequestHandler):
         context = (
             str(context_message.get("content", "")) if isinstance(context_message, dict) else ""
         )
+        # Modern Hosted requests keep authority out of the player message and no
+        # longer render the legacy authenticated-context prompt. Module Studio
+        # task routing is test-provider behavior, not an authorization signal, so
+        # inspect ordinary message content without setting ``authenticated``.
+        task_context = "\n".join(
+            str(message.get("content", ""))
+            for message in messages
+            if isinstance(message, dict) and isinstance(message.get("content"), str)
+        )
         authenticated = bool(context)
         campaign_match = re.search(r"^campaign_id=(.+)$", context, re.MULTILINE)
         system_match = re.search(r"^system_id=(.+)$", context, re.MULTILINE)
         principal_match = re.search(r"^principal_id=(.+)$", context, re.MULTILINE)
         module_result = None
-        if "Task: Design a playable outline" in context:
+        if "Task: Design a playable outline" in task_context:
             module_result = {
                 "outline": {
                     "premise": "A lantern gate is failing.",
@@ -63,7 +72,7 @@ class Handler(BaseHTTPRequestHandler):
                 },
                 "summary": "Deterministic Module Studio outline.",
             }
-        elif "Task: Generate the complete canonical D&D module source" in context:
+        elif "Task: Generate the complete canonical D&D module source" in task_context:
             module_result = {
                 "canonical_source": (
                     "# Lantern Gate\n\n"
@@ -78,9 +87,9 @@ class Handler(BaseHTTPRequestHandler):
                 "package_decisions": {"version": "1.0.0"},
                 "summary": "Deterministic complete module source.",
             }
-        elif "Task: Review the mechanically imported draft" in context:
-            source_key_match = re.search(r'"source_key"\s*:\s*"([^"]+)"', context)
-            chunk_hash_match = re.search(r'"chunk_hash"\s*:\s*"([a-f0-9]+)"', context)
+        elif "Task: Review the mechanically imported draft" in task_context:
+            source_key_match = re.search(r'"source_key"\s*:\s*"([^"]+)"', task_context)
+            chunk_hash_match = re.search(r'"chunk_hash"\s*:\s*"([a-f0-9]+)"', task_context)
             source_ref = {
                 "source_key": source_key_match.group(1) if source_key_match else "module-source",
                 "page": None,
@@ -125,7 +134,7 @@ class Handler(BaseHTTPRequestHandler):
                     },
                 },
             }
-        elif "Task: Confirm finalization" in context:
+        elif "Task: Confirm finalization" in task_context:
             module_result = {
                 "confirmed": True,
                 "note": "Deterministic evidence review passed before finalization.",
