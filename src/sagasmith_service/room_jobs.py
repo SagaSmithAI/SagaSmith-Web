@@ -233,6 +233,7 @@ class RoomTurnJobProcessor:
                     RoomTurnJob.id == job_id,
                     RoomTurnJob.status == prior_status,
                     RoomTurnJob.lease_owner.is_(None),
+                    active_in_room < self.per_room_concurrency,
                 )
                 .values(
                     status="running",

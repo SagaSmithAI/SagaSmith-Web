@@ -430,10 +430,18 @@ def test_per_room_scheduler_limit_is_shared_across_processors(
 
     first = independent_processor("replica-one")
     second = independent_processor("replica-two")
-    first_job_id = first.claim()
+    async def concurrent_claims() -> tuple[str | None, str | None]:
+        claimed = await asyncio.gather(
+            first._database_retry(first.claim),
+            second._database_retry(second.claim),
+        )
+        return claimed[0], claimed[1]
 
-    assert first_job_id is not None
-    assert second.claim() is None
+    claims = client.portal.call(concurrent_claims)
+    claimed_ids = [job_id for job_id in claims if job_id is not None]
+
+    assert len(claimed_ids) == 1
+    first_job_id = claimed_ids[0]
 
     with original.factory() as session:
         completed = session.get(RoomTurnJob, first_job_id)
@@ -445,7 +453,8 @@ def test_per_room_scheduler_limit_is_shared_across_processors(
         completed.completed_at = now_utc()
         session.commit()
 
-    second_job_id = second.claim()
+    remaining_processor = first if claims[0] is None else second
+    second_job_id = remaining_processor.claim()
 
     assert second_job_id is not None
     assert second_job_id != first_job_id
