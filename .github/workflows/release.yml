@@ -60,11 +60,11 @@ jobs:
           printf 'name=%s\n' "${IMAGE,,}" >> "$GITHUB_OUTPUT"
           printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
       - name: Attest Python artifacts
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: "dist/*"
       - name: Attest container image
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ${{ steps.image.outputs.name }}
           subject-digest: ${{ steps.image.outputs.digest }}
