@@ -138,7 +138,7 @@ def test_release_lock_matches_final_coordinated_component_set() -> None:
     revisions = {item["repository"]: item["revision"] for item in lock["components"]}
     expected = {
         ".github": "6ee83e94efda617c1e0f36d370f87150a4e0c7d5",
-        "SagaSmith-agent": "966fcba0b89b668f55b878e09c623ea3c9d2f698",
+        "SagaSmith-agent": "c274c178c13c6d47b99e593ccd49366bb03a1593",
         "sagasmith-core": "eef98fcfcaa96d08c069708b33ee7717ba1625c3",
         "sagasmith-dnd": "587f66e0673b686a7d47d1ee266d8404ef221741",
         "sagasmith-coc": "515f6a7e3ba3c2a41fff7de2624ee19e4deb6190",
