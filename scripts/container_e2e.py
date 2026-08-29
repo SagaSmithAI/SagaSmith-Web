@@ -775,11 +775,12 @@ def run(base_url: str) -> None:
         and receipt.get("requester_principal") == f"user:{owner_user['id']}"
         and receipt.get("acting_host_principal") == f"user:{owner_user['id']}"
         and receipt.get("authorized_audience") == "sagasmith-narrative-mcp"
-        and receipt.get("allowed_operations") == ["actor_query"]
+        and receipt.get("allowed_operations")
+        == ["actor_query", "campaign_query", "narrative_query", "skill_query"]
         and receipt.get("campaign_id") == narrative_campaign_id
         and narrative_conversation["id"] in receipt.get("conversation_principal", "")
         and str(receipt.get("tool", "")).endswith("actor_query")
-        and receipt.get("revision") is not None
+        and receipt.get("base_revision") == 1
         for receipt in narrative_receipts
     ):
         raise RuntimeError(f"Narrative auth-context receipt was not retained: {narrative_receipts}")
