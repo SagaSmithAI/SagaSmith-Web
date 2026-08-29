@@ -138,21 +138,30 @@ def test_release_lock_matches_final_coordinated_component_set() -> None:
     revisions = {item["repository"]: item["revision"] for item in lock["components"]}
     expected = {
         ".github": "6ee83e94efda617c1e0f36d370f87150a4e0c7d5",
-        "SagaSmith-agent": "a5dee9bcc429f99beaf4539ad725aa4b95935e5f",
-        "sagasmith-core": "eef98fcfcaa96d08c069708b33ee7717ba1625c3",
-        "sagasmith-dnd": "587f66e0673b686a7d47d1ee266d8404ef221741",
-        "sagasmith-coc": "515f6a7e3ba3c2a41fff7de2624ee19e4deb6190",
-        "sagasmith-narrative": "3f3694401dace148684f7fab9adda5b12679dfa0",
+        "SagaSmith-agent": "c0731c44775a045bb106000391ef6240f7b4d2a3",
+        "sagasmith-core": "612bfe7e5290eb5b23f2811baa83b8a28293b36e",
+        "sagasmith-dnd": "ba602ea103de67d19ffbfba2f69f3802a9e34dd3",
+        "sagasmith-coc": "eebab0986299b0cd9ce420c3521e4688356e9746",
+        "sagasmith-narrative": "2e2dfe8a18b53ad4c090a7382c25c32a354c7621",
         "SagaSmithAI.github.io": "a737915ddd8fa3a479b584f0609b19cf9b880b8e",
     }
     for repository, revision in expected.items():
         assert revisions[repository] == revision
+    assert lock["lock"] == "2026.8.30-mcp-modern-final"
     assert lock["shared"] == {"sagasmith-core": expected["sagasmith-core"]}
     assert lock["profiles"] == {
         "dnd": {"sagasmith-dnd": expected["sagasmith-dnd"]},
         "coc": {"sagasmith-coc": expected["sagasmith-coc"]},
         "narrative": {"sagasmith-narrative": expected["sagasmith-narrative"]},
     }
+    web_component = next(
+        item for item in lock["components"] if item["repository"] == "SagaSmith-Web"
+    )
+    assert web_component["base_revision"] == "4d8dbd4040eab041dfe51577fee306419b768430"
+    agent_contract = json.loads(
+        (ROOT / "tests/fixtures/agent-modern-worker-contract.json").read_text(encoding="utf-8")
+    )
+    assert agent_contract["source"] == f"SagaSmith-agent@{expected['SagaSmith-agent']}"
 
 
 def test_hosted_agent_uses_owned_modern_request_scoped_tool_contract() -> None:
