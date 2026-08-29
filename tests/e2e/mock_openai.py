@@ -36,14 +36,16 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         request = json.loads(self.rfile.read(length) or b"{}")
         messages = request.get("messages") or []
-        context = next(
-            (
-                str(message.get("content", ""))
-                for message in messages
-                if isinstance(message, dict)
-                and "[SagaSmith Service authenticated context]" in str(message.get("content", ""))
-            ),
-            "",
+        context_indexes = [
+            index
+            for index, message in enumerate(messages)
+            if isinstance(message, dict)
+            and "[SagaSmith Service authenticated context]" in str(message.get("content", ""))
+        ]
+        context_index = context_indexes[-1] if context_indexes else 0
+        context_message = messages[context_index] if context_indexes else {}
+        context = (
+            str(context_message.get("content", "")) if isinstance(context_message, dict) else ""
         )
         authenticated = bool(context)
         campaign_match = re.search(r"^campaign_id=(.+)$", context, re.MULTILINE)
@@ -193,7 +195,7 @@ class Handler(BaseHTTPRequestHandler):
         }
         tool_messages = [
             message
-            for message in messages
+            for message in messages[context_index:]
             if isinstance(message, dict) and message.get("role") == "tool"
         ]
         selected_tools = tool_names
