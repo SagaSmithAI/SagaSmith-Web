@@ -811,7 +811,7 @@ def run(base_url: str) -> None:
         and receipt.get("resource_owner_principal") == f"user:{owner_user['id']}"
         and receipt.get("acting_host_principal") == f"agent:{identity['id']}"
         and receipt.get("authorized_audience") == "sagasmith-dnd-mcp"
-        and receipt.get("allowed_operations") == ["character_query"]
+        and receipt.get("allowed_operations") == operations
         and receipt.get("campaign_id") == campaign_id
         and receipt.get("room_turn_id") == (room_turn.get("job") or {}).get("id")
         and str(receipt.get("tool", "")).endswith("character_query")
