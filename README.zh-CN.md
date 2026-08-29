@@ -168,7 +168,8 @@ phase/revision，再进行短暂 compare-and-set；stale revision 返回可恢�
 
 `SAGASMITH_ROOM_TURN_WORKER_CONCURRENCY` 限制进程内总 worker 数，
 `SAGASMITH_ROOM_TURN_PER_ROOM_CONCURRENCY`（默认 `4`）单独限制同一房间的昂贵 turn。已领取
-作业在等待 room scheduler slot 时仍会 heartbeat，但不持有数据库事务或短暂 settlement lock。
+作业的短暂 durable claim 事务会锁定 room row 并计算有效 lease，随后在 Agent/MCP 工作开始前
+释放锁，因此多 Web replica 也遵守同一上限，且不会跨 LLM turn 持有数据库或 settlement lock。
 需要同一房间严格串行时可设为 `1`，不会阻塞其他房间。
 
 reservation TTL 必须大于 Agent completion timeout；默认分别为 1200 秒与 900 秒。作业 heartbeat

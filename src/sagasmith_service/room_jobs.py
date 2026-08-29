@@ -11,9 +11,9 @@ from datetime import timedelta
 
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, aliased, sessionmaker
 
-from sagasmith_service.models import CampaignMessage, RoomTurnJob, now_utc
+from sagasmith_service.models import CampaignMessage, CampaignRoom, RoomTurnJob, now_utc
 from sagasmith_service.observability import (
     ROOM_TURN_JOB_QUEUE,
     ROOM_TURN_JOB_RECOVERIES,
@@ -79,7 +79,6 @@ class RoomTurnJobProcessor:
         self._workers: list[asyncio.Task[None]] = []
         self._waiters: dict[str, set[asyncio.Event]] = {}
         self._settlement_locks: dict[str, asyncio.Lock] = {}
-        self._room_execution_slots: dict[str, asyncio.Semaphore] = {}
         self._claim_lock = asyncio.Lock()
         self._transaction_lock = asyncio.Lock()
 
@@ -179,22 +178,62 @@ class RoomTurnJobProcessor:
     def claim(self) -> str | None:
         now = now_utc()
         with self.factory() as session:
+            active_job = aliased(RoomTurnJob)
+            active_in_room = (
+                select(func.count(active_job.id))
+                .where(
+                    active_job.room_id == RoomTurnJob.room_id,
+                    active_job.status.in_(("running", "waiting")),
+                    active_job.lease_owner.is_not(None),
+                    active_job.lease_expires_at >= now,
+                )
+                .correlate(RoomTurnJob)
+                .scalar_subquery()
+            )
             candidate = session.execute(
-                select(RoomTurnJob.id, RoomTurnJob.status)
+                select(RoomTurnJob.id, RoomTurnJob.room_id, RoomTurnJob.status)
                 .where(
                     RoomTurnJob.status.in_(("queued", "waiting")),
                     RoomTurnJob.available_at <= now,
                     RoomTurnJob.lease_owner.is_(None),
+                    active_in_room < self.per_room_concurrency,
                 )
                 .order_by(RoomTurnJob.available_at, RoomTurnJob.created_at)
                 .limit(1)
+                .with_for_update(skip_locked=True, of=RoomTurnJob)
             ).first()
             if candidate is None:
                 return None
-            job_id, prior_status = candidate
+            job_id, room_id, prior_status = candidate
+            # This short room-row lock makes the configured limit authoritative
+            # across processors and Web replicas. It is released before any
+            # Agent or MCP I/O begins.
+            room_exists = session.scalar(
+                select(CampaignRoom.id)
+                .where(CampaignRoom.id == room_id)
+                .with_for_update()
+            )
+            if room_exists is None:
+                session.rollback()
+                return None
+            leased_count = session.scalar(
+                select(func.count(RoomTurnJob.id)).where(
+                    RoomTurnJob.room_id == room_id,
+                    RoomTurnJob.status.in_(("running", "waiting")),
+                    RoomTurnJob.lease_owner.is_not(None),
+                    RoomTurnJob.lease_expires_at >= now,
+                )
+            )
+            if int(leased_count or 0) >= self.per_room_concurrency:
+                session.rollback()
+                return None
             claimed = session.execute(
                 update(RoomTurnJob)
-                .where(RoomTurnJob.id == job_id, RoomTurnJob.status == prior_status)
+                .where(
+                    RoomTurnJob.id == job_id,
+                    RoomTurnJob.status == prior_status,
+                    RoomTurnJob.lease_owner.is_(None),
+                )
                 .values(
                     status="running",
                     attempt=RoomTurnJob.attempt + 1,
@@ -309,11 +348,7 @@ class RoomTurnJobProcessor:
         heartbeat = asyncio.create_task(self._heartbeat_loop(job_id))
         started = time.perf_counter()
         outcome = "success"
-        execution_slot: asyncio.Semaphore | None = None
-        room_id: str | None = None
         try:
-            room_id = await self._database_retry(self._room_id, job_id)
-            execution_slot = await self._acquire_execution_slot(room_id)
             await self.executor(job_id)
         except asyncio.CancelledError:
             outcome = "cancelled"
@@ -330,8 +365,6 @@ class RoomTurnJobProcessor:
                 RoomJobError("room_turn_internal", str(exc), True, "internal"),
             )
         finally:
-            if execution_slot is not None and room_id is not None:
-                self._release_execution_slot(room_id, execution_slot)
             heartbeat.cancel()
             with suppress(asyncio.CancelledError):
                 await heartbeat
@@ -339,13 +372,6 @@ class RoomTurnJobProcessor:
                 time.perf_counter() - started
             )
             self._signal(job_id)
-
-    def _room_id(self, job_id: str) -> str:
-        with self.factory() as session:
-            room_id = session.scalar(select(RoomTurnJob.room_id).where(RoomTurnJob.id == job_id))
-        if room_id is None:
-            raise RoomJobError("job_not_found", "Room turn job no longer exists", False, "state")
-        return str(room_id)
 
     async def _worker_loop(self) -> None:
         while not self._stop.is_set():
@@ -422,29 +448,6 @@ class RoomTurnJobProcessor:
             yield
         if not lock.locked() and not getattr(lock, "_waiters", None):
             self._settlement_locks.pop(room_id, None)
-
-    async def _acquire_execution_slot(self, room_id: str) -> asyncio.Semaphore:
-        """Apply the configured per-room scheduler without holding a database lock.
-
-        The job heartbeat starts before a claimed job waits for this slot, so a
-        busy room cannot make a valid lease look abandoned. Independent rooms
-        still consume the global worker pool concurrently.
-        """
-
-        slot = self._room_execution_slots.setdefault(
-            room_id,
-            asyncio.Semaphore(self.per_room_concurrency),
-        )
-        await slot.acquire()
-        return slot
-
-    def _release_execution_slot(self, room_id: str, slot: asyncio.Semaphore) -> None:
-        slot.release()
-        if (
-            getattr(slot, "_value", 0) == self.per_room_concurrency
-            and not getattr(slot, "_waiters", None)
-        ):
-            self._room_execution_slots.pop(room_id, None)
 
     @asynccontextmanager
     async def transaction_lock(self) -> AsyncIterator[None]:

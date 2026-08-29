@@ -180,9 +180,10 @@ independent rooms, reads, and compatible actions can continue concurrently.
 
 `SAGASMITH_ROOM_TURN_WORKER_CONCURRENCY` bounds the process-wide worker pool, while
 `SAGASMITH_ROOM_TURN_PER_ROOM_CONCURRENCY` (default `4`) independently limits expensive turns for
-one room. A claimed job heartbeats while waiting for that scheduler slot; waiting never holds a
-database transaction or the short settlement lock. Set the per-room value to `1` when strict
-single-turn execution is preferred, without serializing unrelated rooms.
+one room. The durable claim transaction locks the room row, counts valid leases, and releases the
+lock before Agent/MCP work, so the limit holds across Web replicas without a long database or
+settlement lock. Set the per-room value to `1` when strict single-turn execution is preferred,
+without serializing unrelated rooms.
 
 The reservation TTL must exceed the Agent completion timeout. Defaults are 1,200 and 900 seconds,
 respectively. Job heartbeats renew the reservation; an expired timestamp alone cannot free quota

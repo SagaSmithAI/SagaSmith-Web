@@ -32,9 +32,10 @@ authority on every call. Only the final ordered message/outbox write is serializ
 per-room settlement lock, so different rooms and independent reads remain concurrent.
 
 The process-wide pool is configured by `SAGASMITH_ROOM_TURN_WORKER_CONCURRENCY`; the additional
-`SAGASMITH_ROOM_TURN_PER_ROOM_CONCURRENCY` scheduler defaults to four active turns per room. A job
-starts its lease heartbeat before it waits for a room slot. The wait therefore cannot look like an
-abandoned lease and does not retain either the database transaction lock or settlement lock.
+`SAGASMITH_ROOM_TURN_PER_ROOM_CONCURRENCY` scheduler defaults to four active turns per room. Claiming
+a job takes a short database row lock for its room and counts unexpired running leases, so separate
+processors and Web replicas share one durable limit. The transaction commits before Agent/MCP I/O;
+there is no database or settlement lock spanning a turn.
 
 Successful authoritative changes emit a rebuildable `state.changed` receipt and transactional
 outbox row containing `authority_revision`, sorted `changed_scopes`, `entity_ids`, and `audience`.

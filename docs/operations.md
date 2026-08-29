@@ -134,9 +134,10 @@ long D&D tool returns an `io.modelcontextprotocol/tasks` claim; ordinary tools r
   `sagasmith_room_turn_job_queue`. Labels are bounded state/phase/reason classes; job, room,
   campaign, user, prompt, and tool arguments are never metric labels.
 - Tune `SAGASMITH_ROOM_TURN_WORKER_CONCURRENCY` for the replica-wide pool and
-  `SAGASMITH_ROOM_TURN_PER_ROOM_CONCURRENCY` for one room (default `4`, range `1..64`). Jobs
-  heartbeat while queued behind a room slot. Reducing the per-room value does not require a
-  migration, but drain or restart replicas so all workers use the same limit. Persistent 503s with
+  `SAGASMITH_ROOM_TURN_PER_ROOM_CONCURRENCY` for one room (default `4`, range `1..64`). The claim
+  transaction enforces the limit across replicas using the shared database; it never spans Agent/MCP
+  I/O. Reducing the per-room value does not require a migration, but drain or restart replicas so all
+  workers use the same limit. Persistent 503s with
   `retryable=true` indicate Agent/storage capacity or timeout pressure; 422s are terminal
   model/tool-output contract failures and should not be blindly retried.
 - Selective database diagnosis uses `sagasmith_event_loop_lag_seconds`,

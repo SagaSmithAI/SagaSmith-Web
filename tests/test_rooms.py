@@ -34,6 +34,7 @@ from sagasmith_service.models import (
     now_utc,
 )
 from sagasmith_service.quota import balance
+from sagasmith_service.room_jobs import RoomTurnJobProcessor
 from sagasmith_service.security import SESSION_COOKIE
 
 PASSWORD = "correct horse battery staple"
@@ -378,6 +379,76 @@ def test_configured_per_room_scheduler_limits_one_room_without_holding_database(
 
     assert [response.status_code for response in responses] == [200, 200]
     assert maximum == 1
+
+
+def test_per_room_scheduler_limit_is_shared_across_processors(
+    client: TestClient,
+) -> None:
+    register(client, "room-owner@example.com", "DM")
+    create_campaign(client)
+    keys = ("shared-scheduler-one", "shared-scheduler-two")
+    for key in keys:
+        response = client.post(
+            "/api/campaigns/campaign-1/room/messages",
+            headers={"Idempotency-Key": key},
+            json={"content": key, "mode": "action"},
+        )
+        assert response.status_code == 200, response.text
+
+    original = client.app.state.room_turn_jobs
+    client.portal.call(original.close)
+    with original.factory() as session:
+        jobs = session.scalars(
+            select(RoomTurnJob).where(RoomTurnJob.idempotency_key.in_(keys))
+        ).all()
+        assert len(jobs) == 2
+        for job in jobs:
+            job.status = "queued"
+            job.attempt = 0
+            job.available_at = now_utc()
+            job.lease_owner = None
+            job.lease_expires_at = None
+            job.heartbeat_at = None
+            job.completed_at = None
+        session.commit()
+
+    async def unused_executor(_job_id: str) -> None:
+        raise AssertionError("claim tests must not execute a turn")
+
+    def independent_processor(worker_id: str) -> RoomTurnJobProcessor:
+        return RoomTurnJobProcessor(
+            original.factory,
+            unused_executor,
+            concurrency=1,
+            poll_seconds=0.01,
+            lease_seconds=30,
+            per_room_concurrency=1,
+            reservation_ttl_seconds=60,
+            retry_seconds=1,
+            worker_id=worker_id,
+        )
+
+    first = independent_processor("replica-one")
+    second = independent_processor("replica-two")
+    first_job_id = first.claim()
+
+    assert first_job_id is not None
+    assert second.claim() is None
+
+    with original.factory() as session:
+        completed = session.get(RoomTurnJob, first_job_id)
+        assert completed is not None
+        completed.status = "succeeded"
+        completed.lease_owner = None
+        completed.lease_expires_at = None
+        completed.heartbeat_at = None
+        completed.completed_at = now_utc()
+        session.commit()
+
+    second_job_id = second.claim()
+
+    assert second_job_id is not None
+    assert second_job_id != first_job_id
 
 
 def test_room_turn_persists_trusted_authority_trace_and_stable_upstream_key(

@@ -134,9 +134,9 @@ campaign room -> principal-scoped conversation lease -> dedicated Agent worker
 `RoomTurnJob` is a Web Host orchestration record, never an MCP Task. Its durable states are
 `queued`, `running`, `waiting`, `succeeded`, `failed`, and `cancelled`; leases, heartbeats,
 bounded retries, saved standard Agent/MCP results and stable idempotency keys recover safely after
-a worker or Web restart. The global worker pool and configurable per-room semaphore bound
-concurrency without retaining a database lock across Agent/MCP I/O; only final publication uses a
-short room settlement lock. MCP Tasks are negotiated only for one genuinely long-running domain
+a worker or Web restart. The global worker pool and configurable database-backed per-room claim
+bound concurrency across replicas without retaining a database lock across Agent/MCP I/O; only final
+publication uses a short room settlement lock. MCP Tasks are negotiated only for one genuinely long-running domain
 tool.
 
 Room messages and room events use monotonic per-room sequence numbers in PostgreSQL. The browser
