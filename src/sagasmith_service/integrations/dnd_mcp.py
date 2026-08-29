@@ -10,7 +10,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol, TypeVar
 
-import httpx
+import httpx2
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
@@ -296,7 +296,7 @@ class StreamableHttpDndRuntime:
         *,
         bearer_token: str | None = None,
         auth_context_secret: str = "",
-        http_client: httpx.AsyncClient | None = None,
+        http_client: httpx2.AsyncClient | None = None,
     ) -> None:
         self.url = url
         self.bearer_token = bearer_token
@@ -310,9 +310,9 @@ class StreamableHttpDndRuntime:
         self.http_client = (
             http_client
             if http_client is not None
-            else httpx.AsyncClient(
+            else httpx2.AsyncClient(
                 headers=headers,
-                timeout=httpx.Timeout(30, connect=10),
+                timeout=httpx2.Timeout(30, connect=10),
             )
         )
         if http_client is not None and headers:
@@ -341,7 +341,7 @@ class StreamableHttpDndRuntime:
                     operation_class="probe",
                     transport="streamable_http",
                 ):
-                    read, write, _ = await stack.enter_async_context(
+                    read, write = await stack.enter_async_context(
                         streamable_http_client(self.url, http_client=self.http_client)
                     )
                 session = await stack.enter_async_context(ClientSession(read, write))
@@ -385,7 +385,7 @@ class StreamableHttpDndRuntime:
                     operation_class=operation_class,
                     transport="streamable_http",
                 ):
-                    read, write, _ = await stack.enter_async_context(
+                    read, write = await stack.enter_async_context(
                         streamable_http_client(self.url, http_client=self.http_client)
                     )
                 session = await stack.enter_async_context(ClientSession(read, write))
