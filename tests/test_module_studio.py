@@ -114,10 +114,27 @@ def test_module_studio_worker_pipeline(
         '"acts":["arrival","vault","choice"],"scenes":["village","observatory",'
         '"dragon"],"endings":["repair","destroy"],"risks":[]},"summary":"Playable"}'
     )
-    enqueue(client, project["id"], "outline", "module-outline-0002")
+    outline_run = enqueue(client, project["id"], "outline", "module-outline-0002")
     assert asyncio.run(runner.process_one())
     current = client.get(f"/api/modules/{project['id']}").json()
     assert current["status"] == "outline_ready"
+    outline_call = agent_runtime.calls[0]
+    authority = outline_call["context"]["authority_context"]
+    assert outline_call["idempotency_key"] == f"module-agent:{outline_run['id']}"
+    assert authority["schema"] == "sagasmith.auth-context/v2"
+    assert authority["target_service"] == "sagasmith-dnd-mcp"
+    assert authority["authorized_audience"] == "sagasmith-dnd-mcp"
+    assert authority["workload_identity"] == "workload:module-worker"
+    assert authority["requester_principal"] == authority["acting_host_principal"]
+    assert authority["requester_principal"] != authority["workload_identity"]
+    assert authority["resource_owner_principal"] == authority["requester_principal"]
+    assert authority["allowed_operations"] == ["module_query"]
+    assert authority["room_turn_id"] == outline_run["id"]
+    assert authority["base_revision"] == dnd_runtime.campaign_revision
+    assert authority["idempotency_key"] == outline_call["idempotency_key"]
+    assert authority["conversation_principal"] == f"module-project:{project['id']}"
+    assert project["brief"] not in str(authority)
+    assert any(name == "campaign_get" for name, _ in dnd_runtime.calls)
     approved = client.post(
         f"/api/modules/{project['id']}/outline-decision",
         json={"approved": True, "feedback": "Proceed"},
