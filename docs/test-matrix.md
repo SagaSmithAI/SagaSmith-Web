@@ -20,6 +20,7 @@
 | Module delivery | immutable compiled artifact; direct and published cross-campaign import; optional activation; version collision; restart/resume; source publication boundary |
 | quota | no grant, concurrent reservations, lease renewal, active-job expiry protection, abandoned expiry, settle/release, provider retry, exact usage ledger, admin grant audit |
 | durable room turns | same/different idempotency keys, stale revision, queued cancellation, expired worker lease/startup recovery, Agent result saved before projection retry, Web restart, timeout polling, terminal result references |
+| Hosted workspaces | registered owner marker; crash-left active recovery; restart continuity; TTL and LRU cleanup; count/byte refusal; terminal cleanup; unknown, malformed, outside, symlink and mount preservation |
 | MCP media boundary | standard text/image/audio/resource/embedded-resource result retention, HostMediaEnvelope projection, private artifact authorization, checksum and size rejection |
 | recovery | fresh migration; encrypted destination; checksum validation; isolated full restore; restored object re-import through MCP; reconciliation |
 | security | principal spoof attempt, IDOR, CSRF, rate limits, malicious archive, path traversal, secret scan |
