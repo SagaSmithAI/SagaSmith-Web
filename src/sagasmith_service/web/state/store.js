@@ -5,6 +5,7 @@ export const state = {
   membership: null,
   members: [],
   room: null,
+  roomGeneration: 0,
   roomMessages: new Map(),
   roomEvents: null,
   roomEventCursor: 0,

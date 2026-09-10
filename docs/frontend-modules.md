@@ -12,6 +12,7 @@ they cannot be confused with JSON endpoints under `/api`.
 |---|---|
 | `web/api/client.js` | Same-origin JSON/FormData requests and consistent API errors |
 | `web/auth/controller.js` | Session bootstrap, login, registration, logout, and auth visibility |
+| `web/account/controller.js` | Profile, password, sessions, and account lifecycle |
 | `web/campaign/controller.js` | Campaign list, campaign creation, and invite acceptance |
 | `web/components/dom.js` | Small DOM element and selector helpers |
 | `web/components/toast.js` | Transient status messages |
@@ -65,6 +66,40 @@ documented runtime-cache path. The web-asset regression test walks the static im
 that FastAPI serves every module as JavaScript, verifies that each imported module is precached,
 and rejects circular imports. CI syntax-checks every packaged browser JavaScript file rather than
 only the entrypoint.
+
+## Loading and room lifetime
+
+Room opens and exits advance `state.roomGeneration`. Read responses and SSE callbacks check
+that generation before changing room state; event callbacks also check the actual active source.
+This covers leaving and reopening the same campaign while an earlier request is still pending.
+Membership and the initial snapshot load concurrently. Character-card reads coalesce by room,
+actor, and revision; temporary network/server failures remain retryable.
+
+Snapshots build the complete message map before evaluating suggestions, then insert one ordered
+document fragment. A 200-message Chromium regression measured one `scrollHeight` read during
+hydration, compared with 201 in the previous implementation. This is a layout-read count, not a
+production latency guarantee. Live updates preserve sequence order and the reader's follow/unread
+state. No additional history limit is introduced.
+
+Navigation reports loading and retryable failures without discarding forms. Auth, campaign
+creation, and Pack uploads use a single-submission guard that preserves form values. Campaign
+cards support Enter and Space, and reduced-motion and mobile feedback styles apply throughout
+the shell. Background tabs pause the periodic panel poll and refresh on return; SSE stays active.
+Unsent room drafts survive navigation within the current browser session. Room layouts are
+checked at eight viewport widths (390–1440 pixels) in table, player, and director modes, and DM
+management controls appear under the members tab.
+
+The versioned service worker serves only its explicit public shell from cache, so a fully warm
+shell needs no asset fetches. Installation reloads that complete shell, activation removes only
+older SagaSmith shell caches, and API, unknown, query-string, and cross-origin URLs bypass it.
+An installed worker follows the browser's normal waiting lifecycle until existing clients close;
+each release that changes shell files must bump the cache version. Private API data is never
+available offline through this cache.
+
+Behavioral coverage lives in `tests/browser/test_room_resilience.py`, alongside account and room
+browser smoke tests, and `tests/web/service-worker.test.mjs` / `api-client.test.mjs`. Run the
+browser tests with `SAGASMITH_BROWSER_TESTS=1`; they use a temporary local database and explicit
+runtime fixtures, not a production provider account.
 
 ## Next reviewable extractions
 

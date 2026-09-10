@@ -1,4 +1,4 @@
-const CACHE="sagasmith-shell-v12";
+const CACHE="sagasmith-shell-v13";
 const SHELL=[
   "/",
   "/styles.css",
@@ -32,6 +32,26 @@ const SHELL=[
   "/legal/privacy.html",
   "/legal/terms.html",
 ];
-self.addEventListener("install",event=>event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(SHELL))));
-self.addEventListener("activate",event=>event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(key=>key!==CACHE).map(key=>caches.delete(key))))));
-self.addEventListener("fetch",event=>{const url=new URL(event.request.url);if(event.request.method!=="GET"||url.origin!==self.location.origin||url.pathname.startsWith("/api/"))return;event.respondWith(fetch(event.request).then(response=>{if(response.ok){const copy=response.clone();caches.open(CACHE).then(cache=>cache.put(event.request,copy))}return response}).catch(()=>caches.match(event.request).then(cached=>cached||(event.request.mode==="navigate"?caches.match("/"):Response.error()))))});
+// Cache only the public, versioned application shell. Private API responses never enter it.
+self.addEventListener("install", (event) => {
+  event.waitUntil(caches.open(CACHE).then((cache) =>
+    cache.addAll(SHELL.map((path) => new Request(path, { cache: "reload" }))),
+  ));
+});
+self.addEventListener("activate", (event) => {
+  event.waitUntil(caches.keys().then((keys) => Promise.all(
+    keys.filter((key) => key.startsWith("sagasmith-shell-") && key !== CACHE)
+      .map((key) => caches.delete(key)),
+  )));
+});
+self.addEventListener("fetch", (event) => {
+  const url = new URL(event.request.url);
+  if (event.request.method !== "GET" || url.origin !== self.location.origin ||
+      url.pathname.startsWith("/api/") || url.search || !SHELL.includes(url.pathname)) return;
+  event.respondWith(caches.open(CACHE).then(async (cache) => {
+    const cached = await cache.match(event.request);
+    if (cached) return cached;
+    // A missing entry can be fetched, but must not mix a newer release into this shell.
+    return fetch(event.request);
+  }));
+});
