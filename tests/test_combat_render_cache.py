@@ -98,3 +98,25 @@ def test_combat_render_cache_evicts_old_images_to_stay_inside_byte_budget() -> N
         await cache.aclose()
 
     asyncio.run(exercise())
+
+
+def test_oversized_render_is_returned_without_evicting_cacheable_images() -> None:
+    async def exercise() -> None:
+        cache = CombatRenderCache(max_bytes=5)
+        calls: list[bytes] = []
+
+        async def render(value: bytes) -> DndCombatRender:
+            calls.append(value)
+            return _render(value)
+
+        small = CombatRenderKey("small", 1)
+        large = CombatRenderKey("large", 1)
+        cached = await cache.get_or_render(small, lambda: render(b"1234"))
+        oversized = await cache.get_or_render(large, lambda: render(b"123456"))
+        assert oversized.render.content == b"123456"
+        assert await cache.get_or_render(small, lambda: render(b"1234")) is cached
+        await cache.get_or_render(large, lambda: render(b"123456"))
+        assert calls == [b"1234", b"123456", b"123456"]
+        await cache.aclose()
+
+    asyncio.run(exercise())
