@@ -14,7 +14,7 @@ def test_browser_entry_loads_complete_precached_module_graph(client: TestClient)
 
     service_worker = client.get("/service-worker.js")
     assert service_worker.status_code == 200
-    assert 'const CACHE="sagasmith-shell-v12"' in service_worker.text
+    assert 'const CACHE="sagasmith-shell-v13"' in service_worker.text
 
     expected_modules = {
         "/assets/account/controller.js",

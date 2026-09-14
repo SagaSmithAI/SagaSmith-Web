@@ -1,5 +1,5 @@
 import { api } from "/assets/api/client.js";
-import { $, $$, button, text } from "/assets/components/dom.js";
+import { $, $$, button, showLoadState, text } from "/assets/components/dom.js";
 import { toast } from "/assets/components/toast.js";
 import {
   actorHp,
@@ -53,6 +53,8 @@ const skillLabels = {
 };
 
 export function createCharacterController({ sendPanelAction, drawCombatGrid }) {
+  const pendingCards = new Map();
+
   function renderActionContext() {
     const root = $("#action-context");
     if (!root) return;
@@ -103,20 +105,35 @@ export function createCharacterController({ sendPanelAction, drawCombatGrid }) {
   async function loadCharacterCard(id, { quiet = false, force = false } = {}) {
     if (!id || (!force && state.characterCards.has(id))) return cardRecord(id);
     if (!canInspect(id) || state.characterDenied.has(id)) return null;
-    try {
-      const value = await api(
-        `/api/campaigns/${state.campaign.id}/room/characters/${encodeURIComponent(id)}`,
-      );
-      state.characterCards.set(id, value);
-      return value;
-    } catch (error) {
-      state.characterDenied.add(id);
-      if (!quiet) toast(`角色卡不可用：${error.message}`);
-      return null;
-    }
+    const generation = state.roomGeneration;
+    const revision = characters().find((actor) => actorId(actor) === id)?.revision;
+    const key = `${generation}:${id}:${revision}`;
+    if (pendingCards.has(key)) return pendingCards.get(key);
+    const current = () => generation === state.roomGeneration &&
+      revision === characters().find((actor) => actorId(actor) === id)?.revision;
+    const request = (async () => {
+      try {
+        const value = await api(
+          `/api/campaigns/${state.campaign.id}/room/characters/${encodeURIComponent(id)}`,
+        );
+        if (!current()) return null;
+        state.characterCards.set(id, value);
+        return value;
+      } catch (error) {
+        if (!current()) return null;
+        if ([403, 404].includes(error.status)) state.characterDenied.add(id);
+        if (!quiet) toast(`角色卡不可用：${error.message}`);
+        return null;
+      } finally {
+        pendingCards.delete(key);
+      }
+    })();
+    pendingCards.set(key, request);
+    return request;
   }
 
   async function refreshCharacterSidebar() {
+    const generation = state.roomGeneration;
     const visible = characters();
     const inspectable = visible.filter((actor) => canInspect(actorId(actor)));
     if (
@@ -149,7 +166,7 @@ export function createCharacterController({ sendPanelAction, drawCombatGrid }) {
         force: revisionChanged,
       });
     }
-    renderCharacterSidebar();
+    if (generation === state.roomGeneration) renderCharacterSidebar();
   }
 
   function renderCharacterSidebar() {
@@ -225,13 +242,12 @@ export function createCharacterController({ sendPanelAction, drawCombatGrid }) {
     const root = $("#character-page-character");
     root.replaceChildren();
     if (!actor) {
-      root.append(
-        text(
-          "p",
-          canInspect(state.inspectedActorId) ? "正在读取角色卡…" : "你没有可查看的角色卡",
-          "empty-state",
-        ),
-      );
+      const inspectable = canInspect(state.inspectedActorId);
+      showLoadState(root, inspectable ? "角色卡暂不可用，请重试。" : "你没有可查看的角色卡",
+        inspectable ? async () => {
+          state.characterDenied.delete(state.inspectedActorId);
+          await refreshCharacterSidebar();
+        } : undefined);
       return;
     }
     const sheet = actor.sheet || {};

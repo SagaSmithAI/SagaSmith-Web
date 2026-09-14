@@ -24,7 +24,7 @@ export function createRoomTimelineController({
     if (!message || !old) return;
     old.remove();
     state.roomMessages.delete(messageId);
-    renderMessage(message);
+    updateMessage(message);
   }
 
   async function syncJob(
@@ -146,7 +146,7 @@ export function createRoomTimelineController({
     );
   }
 
-  function suggestionCurrent(suggestion) {
+  function suggestionCurrent(suggestion, pendingChoices) {
     const valid = suggestion?.valid_for || {};
     const phase = state.panel?.phase;
     const currentRevision =
@@ -173,7 +173,7 @@ export function createRoomTimelineController({
     }
     if (
       valid.pending_choice_id &&
-      !activePendingChoiceIds().has(String(valid.pending_choice_id))
+      !pendingChoices.has(String(valid.pending_choice_id))
     ) {
       return false;
     }
@@ -311,7 +311,7 @@ export function createRoomTimelineController({
     return body;
   }
 
-  function renderSuggestions(payload) {
+  function renderSuggestions(payload, pendingChoices) {
     const suggestions = Array.isArray(payload?.suggestions) ? payload.suggestions : [];
     if (!suggestions.length) return null;
     const root = text("div", "", "suggestion-row");
@@ -322,7 +322,7 @@ export function createRoomTimelineController({
         () => insertSuggestion(item.text),
         "suggestion-chip",
       );
-      control.disabled = !suggestionCurrent(item);
+      control.disabled = !suggestionCurrent(item, pendingChoices);
       control.title = control.disabled
         ? "战役状态已变化，此建议已失效"
         : "加入输入框，可继续编辑";
@@ -367,6 +367,7 @@ export function createRoomTimelineController({
   }
 
   function refreshSuggestionValidity() {
+    const pendingChoices = activePendingChoiceIds();
     for (const control of $$(".suggestion-chip")) {
       const valid = {
         valid_for: {
@@ -380,7 +381,7 @@ export function createRoomTimelineController({
           pending_choice_id: control.dataset.pendingChoiceId || null,
         },
       };
-      const current = suggestionCurrent(valid);
+      const current = suggestionCurrent(valid, pendingChoices);
       control.disabled = !current;
       control.title = current
         ? "加入输入框，可继续编辑"
@@ -412,11 +413,7 @@ export function createRoomTimelineController({
     return timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 72;
   }
 
-  function renderMessage(message) {
-    if (!message || state.roomMessages.has(message.id)) return;
-    state.roomMessages.set(message.id, message);
-    const timeline = $("#messages");
-    const follow = state.hydratingRoom || timelineNearBottom(timeline);
+  function buildMessage(message, pendingChoices) {
     const bubble = text(
       "article",
       "",
@@ -440,7 +437,7 @@ export function createRoomTimelineController({
     bubble.append(head, body);
     const media = renderMedia(payload);
     if (media) bubble.append(media);
-    const suggestions = renderSuggestions(payload);
+    const suggestions = renderSuggestions(payload, pendingChoices);
     if (suggestions) bubble.append(suggestions);
     if (message.audience !== "public") {
       bubble.append(
@@ -458,44 +455,54 @@ export function createRoomTimelineController({
     if (message.structured_payload?.panel_action) {
       bubble.append(text("small", message.structured_payload.panel_action, "receipt-badge"));
     }
-    const next = [...timeline.children].find(
-      (item) => Number(item.dataset.sequence) > Number(message.sequence),
-    );
-    timeline.insertBefore(bubble, next || null);
-    if (follow) {
-      timeline.scrollTop = timeline.scrollHeight;
-      $("#new-messages").hidden = true;
-    } else {
-      $("#new-messages").hidden = false;
-    }
+    return bubble;
   }
 
   function updateMessage(message, job) {
     if (!message) return;
     if (job) rememberJob(job, message.id);
-    const old = $(`[data-message-id="${message.id}"]`);
-    if (old) {
-      old.remove();
-      state.roomMessages.delete(message.id);
+    const timeline = $("#messages");
+    const follow = timelineNearBottom(timeline);
+    state.roomMessages.set(message.id, message);
+    const bubble = buildMessage(message, activePendingChoiceIds());
+    const old = [...timeline.children].find((item) => item.dataset.messageId === message.id);
+    if (old && Number(old.dataset.sequence) === Number(message.sequence)) {
+      old.replaceWith(bubble);
+    } else {
+      old?.remove();
+      const last = timeline.lastElementChild;
+      const next = last && Number(last.dataset.sequence) > Number(message.sequence)
+        ? [...timeline.children].find((item) => Number(item.dataset.sequence) > Number(message.sequence))
+        : null;
+      timeline.insertBefore(bubble, next);
     }
-    renderMessage(message);
+    if (follow) timeline.scrollTop = timeline.scrollHeight;
+    $("#new-messages").hidden = follow;
     refreshSuggestionValidity();
   }
 
   async function loadRoomSnapshot() {
     roomJobs.clear();
-    const snapshot = await api(
-      `/api/campaigns/${state.campaign.id}/room/snapshot?limit=200`,
-    );
+    const campaignId = state.campaign.id;
+    const generation = state.roomGeneration;
+    const snapshot = await api(`/api/campaigns/${campaignId}/room/snapshot?limit=200`);
+    if (generation !== state.roomGeneration || campaignId !== state.campaign?.id) return;
     state.room = snapshot.room;
     state.roomEventCursor = snapshot.event_cursor;
-    $("#messages").replaceChildren();
-    state.roomMessages = new Map();
+    const messages = [...snapshot.messages].sort((a, b) => Number(a.sequence) - Number(b.sequence));
+    state.roomMessages = new Map(messages.map((item) => [item.id, item]));
+    const pendingChoices = activePendingChoiceIds();
+    const fragment = document.createDocumentFragment();
     state.hydratingRoom = true;
     for (const job of snapshot.jobs || []) rememberJob(job, job.message_id);
-    for (const item of snapshot.messages) renderMessage(item);
-    state.hydratingRoom = false;
-    $("#messages").scrollTop = $("#messages").scrollHeight;
+    try {
+      for (const item of state.roomMessages.values()) fragment.append(buildMessage(item, pendingChoices));
+    } finally {
+      state.hydratingRoom = false;
+    }
+    const timeline = $("#messages");
+    timeline.replaceChildren(fragment);
+    timeline.scrollTop = timeline.scrollHeight;
     $("#new-messages").hidden = true;
   }
 
@@ -515,16 +522,24 @@ export function createRoomTimelineController({
       preparing_narration: "正在准备叙述",
     };
     state.roomEvents = source;
+    const generation = state.roomGeneration;
+    const isCurrent = () => state.roomEvents === source &&
+      generation === state.roomGeneration && state.campaign?.id === campaignId;
+    const listen = (name, handler) => source.addEventListener(name, (event) => {
+      if (isCurrent()) handler(event);
+    });
     source.onopen = () => {
+      if (!isCurrent()) return;
       $("#room-sync").textContent = "实时同步";
       $("#room-sync").classList.add("online");
     };
     source.onerror = () => {
+      if (!isCurrent()) return;
       $("#room-sync").textContent = "正在重连";
       $("#room-sync").classList.remove("online");
     };
     const receive = (event) => {
-      if (state.campaign?.id !== campaignId) return;
+      if (!isCurrent()) return;
       state.roomEventCursor = Math.max(
         state.roomEventCursor,
         Number(event.lastEventId || 0),
@@ -533,9 +548,9 @@ export function createRoomTimelineController({
       if (value.message) updateMessage(value.message, value.job);
       return value;
     };
-    source.addEventListener("message.created", receive);
-    source.addEventListener("message.updated", receive);
-    source.addEventListener("agent.started", (event) => {
+    listen("message.created", receive);
+    listen("message.updated", receive);
+    listen("agent.started", (event) => {
       $("#room-sync").textContent = "Agent 正在处理";
       const value = receive(event) || {};
       if (value.job_id && value.message_id) {
@@ -543,32 +558,32 @@ export function createRoomTimelineController({
         refreshRenderedMessage(value.message_id);
       }
     });
-    source.addEventListener("room.activity", (event) => {
+    listen("room.activity", (event) => {
       const value = receive(event) || {};
       $("#room-sync").textContent =
         value.state === "started"
           ? activityNames[value.code] || "Agent 正在处理"
           : "Agent 正在处理";
     });
-    source.addEventListener("agent.completed", (event) => {
+    listen("agent.completed", (event) => {
       const value = receive(event) || {};
       if (value.job_id) void syncJob(value.job_id, campaignId);
       refreshPanel();
       loadUsage();
     });
-    source.addEventListener("agent.failed", (event) => {
+    listen("agent.failed", (event) => {
       const value = receive(event) || {};
       if (value.job_id) void syncJob(value.job_id, campaignId);
     });
-    source.addEventListener("agent.cancelled", (event) => {
+    listen("agent.cancelled", (event) => {
       const value = receive(event) || {};
       if (value.job_id) void syncJob(value.job_id, campaignId);
     });
-    source.addEventListener("state.changed", (event) => {
+    listen("state.changed", (event) => {
       receive(event);
       refreshPanel().then(refreshSuggestionValidity);
     });
-    source.addEventListener("host.changed", (event) => {
+    listen("host.changed", (event) => {
       receive(event);
       const value = JSON.parse(event.data || "{}");
       if (state.room) {
@@ -576,7 +591,7 @@ export function createRoomTimelineController({
       }
       loadCampaignIdentities();
     });
-    source.addEventListener("access.revoked", () => {
+    listen("access.revoked", () => {
       source.close();
       toast("你的战役访问已被撤销");
       leaveRoom();

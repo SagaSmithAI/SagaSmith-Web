@@ -1,5 +1,5 @@
 import { api } from "/assets/api/client.js";
-import { $, $$ } from "/assets/components/dom.js";
+import { $, $$, withBusy } from "/assets/components/dom.js";
 import { state } from "/assets/state/store.js";
 
 export function createAuthController({ onAuthenticated }) {
@@ -38,22 +38,25 @@ export function createAuthController({ onAuthenticated }) {
       event.preventDefault();
       const form = new FormData(event.target);
       const mode = event.target.dataset.mode || "login";
-      try {
-        const body = { email: form.get("email"), password: form.get("password") };
-        if (mode === "register") {
-          body.display_name = form.get("display_name");
-          body.invite_token = form.get("invite_token") || undefined;
-          body.terms_accepted = form.get("terms_accepted") === "on";
-          body.terms_version = "2026-08-29";
-          body.privacy_version = "2026-08-29";
+      await withBusy(event.target, async () => {
+        $("#auth-error").textContent = "";
+        try {
+          const body = { email: form.get("email"), password: form.get("password") };
+          if (mode === "register") {
+            body.display_name = form.get("display_name");
+            body.invite_token = form.get("invite_token") || undefined;
+            body.terms_accepted = form.get("terms_accepted") === "on";
+            body.terms_version = "2026-08-29";
+            body.privacy_version = "2026-08-29";
+          }
+          state.user = (
+            await api(`/api/auth/${mode}`, { method: "POST", body: JSON.stringify(body) })
+          ).user;
+          showApp();
+        } catch (error) {
+          $("#auth-error").textContent = error.message;
         }
-        state.user = (
-          await api(`/api/auth/${mode}`, { method: "POST", body: JSON.stringify(body) })
-        ).user;
-        showApp();
-      } catch (error) {
-        $("#auth-error").textContent = error.message;
-      }
+      });
     };
 
     $("#logout").onclick = async () => {

@@ -146,8 +146,10 @@ export function createIdentityController() {
   }
 
   async function loadCampaignIdentities() {
+    const generation = state.roomGeneration;
     state.assignments = await api("/api/identities/assignments/mine");
     if (!state.identities.length) state.identities = await api("/api/identities");
+    if (generation !== state.roomGeneration || !state.campaign) return;
     const active = state.assignments.filter(
       (assignment) =>
         assignment.campaign_id === state.campaign.id && assignment.status === "accepted",
@@ -190,7 +192,9 @@ export function createIdentityController() {
   }
 
   async function loadIdentityInviteOptions() {
+    const generation = state.roomGeneration;
     const identities = await api("/api/identities?system_id=dnd5e&identity_kind=dm");
+    if (generation !== state.roomGeneration) return;
     const select = $("#identity-invite-select");
     select.replaceChildren(
       ...identities

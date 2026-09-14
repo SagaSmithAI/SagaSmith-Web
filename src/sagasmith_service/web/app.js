@@ -2,7 +2,7 @@ import { api } from "/assets/api/client.js";
 import { createAccountController } from "/assets/account/controller.js";
 import { createAuthController } from "/assets/auth/controller.js";
 import { createCampaignController } from "/assets/campaign/controller.js";
-import { $, $$, text } from "/assets/components/dom.js";
+import { $, $$, showLoadState, text, withBusy } from "/assets/components/dom.js";
 import { registerServiceWorker } from "/assets/components/pwa.js";
 import { toast } from "/assets/components/toast.js";
 import { createForgeController } from "/assets/forge/controller.js";
@@ -39,23 +39,59 @@ const authController = createAuthController({
   },
 });
 
+const viewLoads = new Map();
+const loaders = {
+  campaigns: campaignController.loadCampaigns,
+  packs: loadPacks,
+  usage: loadUsage,
+  forge: forgeController.loadForge,
+  studio: forgeController.loadStudio,
+  identities: identityController.loadIdentities,
+  modules: moduleStudioController.loadModules,
+  account: accountController.load,
+};
+
+async function loadView(name) {
+  if (viewLoads.has(name)) return viewLoads.get(name);
+  const view = $(`#${name}-view`);
+  view.setAttribute("aria-busy", "true");
+  view.querySelector(":scope > .view-feedback")?.remove();
+  const pending = Promise.resolve().then(() => loaders[name]?.()).catch((error) => {
+    const feedback = text("div", "", "view-feedback");
+    showLoadState(feedback, `加载失败：${error.message}`, () => loadView(name));
+    view.prepend(feedback);
+  }).finally(() => {
+    view.removeAttribute("aria-busy");
+    viewLoads.delete(name);
+  });
+  viewLoads.set(name, pending);
+  return pending;
+}
+
 $$('.nav[data-view]').forEach((button) => {
   button.onclick = () => {
-    $$(".nav").forEach((item) => item.classList.toggle("active", item === button));
+    $$(".nav").forEach((item) => {
+      item.classList.toggle("active", item === button);
+      if (item === button) item.setAttribute("aria-current", "page");
+      else item.removeAttribute("aria-current");
+    });
     $$(".view").forEach((view) => {
       view.hidden = view.id !== `${button.dataset.view}-view`;
     });
-    if (button.dataset.view === "packs") loadPacks();
-    if (button.dataset.view === "usage") loadUsage();
-    if (button.dataset.view === "forge") forgeController.loadForge();
-    if (button.dataset.view === "studio") forgeController.loadStudio();
-    if (button.dataset.view === "identities") identityController.loadIdentities();
-    if (button.dataset.view === "modules") moduleStudioController.loadModules();
-    if (button.dataset.view === "account") accountController.load();
+    loadView(button.dataset.view);
   };
 });
 
+let usageLoad;
 async function loadUsage() {
+  if (usageLoad) return usageLoad;
+  usageLoad = fetchUsage().catch((error) => {
+    showLoadState($("#usage-card"), `用量加载失败：${error.message}`, loadUsage);
+  }).finally(() => { usageLoad = null; });
+  return usageLoad;
+}
+
+async function fetchUsage() {
   if (!state.user) return;
   const [balance, ledger] = await Promise.all([
     api("/api/usage/balance"),
@@ -90,21 +126,24 @@ async function loadUsage() {
 
 $("#pack-form").onsubmit = async (event) => {
   event.preventDefault();
-  const data = new FormData(event.target);
-  try {
-    await api("/api/packs", { method: "POST", body: data });
-    event.target.reset();
-    toast("Pack 已保存到私有库");
-    loadPacks();
-  } catch (error) {
-    toast(error.message);
-  }
+  await withBusy(event.target, async () => {
+    const data = new FormData(event.target);
+    try {
+      await api("/api/packs", { method: "POST", body: data });
+      event.target.reset();
+      toast("Pack 已保存到私有库");
+      await loadPacks();
+    } catch (error) {
+      toast(error.message);
+    }
+  });
 };
 
 async function loadPacks() {
   state.packs = await api("/api/packs");
   const root = $("#pack-list");
   root.replaceChildren();
+  if (!state.packs.length) showLoadState(root, "尚未上传 Pack。上传后会显示在这里。");
   for (const pack of state.packs) {
     const card = text("article", "", "card pack");
     card.append(
@@ -126,8 +165,13 @@ accountController.initialize();
 authController.initialize();
 registerServiceWorker();
 setInterval(() => {
-  if (state.campaign && !$("#campaign-room").hidden) {
+  if (!document.hidden && state.campaign && !$("#campaign-room").hidden) {
     roomController.refreshRuntime().catch(() => {});
   }
 }, 60000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && state.campaign && !$("#campaign-room").hidden) {
+    roomController.refreshRuntime().catch(() => {});
+  }
+});
 authController.boot();

@@ -1,5 +1,5 @@
 import { api } from "/assets/api/client.js";
-import { $, $$, button, text } from "/assets/components/dom.js";
+import { $, $$, button, showLoadState, text } from "/assets/components/dom.js";
 import { toast } from "/assets/components/toast.js";
 import { createCharacterController } from "/assets/room/characters.js";
 import { createCombatGridController } from "/assets/room/combat-grid.js";
@@ -16,6 +16,11 @@ export function createRoomController({
 }) {
   let panelRefreshPromise = null;
   let panelRefreshQueued = false;
+  const roomDrafts = new Map();
+
+  function saveDraft() {
+    if (state.campaign) roomDrafts.set(state.campaign.id, $("#message-form textarea").value);
+  }
 
   function recordPanelRefresh(result) {
     state.panelRefreshMetrics[result] += 1;
@@ -47,7 +52,7 @@ export function createRoomController({
     state.roomMode = mode === "director" && !dm ? "player" : mode;
     const room = $("#campaign-room");
     room.dataset.roomMode = state.roomMode;
-    for (const control of $$('[data-room-mode]')) {
+    for (const control of $$('button[data-room-mode]')) {
       control.hidden = control.dataset.roomMode === "director" && !dm;
       control.classList.toggle("active", control.dataset.roomMode === state.roomMode);
       control.setAttribute("aria-pressed", String(control.dataset.roomMode === state.roomMode));
@@ -59,9 +64,25 @@ export function createRoomController({
   }
 
   async function openCampaign(campaign) {
-    state.roomGeneration += 1;
+    saveDraft();
+    const generation = ++state.roomGeneration;
+    const current = () => generation === state.roomGeneration;
     if (state.roomEvents) state.roomEvents.close();
+    state.roomEvents = null;
     state.campaign = campaign;
+    $("#message-form textarea").value = roomDrafts.get(campaign.id) || "";
+    for (const control of $("#message-form").querySelectorAll("button")) control.disabled = false;
+    state.room = null;
+    state.members = [];
+    state.membership = null;
+    for (const selector of ["#messages", "#members", "#play-panel", "#module-panel", "#join-requests",
+      "#combat-panel", "#campaign-identities",
+      "#character-page-character", "#character-page-spells", "#character-page-inventory", "#character-page-party"]) {
+      $(selector)?.replaceChildren();
+    }
+    $("#dm-tools").hidden = true;
+    $("#campaign-room").setAttribute("aria-busy", "true");
+    showLoadState($("#messages"), "正在同步房间…");
     state.roomMessages = new Map();
     state.panel = null;
     state.roomEventCursor = 0;
@@ -76,6 +97,9 @@ export function createRoomController({
     state.gridZoom = 1;
     state.gridViewportCenter = null;
     state.gridExpanded = false;
+    characterController.renderActionContext();
+    $("#active-host").textContent = "共享战役时间线 · 每次行动按发送者权限结算";
+    $("#room-phase").textContent = "—";
     if (state.encounterDraft?.campaignId !== campaign.id) state.encounterDraft = null;
     state.characterPage =
       localStorage.getItem(`sagasmith:character-page:${campaign.id}`) || "character";
@@ -97,13 +121,29 @@ export function createRoomController({
     $("#room-system").textContent =
       `${systemNames[campaign.system_id] || campaign.system_id.toUpperCase()} · LIVE ROOM`;
     $("#room-sync").textContent = "同步中";
-    state.members = await api(`/api/campaigns/${campaign.id}/members`);
-    state.membership = state.members.find((member) => member.user_id === state.user.id);
-    applyRoomMode(state.roomMode);
-    renderMembers();
-    await timelineController.loadRoomSnapshot();
-    await Promise.all([refreshPanel(), loadCampaignIdentities(), loadDmTools()]);
-    timelineController.connectRoomEvents();
+    try {
+      const [members] = await Promise.all([
+        api(`/api/campaigns/${campaign.id}/members`),
+        timelineController.loadRoomSnapshot(),
+      ]);
+      if (!current()) return;
+      state.members = members;
+      state.membership = members.find((member) => member.user_id === state.user.id);
+      applyRoomMode(state.roomMode);
+      renderMembers();
+      await Promise.all([refreshPanel(), loadCampaignIdentities(), loadDmTools()]);
+      if (!current()) return;
+      timelineController.connectRoomEvents();
+    } catch (error) {
+      if (!current()) return;
+      // Invalidate sibling reads still running after Promise.all rejected.
+      state.roomGeneration += 1;
+      $("#campaign-room").removeAttribute("aria-busy");
+      $("#room-sync").textContent = "同步失败";
+      showLoadState($("#messages"), `房间加载失败：${error.message}`, () => openCampaign(campaign));
+    } finally {
+      if (current()) $("#campaign-room").removeAttribute("aria-busy");
+    }
   }
 
   function renderMembers() {
@@ -164,10 +204,12 @@ export function createRoomController({
   }
 
   async function loadDmTools() {
+    const generation = state.roomGeneration;
     const dm = ["owner", "dm"].includes(state.membership?.role);
-    $("#dm-tools").hidden = !dm;
+    $("#dm-tools").hidden = !dm || $(".panel-tabs .active")?.dataset.panel !== "members";
     if (!dm) return;
     const requests = await api(`/api/campaigns/${state.campaign.id}/join-requests`);
+    if (generation !== state.roomGeneration) return;
     const root = $("#join-requests");
     root.replaceChildren();
     for (const item of requests.filter((request) => request.status === "pending")) {
@@ -259,6 +301,8 @@ export function createRoomController({
   }
 
   function leaveRoom() {
+    saveDraft();
+    state.roomGeneration += 1;
     if (state.roomEvents) state.roomEvents.close();
     combatGridController.setGridExpanded(false);
     state.roomEvents = null;
@@ -272,6 +316,7 @@ export function createRoomController({
   }
 
   async function sendPanelAction(action, payload = {}) {
+    const generation = state.roomGeneration;
     try {
       const result = await api(`/api/campaigns/${state.campaign.id}/room/panel/actions`, {
         method: "POST",
@@ -282,6 +327,7 @@ export function createRoomController({
           base_revision: state.panel?.revision ?? state.campaign?.mcp_revision ?? null,
         }),
       });
+      if (generation !== state.roomGeneration) return result;
       if (result.message) timelineController.updateMessage(result.message);
       if (result.agent_message) timelineController.updateMessage(result.agent_message);
       await refreshPanel();
@@ -296,22 +342,31 @@ export function createRoomController({
   async function fetchPanelOnce() {
     const campaignId = state.campaign?.id;
     if (!campaignId) return;
+    const generation = state.roomGeneration;
     const knownRevision = state.panel?.revision;
-    const query = Number.isInteger(Number(knownRevision))
+    const query = knownRevision != null && Number.isInteger(Number(knownRevision))
       ? `?known_revision=${encodeURIComponent(knownRevision)}`
       : "";
-    const panel = await api(`/api/campaigns/${campaignId}/room/panel${query}`);
-    if (state.campaign?.id !== campaignId) return;
+    let panel;
+    try {
+      panel = await api(`/api/campaigns/${campaignId}/room/panel${query}`);
+    } catch (error) {
+      if (generation !== state.roomGeneration) return;
+      throw error;
+    }
+    if (generation !== state.roomGeneration || state.campaign?.id !== campaignId) return;
     if (panel.not_modified) {
       recordPanelRefresh("not_modified");
       return;
     }
     recordPanelRefresh("modified");
     state.panel = panel;
+    state.characterDenied.clear();
     const phase = state.panel.phase || "—";
     $("#room-phase").textContent = phase.toUpperCase();
     $("#campaign-room").dataset.phase = phase;
     await characterController.refreshCharacterSidebar();
+    if (generation !== state.roomGeneration) return;
     renderPlayPanel();
     combatGridController.renderCombatPanel();
     renderModulePanel();
@@ -438,7 +493,7 @@ export function createRoomController({
   }
 
   function initialize() {
-    $$('[data-room-mode]').forEach((control) => {
+    $$('button[data-room-mode]').forEach((control) => {
       control.onclick = () => applyRoomMode(control.dataset.roomMode);
     });
     $$('[data-composer-prompt]').forEach((control) => {
@@ -469,6 +524,8 @@ export function createRoomController({
     $("#back-campaigns").onclick = leaveRoom;
     $("#message-form").onsubmit = async (event) => {
       event.preventDefault();
+      const generation = state.roomGeneration;
+      const campaignId = state.campaign.id;
       const field = event.target.elements.content;
       const content = field.value.trim();
       const mode = event.submitter?.value || "action";
@@ -492,6 +549,7 @@ export function createRoomController({
                 : null,
           }),
         });
+        if (generation !== state.roomGeneration) return;
         $$(".suggestion-row").forEach((row) => row.remove());
         timelineController.updateMessage(result.message, result.job);
         if (result.agent_message) timelineController.updateMessage(result.agent_message);
@@ -503,11 +561,22 @@ export function createRoomController({
         }
         loadUsage();
       } catch (error) {
-        field.value = content;
+        if (generation !== state.roomGeneration) {
+          const draft = roomDrafts.get(campaignId);
+          if (state.campaign?.id === campaignId) {
+            field.value = field.value ? `${content}\n${field.value}` : content;
+          } else {
+            roomDrafts.set(campaignId, draft ? `${content}\n${draft}` : content);
+          }
+          return;
+        }
+        field.value = field.value ? `${content}\n${field.value}` : content;
         toast(`发送失败：${error.message}`);
       } finally {
-        for (const control of event.target.querySelectorAll("button")) control.disabled = false;
-        field.focus();
+        if (generation === state.roomGeneration) {
+          for (const control of event.target.querySelectorAll("button")) control.disabled = false;
+          field.focus();
+        }
       }
     };
 

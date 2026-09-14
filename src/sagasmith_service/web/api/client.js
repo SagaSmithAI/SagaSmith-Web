@@ -1,3 +1,15 @@
+export class ApiError extends Error {
+  constructor(status, detail) {
+    const message = typeof detail === "string" ? detail
+      : Array.isArray(detail) ? detail.map((item) => item.msg || "输入无效").join("；")
+        : detail?.message || detail?.detail || `HTTP ${status}`;
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
 export async function api(path, options = {}) {
   const method = (options.method || "GET").toUpperCase();
   const headers = {
@@ -18,13 +30,16 @@ export async function api(path, options = {}) {
       if (!canReplay || attempt > 0 || !(error instanceof TypeError)) throw error;
       continue;
     }
-    if (attempt === 0 && [502, 503, 504].includes(response.status)) continue;
+    if (canReplay && attempt === 0 && [502, 503, 504].includes(response.status)) {
+      await response.body?.cancel();
+      continue;
+    }
     break;
   }
   if (!response) throw new Error("Network request failed");
   if (response.status === 204) return null;
   const body = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }));
-  if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
+  if (!response.ok) throw new ApiError(response.status, body.detail || `HTTP ${response.status}`);
   return body;
 }
 
@@ -40,7 +55,7 @@ export async function apiBlobResponse(path, options = {}) {
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }));
-    throw new Error(body.detail || `HTTP ${response.status}`);
+    throw new ApiError(response.status, body.detail || `HTTP ${response.status}`);
   }
   return { blob: await response.blob(), headers: response.headers };
 }

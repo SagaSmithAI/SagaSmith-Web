@@ -120,6 +120,10 @@ class CombatRenderCache:
                 render=rendered,
                 cached_at=asyncio.get_running_loop().time(),
             )
+            # Share oversized results with current waiters, but do not retain
+            # them or displace useful entries with an uncacheable image.
+            if len(rendered.content) > self._max_bytes:
+                return cached
             async with self._lock:
                 previous = self._entries.pop(key, None)
                 if previous is not None:
