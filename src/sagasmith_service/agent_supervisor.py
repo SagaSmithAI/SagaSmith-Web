@@ -84,6 +84,12 @@ WORKSPACE_OWNER = "sagasmith-web-agent-supervisor"
 WORKSPACE_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
+def _model_preset_for_conversation(key: str) -> str:
+    """Select the service-owned profile for an isolated conversation worker."""
+
+    return "module" if ":module-" in key else "hosted"
+
+
 class CompletionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -803,6 +809,12 @@ class WorkerManager:
         with Path(self.config_path).open(encoding="utf-8") as source:
             runtime_config = json.load(source)
         defaults = runtime_config.setdefault("agents", {}).setdefault("defaults", {})
+        model_preset = _model_preset_for_conversation(key)
+        presets = runtime_config.get("modelPresets")
+        if isinstance(presets, dict) and model_preset not in presets:
+            raise RuntimeError(f"Agent config is missing required model preset: {model_preset}")
+        if isinstance(presets, dict):
+            defaults["modelPreset"] = model_preset
         skill_dirs = [str(item) for item in defaults.get("externalSkillsDirs") or []]
         defaults["externalSkillsDirs"] = list(
             dict.fromkeys(["/opt/sagasmith/skills/hosted", *skill_dirs])
@@ -975,6 +987,14 @@ class WorkerManager:
         terminal_succeeded = False
         retiring: Worker | None = None
         try:
+            if (payload.get("response_contract") or {}).get("usage_callback"):
+                capability = await self.readiness_client.get(
+                    f"http://127.0.0.1:{worker.port}/health"
+                )
+                if capability.status_code != 200 or capability.json().get(
+                    "provider_accounting"
+                ) != "per-attempt-v1":
+                    raise RuntimeError("Agent worker lacks required per-attempt budget enforcement")
             response = await self.completion_client.post(
                 f"http://127.0.0.1:{worker.port}/v1/chat/completions",
                 json={**payload, "session_id": key, "stream": False},

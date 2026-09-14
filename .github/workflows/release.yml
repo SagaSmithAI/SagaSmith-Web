@@ -11,7 +11,27 @@ permissions:
   attestations: write
 
 jobs:
+  capability:
+    name: verify release capabilities
+    runs-on: ubuntu-latest
+    outputs:
+      attestations: ${{ steps.check.outputs.attestations }}
+    steps:
+      - id: check
+        env:
+          ATTESTATIONS_ENABLED: ${{ vars.SAGASMITH_ATTESTATIONS_ENABLED || 'false' }}
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          set -euo pipefail
+          if [[ "$REPOSITORY_PRIVATE" != "false" && "$ATTESTATIONS_ENABLED" != "true" ]]; then
+            echo "::error::Set the verified SAGASMITH_ATTESTATIONS_ENABLED repository variable after confirming the organisation plan supports artifact and container attestations."
+            exit 1
+          fi
+          echo 'attestations=true' >> "$GITHUB_OUTPUT"
+
   publish:
+    needs: capability
+    if: needs.capability.outputs.attestations == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -24,6 +44,7 @@ jobs:
           prune-cache: true
       - name: Validate release inputs
         run: |
+          set -euo pipefail
           uv sync --frozen --all-extras
           git fetch origin main:refs/remotes/origin/main
           uv run python scripts/audit_components.py --remote --scope build --strict
@@ -35,39 +56,104 @@ jobs:
         run: SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" uv build
       - name: Record artifact checksums
         run: sha256sum dist/* > release/SHA256SUMS
-      - name: Build and push immutable container
-        id: image
+      - name: Build and push four immutable release images
+        id: images
         env:
           GITHUB_TOKEN: ${{ github.token }}
           REGISTRY: ghcr.io
-          IMAGE: ghcr.io/${{ github.repository }}
+          REPOSITORY: ${{ github.repository }}
         run: |
+          set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
+          repository="${REPOSITORY,,}"
           echo "$GITHUB_TOKEN" | docker login "$REGISTRY" -u "$GITHUB_ACTOR" --password-stdin
-          docker buildx build \
-            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
-            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-            --label "org.opencontainers.image.version=${version}" \
-            --metadata-file release/image-metadata.json \
-            --provenance=mode=max \
-            --sbom=true \
-            --tag "${IMAGE,,}:${version}" \
-            --tag "${IMAGE,,}:sha-${GITHUB_SHA}" \
-            --push \
-            .
-          digest="$(python -c 'import json; print(json.load(open("release/image-metadata.json"))["containerimage.digest"])')"
-          printf 'container=%s@%s\n' "${IMAGE,,}" "$digest" >> release/release-manifest.env
-          printf 'name=%s\n' "${IMAGE,,}" >> "$GITHUB_OUTPUT"
-          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+          builder_name="sagasmith-release-builder"
+          docker buildx create --name "$builder_name" --driver docker-container --use
+          docker buildx inspect --bootstrap "$builder_name"
+          trap 'docker buildx rm "$builder_name"' EXIT
+          mkdir -p release
+          : > release/container-digests.txt
+          : > release/release-manifest.env
+
+          build_image() {
+            local id="$1" dockerfile="$2" image="$3"
+            local metadata="release/image-metadata-${id}.json"
+            shift 3
+            docker buildx build \
+              --file "$dockerfile" \
+              --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+              --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+              --label "org.opencontainers.image.version=${version}" \
+              --metadata-file "$metadata" \
+              --provenance=mode=max \
+              --sbom=true \
+              --tag "${image}:${version}" \
+              --tag "${image}:sha-${GITHUB_SHA}" \
+              "$@" \
+              --push \
+              .
+            local digest
+            digest="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["containerimage.digest"])' "$metadata")"
+            printf '%s@%s\n' "$image" "$digest" >> release/container-digests.txt
+            printf 'container_%s=%s@%s\n' "$id" "$image" "$digest" >> release/release-manifest.env
+            printf '%s_name=%s\n%s_digest=%s\n' "$id" "$image" "$id" "$digest" >> "$GITHUB_OUTPUT"
+          }
+
+          build_image web Dockerfile "$REGISTRY/$repository"
+          build_image agent infrastructure/Dockerfile.agent-supervisor "$REGISTRY/${repository}-agent" \
+            --build-context "agent_source=https://github.com/SagaSmithAI/SagaSmith-agent.git#2780a2134201f5c2dd66eae43f7bcfcb87efd880" \
+            --build-context "core=https://github.com/SagaSmithAI/sagasmith-core.git#612bfe7e5290eb5b23f2811baa83b8a28293b36e" \
+            --build-context "dnd_domain=https://github.com/SagaSmithAI/sagasmith-dnd.git#ba602ea103de67d19ffbfba2f69f3802a9e34dd3" \
+            --build-context "coc_domain=https://github.com/SagaSmithAI/sagasmith-coc.git#eebab0986299b0cd9ce420c3521e4688356e9746" \
+            --build-context "narrative_domain=https://github.com/SagaSmithAI/sagasmith-narrative.git#2e2dfe8a18b53ad4c090a7382c25c32a354c7621"
+          build_image dnd infrastructure/Dockerfile.dnd-mcp "$REGISTRY/${repository}-dnd-mcp" \
+            --build-context "core=https://github.com/SagaSmithAI/sagasmith-core.git#612bfe7e5290eb5b23f2811baa83b8a28293b36e" \
+            --build-context "dnd_domain=https://github.com/SagaSmithAI/sagasmith-dnd.git#ba602ea103de67d19ffbfba2f69f3802a9e34dd3"
+          build_image coc infrastructure/Dockerfile.coc-mcp "$REGISTRY/${repository}-coc-mcp" \
+            --build-context "core=https://github.com/SagaSmithAI/sagasmith-core.git#612bfe7e5290eb5b23f2811baa83b8a28293b36e" \
+            --build-context "coc_domain=https://github.com/SagaSmithAI/sagasmith-coc.git#eebab0986299b0cd9ce420c3521e4688356e9746"
+
+          sha256sum release/container-digests.txt > release/CONTAINER-SHA256SUMS
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          manifest_path = Path("release/release-manifest.json")
+          manifest = json.loads(manifest_path.read_text())
+          images = []
+          for line in Path("release/container-digests.txt").read_text().splitlines():
+              name, digest = line.rsplit("@", 1)
+              images.append({"name": name, "digest": digest, "sbom": "buildkit-attached", "provenance": "max"})
+          manifest["container_images"] = images
+          manifest["container_digest_file"] = "CONTAINER-SHA256SUMS"
+          manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+          PY
       - name: Attest Python artifacts
         uses: actions/attest-build-provenance@v4
         with:
           subject-path: "dist/*"
-      - name: Attest container image
+      - name: Attest Web container
         uses: actions/attest-build-provenance@v4
         with:
-          subject-name: ${{ steps.image.outputs.name }}
-          subject-digest: ${{ steps.image.outputs.digest }}
+          subject-name: ${{ steps.images.outputs.web_name }}
+          subject-digest: ${{ steps.images.outputs.web_digest }}
+          push-to-registry: true
+      - name: Attest Agent container
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ steps.images.outputs.agent_name }}
+          subject-digest: ${{ steps.images.outputs.agent_digest }}
+          push-to-registry: true
+      - name: Attest D&D MCP container
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ steps.images.outputs.dnd_name }}
+          subject-digest: ${{ steps.images.outputs.dnd_digest }}
+          push-to-registry: true
+      - name: Attest CoC MCP container
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ steps.images.outputs.coc_name }}
+          subject-digest: ${{ steps.images.outputs.coc_digest }}
           push-to-registry: true
       - name: Publish immutable GitHub release
         env:
@@ -76,6 +162,8 @@ jobs:
           gh release create "$GITHUB_REF_NAME"
           dist/*
           release/SHA256SUMS
+          release/CONTAINER-SHA256SUMS
+          release/container-digests.txt
           release/release-manifest.json
           release/release-manifest.env
           --verify-tag

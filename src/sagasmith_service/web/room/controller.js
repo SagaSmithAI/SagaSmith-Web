@@ -59,6 +59,7 @@ export function createRoomController({
   }
 
   async function openCampaign(campaign) {
+    state.roomGeneration += 1;
     if (state.roomEvents) state.roomEvents.close();
     state.campaign = campaign;
     state.roomMessages = new Map();
@@ -492,7 +493,7 @@ export function createRoomController({
           }),
         });
         $$(".suggestion-row").forEach((row) => row.remove());
-        timelineController.updateMessage(result.message);
+        timelineController.updateMessage(result.message, result.job);
         if (result.agent_message) timelineController.updateMessage(result.agent_message);
         if (mode === "action") {
           state.selectedTargetId = null;

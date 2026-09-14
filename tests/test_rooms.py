@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from conftest import FakeAgentRuntime, FakeDndRuntime
+from conftest import FakeAgentRuntime, FakeDndRuntime, grant_test_quota
 from fastapi import Request
 from fastapi.testclient import TestClient
 from sqlalchemy import event, select
@@ -46,7 +46,9 @@ def register(client: TestClient, email: str, name: str) -> dict[str, Any]:
         json={"email": email, "password": PASSWORD, "display_name": name},
     )
     assert response.status_code == 201
-    return response.json()["user"]
+    user = response.json()["user"]
+    grant_test_quota(client, user["id"])
+    return user
 
 
 def login(client: TestClient, email: str) -> None:
@@ -676,6 +678,13 @@ def test_queued_room_turn_can_be_cancelled_without_agent_call(
     assert response.status_code == 200, response.text
     assert response.json()["job"]["status"] == "queued"
     job_id = response.json()["job"]["id"]
+    trigger_id = response.json()["message"]["id"]
+    owner_snapshot = client.get("/api/campaigns/campaign-1/room/snapshot").json()
+    assert [job["message_id"] for job in owner_snapshot["jobs"]] == [trigger_id]
+    add_player(client, "room-player@example.com", "Aria")
+    player_snapshot = client.get("/api/campaigns/campaign-1/room/snapshot").json()
+    assert player_snapshot["jobs"] == []
+    login(client, "room-owner@example.com")
 
     cancelled = client.post(f"/api/campaigns/campaign-1/room/jobs/{job_id}/cancel")
     assert cancelled.status_code == 200
@@ -737,6 +746,7 @@ def test_running_room_turn_cancel_is_published_without_an_assistant_message(
             )
         ).all()
         assert job is not None and job.status == "cancelled"
+        assert job.error_code == "cancelled"
         assert assistants == []
 
 
@@ -762,7 +772,7 @@ def test_agent_timeout_has_retryable_service_unavailable_contract(
         "code": "agent_timeout",
         "retryable": True,
         "message": "Agent completion timed out",
-        "recovery": "Retry with the same idempotency key.",
+        "recovery": "Retry with a new idempotency key.",
         "job_id": response.json()["detail"]["job_id"],
     }
     with client.app.state.session_factory() as session:

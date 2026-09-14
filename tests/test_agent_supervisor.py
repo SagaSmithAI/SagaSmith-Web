@@ -392,7 +392,17 @@ def test_worker_manager_isolates_and_reuses_conversation_processes(
         idle_seconds=3600,
         completion_timeout_seconds=777,
     )
-    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "modelPresets": {
+                    "hosted": {"provider": "openai", "model": "hosted-model"},
+                    "module": {"provider": "openai", "model": "module-model"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
 
     async def scenario() -> None:
         await manager.start()
@@ -402,20 +412,114 @@ def test_worker_manager_isolates_and_reuses_conversation_processes(
         )
         repeated = await manager.complete("campaign-a:user-a:conversation-a", {"messages": []})
         second = await manager.complete("campaign-b:user-b:conversation-b", {"messages": []})
-        assert first == repeated == second
-        assert len(processes) == 2
-        assert len(manager.workers) == 2
+        module_key = "campaign-a:user-a:module-project123456-outline"
+        module_result = await manager.complete(module_key, {"messages": []})
+        assert first == repeated == second == module_result
+        assert len(processes) == 3
+        assert len(manager.workers) == 3
         assert all(worker.active_requests == 0 for worker in manager.workers.values())
         assert (
             manager.workers["campaign-a:user-a:conversation-a"].port
             != manager.workers["campaign-b:user-b:conversation-b"].port
         )
+        hosted_config = json.loads(
+            manager.workers["campaign-a:user-a:conversation-a"].runtime_config_path.read_text()
+        )
+        module_config = json.loads(manager.workers[module_key].runtime_config_path.read_text())
+        assert hosted_config["agents"]["defaults"]["modelPreset"] == "hosted"
+        assert module_config["agents"]["defaults"]["modelPreset"] == "module"
         await manager.close()
 
     asyncio.run(scenario())
     assert all(process.terminated for process in processes)
     assert len(client_timeouts) == 2
     assert any(getattr(timeout, "read", None) == 777 for timeout in client_timeouts)
+
+
+@pytest.mark.parametrize(
+    ("provider_accounting", "completion_allowed"),
+    ((None, False), ("per-attempt-v1", True)),
+)
+def test_worker_manager_requires_per_attempt_accounting_capability_before_post(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    provider_accounting: str | None,
+    completion_allowed: bool,
+) -> None:
+    class FakeResponse:
+        status_code = 200
+
+        def __init__(self, payload: dict[str, Any]) -> None:
+            self.payload = payload
+
+        def json(self) -> dict[str, Any]:
+            return self.payload
+
+    class ReadinessClient:
+        async def get(self, _url: str) -> FakeResponse:
+            payload = {}
+            if provider_accounting is not None:
+                payload["provider_accounting"] = provider_accounting
+            return FakeResponse(payload)
+
+        async def aclose(self) -> None:
+            return None
+
+    class CompletionClient:
+        def __init__(self) -> None:
+            self.posts = 0
+
+        async def post(self, _url: str, *, json: dict[str, Any]) -> FakeResponse:
+            self.posts += 1
+            return FakeResponse({"id": "completion", "choices": []})
+
+        async def aclose(self) -> None:
+            return None
+
+    class FakeProcess:
+        returncode = None
+
+    manager = WorkerManager(
+        config_path=str(tmp_path / "config.json"),
+        workspace_root=str(tmp_path / "workspaces"),
+        worker_api_key="secret",
+    )
+    readiness = ReadinessClient()
+    completion = CompletionClient()
+    manager.readiness_client = readiness  # type: ignore[assignment]
+    manager.completion_client = completion  # type: ignore[assignment]
+    worker = Worker(
+        key="campaign-a:user-a:conversation-a",
+        port=19000,
+        process=FakeProcess(),  # type: ignore[arg-type]
+        last_used=0,
+        runtime_config_path=tmp_path / "runtime.json",
+    )
+
+    async def fake_get(_key: str, *, reserve_request: bool) -> Worker:
+        assert reserve_request is True
+        worker.active_requests += 1
+        return worker
+
+    manager._get = fake_get  # type: ignore[method-assign]
+    monkeypatch.setattr(manager, "_touch_workspace", lambda _path: None)
+
+    async def scenario() -> None:
+        payload = {
+            "messages": [],
+            "response_contract": {"usage_callback": {"authorize_url": "http://host"}},
+        }
+        if completion_allowed:
+            result = await manager.complete(worker.key, payload)
+            assert result["id"] == "completion"
+        else:
+            with pytest.raises(RuntimeError, match="lacks required per-attempt budget"):
+                await manager.complete(worker.key, payload)
+        assert completion.posts == int(completion_allowed)
+        assert worker.active_requests == 0
+        await manager.close()
+
+    asyncio.run(scenario())
 
 
 def test_worker_manager_does_not_reuse_port_until_idle_worker_exits(

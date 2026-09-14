@@ -65,7 +65,11 @@ from sagasmith_service.projection_cache import (
 )
 from sagasmith_service.quota import QuotaExceededError, release, reserve, settle
 from sagasmith_service.room_activity import RoomActivitySubmission, room_activity_contract
-from sagasmith_service.room_jobs import TERMINAL_ROOM_JOB_STATES, RoomJobError
+from sagasmith_service.room_jobs import (
+    ACTIVE_ROOM_JOB_STATES,
+    TERMINAL_ROOM_JOB_STATES,
+    RoomJobError,
+)
 from sagasmith_service.room_tool_policy import (
     RoomToolPolicyError,
     campaign_phase_and_revision,
@@ -89,6 +93,7 @@ from sagasmith_service.schemas import (
     CampaignRoomSnapshot,
     CampaignRoomView,
 )
+from sagasmith_service.usage_accounting import record_provider_consumption
 
 router = APIRouter(prefix="/api/campaigns/{campaign_id}/room", tags=["campaign-room"])
 
@@ -254,7 +259,7 @@ def _room_job_view(job: RoomTurnJob | None) -> dict[str, Any] | None:
                 "recovery": (
                     "Refresh the room panel and submit a new action."
                     if job.error_code == "stale_revision"
-                    else "Retry with the same idempotency key."
+                    else "Retry with a new idempotency key."
                     if job.retryable
                     else None
                 ),
@@ -1159,6 +1164,7 @@ class _AgentPreparation:
     viewer_role: str
     reservation_id: str
     reservation_quantity: Decimal
+    quota_user_id: str
     run_id: str
     room_id: str
     trigger_id: str
@@ -1564,6 +1570,7 @@ def _prepare_agent_transaction(
         viewer_role=viewer_role,
         reservation_id=reservation.id,
         reservation_quantity=reservation_quantity,
+        quota_user_id=quota_user_id,
         run_id=run.id,
         room_id=room.id,
         trigger_id=trigger.id,
@@ -1643,7 +1650,29 @@ def _persist_agent_result(
             True,
             "state",
         )
-    actual = min(result.total_tokens, int(reservation_quantity))
+    provider_tokens = Decimal(result.total_tokens)
+    record_provider_consumption(
+        session,
+        user_id=job.user_id,
+        campaign_id=job.campaign_id,
+        task_id=job.id,
+        reservation_id=job.reservation_id,
+        metric="llm_tokens",
+        quantity=provider_tokens,
+        unit="tokens",
+        idempotency_key=f"room-turn-provider:{job.id}",
+        provider="nanobot",
+        model=result.model,
+        request_id=result.request_id,
+        pricing_version="unknown",
+        pricing_inputs={
+            "prompt_tokens": result.prompt_tokens,
+            "completion_tokens": result.completion_tokens,
+        },
+        pricing_cache={"status": "unknown"},
+        pricing_output={"status": "unknown"},
+    )
+    actual = min(provider_tokens, reservation_quantity)
     settle(
         session,
         reservation_id=job.reservation_id,
@@ -1653,6 +1682,7 @@ def _persist_agent_result(
         provider="nanobot",
         model=result.model,
         request_id=result.request_id,
+        details={"provider_quantity": str(provider_tokens)},
     )
     run = session.get(AgentRun, job.agent_run_id)
     if run is None:
@@ -1870,6 +1900,7 @@ async def execute_room_turn_job(app: FastAPI, job_id: str) -> None:
             "run_id": preparation.run_id,
             "trigger_message_id": preparation.trigger_id,
             "authority_context": preparation.authority_context,
+            "budget_user_id": preparation.quota_user_id,
             "response_contract": {
                 "terminal": room_turn_contract(run_id=preparation.run_id),
                 "activity": room_activity_contract(),
@@ -1894,6 +1925,51 @@ async def execute_room_turn_job(app: FastAPI, job_id: str) -> None:
                 trace_context=preparation.trace_context,
             )
         except AgentRuntimeError as exc:
+            if exc.total_tokens is not None:
+                with app.state.session_factory() as session:
+                    job = session.get(RoomTurnJob, job_id)
+                    if job is not None and job.reservation_id is not None:
+                        provider_tokens = Decimal(exc.total_tokens)
+                        record_provider_consumption(
+                            session,
+                            user_id=job.user_id,
+                            campaign_id=job.campaign_id,
+                            task_id=job.id,
+                            reservation_id=job.reservation_id,
+                            metric="llm_tokens",
+                            quantity=provider_tokens,
+                            unit="tokens",
+                            idempotency_key=f"room-turn-provider:{job.id}",
+                            provider="nanobot",
+                            model=exc.model,
+                            request_id=exc.request_id,
+                            pricing_version="unknown",
+                            pricing_inputs={
+                                "prompt_tokens": exc.prompt_tokens,
+                                "completion_tokens": exc.completion_tokens,
+                            },
+                            pricing_cache={"status": "unknown"},
+                            pricing_output={"status": "unknown"},
+                            details={"status": "partial_failure", "error_code": exc.code},
+                        )
+                        settle(
+                            session,
+                            reservation_id=job.reservation_id,
+                            quantity=min(
+                                provider_tokens,
+                                Decimal(app.state.settings.agent_reservation_tokens),
+                            ),
+                            idempotency_key=f"room-turn-settle:{job.id}",
+                            unit="tokens",
+                            provider="nanobot",
+                            model=exc.model,
+                            request_id=exc.request_id,
+                            details={
+                                "provider_quantity": str(provider_tokens),
+                                "status": "partial_failure",
+                            },
+                        )
+                        session.commit()
             raise RoomJobError(exc.code, str(exc), exc.retryable, "upstream") from exc
         except RuntimeError as exc:
             raise RoomJobError("agent_unavailable", str(exc), True, "upstream") from exc
@@ -2499,15 +2575,35 @@ def room_snapshot(
         .order_by(CampaignMessage.sequence.desc())
         .limit(limit * 3)
     ).all()
-    visible = [
-        CampaignMessageView.model_validate(_message_view(item, user.id))
+    visible_rows = [
+        item
         for item in reversed(candidates)
         if _message_visible(item, membership, user.id)
     ][-limit:]
+    visible = [
+        CampaignMessageView.model_validate(_message_view(item, user.id))
+        for item in visible_rows
+    ]
+    visible_ids = [item.id for item in visible_rows]
+    jobs = []
+    if visible_ids:
+        job_rows = session.scalars(
+            select(RoomTurnJob).where(
+                RoomTurnJob.campaign_id == campaign_id,
+                RoomTurnJob.user_id == user.id,
+                RoomTurnJob.trigger_message_id.in_(visible_ids),
+                RoomTurnJob.status.in_((*ACTIVE_ROOM_JOB_STATES, "failed")),
+            )
+        ).all()
+        jobs = [
+            {**_room_job_view(job), "message_id": job.trigger_message_id}
+            for job in job_rows
+        ]
     result = CampaignRoomSnapshot(
         room=CampaignRoomView.model_validate(room),
         messages=visible,
         event_cursor=max(0, room.next_event_sequence - 1),
+        jobs=jobs,
     )
     session.commit()
     return result

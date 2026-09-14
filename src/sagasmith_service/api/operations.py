@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 from fastapi import APIRouter, Request, Response, status
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
@@ -11,6 +12,27 @@ router = APIRouter(tags=["operations"])
 
 @router.get("/api/ready")
 async def readiness(request: Request, response: Response) -> dict[str, object]:
+    state = request.app.state
+    if not hasattr(state, "readiness_lock"):
+        state.readiness_lock = asyncio.Lock()
+    async with state.readiness_lock:
+        cached = getattr(state, "readiness_cache", None)
+        if cached is None or cached[0] <= time.monotonic():
+            result = await _probe_readiness(request)
+            state.readiness_cache = (
+                time.monotonic() + state.settings.readiness_cache_seconds, result
+            )
+        else:
+            result = cached[1]
+    if result["status"] != "ready":
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    response.headers["Cache-Control"] = "no-store"
+    if state.settings.env == "production":
+        return {"status": result["status"]}
+    return result
+
+
+async def _probe_readiness(request: Request) -> dict[str, object]:
     components: dict[str, str] = {}
     try:
         with request.app.state.engine.connect() as connection:
@@ -38,8 +60,6 @@ async def readiness(request: Request, response: Response) -> dict[str, object]:
         components["private_storage"] = "ready"
 
     ready = all(value == "ready" for value in components.values())
-    if not ready:
-        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return {"status": "ready" if ready else "not_ready", "components": components}
 
 

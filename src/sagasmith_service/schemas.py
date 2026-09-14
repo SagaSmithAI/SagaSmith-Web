@@ -16,6 +16,7 @@ class RegisterRequest(ApiModel):
     email: EmailStr
     password: str = Field(min_length=12, max_length=200)
     display_name: str = Field(min_length=1, max_length=80)
+    invite_token: str | None = Field(default=None, min_length=32, max_length=200)
     # API account creation itself accepts the current published texts; the browser also requires
     # an explicit checkbox so interactive users cannot miss them.
     terms_accepted: Literal[True] = True
@@ -216,6 +217,7 @@ class CampaignRoomSnapshot(ApiModel):
     room: CampaignRoomView
     messages: list[CampaignMessageView]
     event_cursor: int
+    jobs: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class CampaignRoomReadUpdate(ApiModel):

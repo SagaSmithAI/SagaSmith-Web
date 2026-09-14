@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from conftest import FakeAgentRuntime, FakeDndRuntime
+from conftest import FakeAgentRuntime, FakeDndRuntime, grant_test_quota, promote_test_admin
 from fastapi.testclient import TestClient
 from sqlalchemy import event
 from sqlalchemy.dialects import postgresql
@@ -19,6 +19,31 @@ from sagasmith_service.models import (
 )
 
 PASSWORD = "correct horse battery staple"
+
+
+def test_post_retry_is_idempotent_and_rejects_changed_payload(client: TestClient) -> None:
+    register(client, "post-retry@example.com", "Writer")
+    artifact = client.post("/api/community/artifacts", json={
+        "slug": "retry-post", "artifact_type": "module", "title": "Retry post",
+        "system_id": "dnd5e", "visibility": "public", "license_code": "CC-BY-4.0",
+        "rights_attested": True, "source_kind": "original",
+        "provenance": {"author_statement": "Original"},
+    })
+    assert artifact.status_code == 201, artifact.text
+    payload = {"target_type": "artifact", "target_id": artifact.json()["id"],
+               "category": "play_report", "body": "One report."}
+    headers = {"Idempotency-Key": "post-retry-001"}
+    first = client.post("/api/community/posts", headers=headers, json=payload)
+    repeated = client.post("/api/community/posts", headers=headers, json=payload)
+    assert first.status_code == repeated.status_code == 201
+    assert first.json()["id"] == repeated.json()["id"]
+    changed = client.post("/api/community/posts", headers=headers,
+                          json={**payload, "body": "Different report."})
+    assert changed.status_code == 409
+    posts = client.get("/api/community/posts", params={
+        "target_type": "artifact", "target_id": artifact.json()["id"],
+    })
+    assert len(posts.json()) == 1
 
 
 def test_postgresql_artifact_search_matches_the_indexed_document() -> None:
@@ -42,7 +67,9 @@ def register(client: TestClient, email: str, name: str) -> dict:
         json={"email": email, "password": PASSWORD, "display_name": name},
     )
     assert response.status_code == 201, response.text
-    return response.json()["user"]
+    user = response.json()["user"]
+    grant_test_quota(client, user["id"])
+    return user
 
 
 def login(client: TestClient, email: str) -> None:
@@ -144,8 +171,8 @@ def test_public_module_catalog_discussion_fork_install_and_report(
     dnd_runtime: FakeDndRuntime,
     agent_runtime: FakeAgentRuntime,
 ) -> None:
-    client.app.state.settings.bootstrap_admin_email = "admin@forge.example.com"
-    register(client, "admin@forge.example.com", "Moderator")
+    admin = register(client, "admin@forge.example.com", "Moderator")
+    promote_test_admin(client, admin["id"])
     author = register(client, "author@forge.example.com", "Author")
     uploaded = client.post(
         "/api/packs",

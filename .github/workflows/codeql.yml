@@ -12,7 +12,27 @@ permissions:
   security-events: write
 
 jobs:
+  capability:
+    name: verify CodeQL capability
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - id: check
+        env:
+          CODEQL_ENABLED: ${{ vars.SAGASMITH_CODEQL_PRIVATE_ENABLED || 'false' }}
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          set -euo pipefail
+          if [[ "$REPOSITORY_PRIVATE" == "false" || "$CODEQL_ENABLED" == "true" ]]; then
+            echo 'enabled=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo 'enabled=false' >> "$GITHUB_OUTPUT"
+          echo "CodeQL analysis is skipped until the verified SAGASMITH_CODEQL_PRIVATE_ENABLED repository variable confirms that the current repository visibility and organisation plan support CodeQL."
   analyze:
+    needs: capability
+    if: needs.capability.outputs.enabled == 'true'
     name: analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
     strategy:

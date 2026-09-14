@@ -5,6 +5,8 @@ import { typeNames } from "/assets/forge/shared.js";
 import { state } from "/assets/state/store.js";
 
 export function createForgeCatalog() {
+  let postPending = false;
+  let postAttempt = null;
   async function loadForge(filters = {}) {
     const query = new URLSearchParams(Object.entries(filters).filter(([, value]) => value));
     state.artifacts = await api(`/api/community/artifacts?${query}`);
@@ -166,9 +168,11 @@ export function createForgeCatalog() {
   }
 
   async function loadArtifactPosts() {
+    const artifactId = state.artifact.id;
     const posts = await api(
-      `/api/community/posts?target_type=artifact&target_id=${state.artifact.id}`,
+      `/api/community/posts?target_type=artifact&target_id=${artifactId}`,
     );
+    if (state.artifact?.id !== artifactId) return;
     const root = $("#artifact-posts");
     root.replaceChildren();
     for (const post of posts) {
@@ -193,25 +197,45 @@ export function createForgeCatalog() {
 
     $("#post-form").onsubmit = async (event) => {
       event.preventDefault();
+      if (postPending) return;
+      const formElement = event.target;
+      const submit = formElement.querySelector('button[type="submit"], button:not([type])');
+      const artifactId = state.artifact.id;
       const form = new FormData(event.target);
       const release = state.releases.find((item) => item.status === "published");
+      const body = JSON.stringify({
+        target_type: "artifact", target_id: artifactId, release_id: release?.id || null,
+        category: form.get("category"), spoiler: form.has("spoiler"),
+        body: form.get("body"), audience: "public",
+      });
+      if (postAttempt?.body !== body) postAttempt = { body, key: crypto.randomUUID() };
+      postPending = true;
+      const label = submit?.textContent;
+      if (submit) { submit.disabled = true; submit.textContent = "提交中…"; }
+      formElement.setAttribute("aria-busy", "true");
+      let saved = false;
       try {
         await api("/api/community/posts", {
           method: "POST",
-          body: JSON.stringify({
-            target_type: "artifact",
-            target_id: state.artifact.id,
-            release_id: release?.id || null,
-            category: form.get("category"),
-            spoiler: form.has("spoiler"),
-            body: form.get("body"),
-            audience: "public",
-          }),
+          headers: { "Idempotency-Key": postAttempt.key },
+          body,
         });
-        event.target.reset();
-        await loadArtifactPosts();
+        saved = true;
+        postAttempt = null;
+        if (state.artifact?.id === artifactId) {
+          const current = new FormData(formElement);
+          if (current.get("body") === form.get("body") &&
+              current.get("category") === form.get("category") &&
+              current.has("spoiler") === form.has("spoiler")) formElement.reset();
+          await loadArtifactPosts();
+        }
       } catch (error) {
-        toast(error.message);
+        toast(saved ? "帖子已提交，列表刷新失败，请刷新页面。" :
+          `${error.message}。草稿已保留，可重试提交。`);
+      } finally {
+        postPending = false;
+        formElement.removeAttribute("aria-busy");
+        if (submit) { submit.disabled = false; submit.textContent = label; }
       }
     };
 

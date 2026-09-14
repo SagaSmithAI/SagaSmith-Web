@@ -101,3 +101,21 @@ def test_readiness_rejects_an_unavailable_required_component(
     assert ready.status_code == 503
     assert ready.json()["status"] == "not_ready"
     assert ready.json()["components"]["dnd_mcp"] == "not_ready"
+
+
+def test_readiness_cache_and_production_response(client, monkeypatch) -> None:
+    from sagasmith_service.api import operations
+
+    calls = []
+
+    async def probe(request):
+        calls.append(True)
+        return {"status": "ready", "components": {"private_service": "ready"}}
+
+    monkeypatch.setattr(operations, "_probe_readiness", probe)
+    client.app.state.settings.env = "production"
+    for _ in range(2):
+        result = client.get("/api/ready")
+        assert result.json() == {"status": "ready"}
+        assert result.headers["Cache-Control"] == "no-store"
+    assert len(calls) == 1

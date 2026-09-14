@@ -10,6 +10,109 @@ export function createRoomTimelineController({
   loadCampaignIdentities,
   leaveRoom,
 }) {
+  const roomJobs = new Map();
+  const pendingJobActions = new Set();
+
+  function rememberJob(job, messageId) {
+    if (!job?.id || !messageId) return;
+    roomJobs.set(String(messageId), { ...job, id: String(job.id) });
+  }
+
+  function refreshRenderedMessage(messageId) {
+    const message = state.roomMessages.get(messageId);
+    const old = $(`[data-message-id="${messageId}"]`);
+    if (!message || !old) return;
+    old.remove();
+    state.roomMessages.delete(messageId);
+    renderMessage(message);
+  }
+
+  async function syncJob(
+    jobId,
+    campaignId = state.campaign?.id,
+    generation = state.roomGeneration,
+  ) {
+    if (!jobId || !campaignId) return;
+    try {
+      const result = await api(`/api/campaigns/${campaignId}/room/jobs/${jobId}`);
+      if (state.campaign?.id !== campaignId || state.roomGeneration !== generation) return;
+      if (result.job && result.message) rememberJob(result.job, result.message.id);
+      if (result.message) updateMessage(result.message, result.job);
+      if (result.agent_message) updateMessage(result.agent_message);
+    } catch (error) {
+      if (state.campaign?.id === campaignId) toast(`任务状态读取失败：${error.message}`);
+    }
+  }
+
+  async function cancelJob(message, job) {
+    if (pendingJobActions.has(job.id)) return;
+    const campaignId = state.campaign?.id;
+    const generation = state.roomGeneration;
+    if (!campaignId) return;
+    const isCurrent = () =>
+      state.campaign?.id === campaignId && state.roomGeneration === generation;
+    pendingJobActions.add(job.id);
+    if (isCurrent()) refreshRenderedMessage(message.id);
+    try {
+      const result = await api(
+        `/api/campaigns/${campaignId}/room/jobs/${job.id}/cancel`,
+        { method: "POST" },
+      );
+      if (!isCurrent()) return;
+      if (result.job) rememberJob(result.job, message.id);
+      await syncJob(job.id, campaignId, generation);
+    } catch (error) {
+      if (isCurrent()) toast(`取消失败：${error.message}`);
+    } finally {
+      pendingJobActions.delete(job.id);
+      if (isCurrent()) refreshRenderedMessage(message.id);
+    }
+  }
+
+  async function retryMessage(message, job) {
+    if (pendingJobActions.has(job.id)) return;
+    const campaignId = state.campaign?.id;
+    const generation = state.roomGeneration;
+    if (!campaignId) return;
+    const isCurrent = () =>
+      state.campaign?.id === campaignId && state.roomGeneration === generation;
+    pendingJobActions.add(job.id);
+    if (isCurrent()) refreshRenderedMessage(message.id);
+    const mode = ["chat", "action", "narration"].includes(message.message_type)
+      ? message.message_type
+      : "action";
+    try {
+      if (mode === "action" && refreshPanel) await refreshPanel();
+      if (!isCurrent()) return;
+      const result = await api(`/api/campaigns/${campaignId}/room/messages`, {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({
+          content: message.content,
+          mode,
+          audience: message.audience,
+          audience_user_ids: message.audience_user_ids || [],
+          reply_to_message_id: message.reply_to_message_id,
+          structured_payload: message.structured_payload || {},
+          base_revision:
+            mode === "action"
+              ? state.panel?.revision ?? state.campaign?.mcp_revision ?? null
+              : null,
+        }),
+      });
+      if (!isCurrent()) return;
+      if (result.message) updateMessage(result.message, result.job);
+      if (result.agent_message) updateMessage(result.agent_message);
+      if (result.job) rememberJob(result.job, result.message?.id);
+      loadUsage?.();
+    } catch (error) {
+      if (isCurrent()) toast(`重试失败：${error.message}`);
+    } finally {
+      pendingJobActions.delete(job.id);
+      if (isCurrent()) refreshRenderedMessage(message.id);
+    }
+  }
+
   function messageRole(message) {
     if (message.sender_type === "agent") return "agent";
     if (message.sender_type === "system") return "system";
@@ -285,6 +388,26 @@ export function createRoomTimelineController({
     }
   }
 
+  function renderJobControls(message) {
+    if (message.sender_user_id !== state.user?.id) return null;
+    const job = roomJobs.get(String(message.id));
+    if (!job) return null;
+    const actions = text("div", "", "message-actions");
+    actions.setAttribute("aria-label", "任务操作");
+    const busy = pendingJobActions.has(job.id);
+    if (message.status === "processing" && ["queued", "waiting", "running"].includes(job.status)) {
+      const cancel = button("取消", () => cancelJob(message, job), "message-action");
+      cancel.disabled = busy;
+      actions.append(cancel);
+    }
+    if (message.status === "failed" && job.status === "failed" && job.retryable) {
+      const retry = button("重试", () => retryMessage(message, job), "message-action primary");
+      retry.disabled = busy;
+      actions.append(retry);
+    }
+    return actions.childElementCount ? actions : null;
+  }
+
   function timelineNearBottom(timeline) {
     return timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 72;
   }
@@ -330,6 +453,8 @@ export function createRoomTimelineController({
     if (message.status === "failed") {
       bubble.append(text("small", "行动未完成，可重新发送", "error"));
     }
+    const jobControls = renderJobControls(message);
+    if (jobControls) bubble.append(jobControls);
     if (message.structured_payload?.panel_action) {
       bubble.append(text("small", message.structured_payload.panel_action, "receipt-badge"));
     }
@@ -345,8 +470,9 @@ export function createRoomTimelineController({
     }
   }
 
-  function updateMessage(message) {
+  function updateMessage(message, job) {
     if (!message) return;
+    if (job) rememberJob(job, message.id);
     const old = $(`[data-message-id="${message.id}"]`);
     if (old) {
       old.remove();
@@ -357,6 +483,7 @@ export function createRoomTimelineController({
   }
 
   async function loadRoomSnapshot() {
+    roomJobs.clear();
     const snapshot = await api(
       `/api/campaigns/${state.campaign.id}/room/snapshot?limit=200`,
     );
@@ -365,6 +492,7 @@ export function createRoomTimelineController({
     $("#messages").replaceChildren();
     state.roomMessages = new Map();
     state.hydratingRoom = true;
+    for (const job of snapshot.jobs || []) rememberJob(job, job.message_id);
     for (const item of snapshot.messages) renderMessage(item);
     state.hydratingRoom = false;
     $("#messages").scrollTop = $("#messages").scrollHeight;
@@ -402,14 +530,18 @@ export function createRoomTimelineController({
         Number(event.lastEventId || 0),
       );
       const value = JSON.parse(event.data || "{}");
-      if (value.message) updateMessage(value.message);
+      if (value.message) updateMessage(value.message, value.job);
       return value;
     };
     source.addEventListener("message.created", receive);
     source.addEventListener("message.updated", receive);
     source.addEventListener("agent.started", (event) => {
       $("#room-sync").textContent = "Agent 正在处理";
-      receive(event);
+      const value = receive(event) || {};
+      if (value.job_id && value.message_id) {
+        rememberJob({ id: value.job_id, status: "running" }, value.message_id);
+        refreshRenderedMessage(value.message_id);
+      }
     });
     source.addEventListener("room.activity", (event) => {
       const value = receive(event) || {};
@@ -419,11 +551,19 @@ export function createRoomTimelineController({
           : "Agent 正在处理";
     });
     source.addEventListener("agent.completed", (event) => {
-      receive(event);
+      const value = receive(event) || {};
+      if (value.job_id) void syncJob(value.job_id, campaignId);
       refreshPanel();
       loadUsage();
     });
-    source.addEventListener("agent.failed", receive);
+    source.addEventListener("agent.failed", (event) => {
+      const value = receive(event) || {};
+      if (value.job_id) void syncJob(value.job_id, campaignId);
+    });
+    source.addEventListener("agent.cancelled", (event) => {
+      const value = receive(event) || {};
+      if (value.job_id) void syncJob(value.job_id, campaignId);
+    });
     source.addEventListener("state.changed", (event) => {
       receive(event);
       refreshPanel().then(refreshSuggestionValidity);

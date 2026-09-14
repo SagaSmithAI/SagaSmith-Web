@@ -9,7 +9,7 @@ from fastapi import APIRouter, Header, HTTPException, Request, status
 from sqlalchemy import select
 
 from sagasmith_service.api.dependencies import CurrentUser, DbSession
-from sagasmith_service.integrations.agent import AgentRuntime
+from sagasmith_service.integrations.agent import AgentRuntime, AgentRuntimeError
 from sagasmith_service.models import (
     AgentConversation,
     AgentIdentity,
@@ -35,6 +35,7 @@ from sagasmith_service.schemas import (
     ConversationCreate,
     ConversationView,
 )
+from sagasmith_service.usage_accounting import record_provider_consumption
 
 router = APIRouter(prefix="/api/campaigns/{campaign_id}/agent", tags=["agent"])
 
@@ -171,9 +172,10 @@ async def send_message(
     if existing is not None:
         if existing.request_hash != request_hash:
             raise HTTPException(status.HTTP_409_CONFLICT, "idempotency key payload mismatch")
-        if existing.status != "completed":
+        if existing.status == "completed":
+            return AgentRunView.model_validate(existing)
+        if existing.status != "running":
             raise HTTPException(status.HTTP_409_CONFLICT, "agent request is already in progress")
-        return AgentRunView.model_validate(existing)
     principal_id = user.principal_id
     campaign_role = membership.role
     quota_user_id = user.id
@@ -239,16 +241,18 @@ async def send_message(
         )
     except QuotaExceededError as exc:
         raise HTTPException(status.HTTP_402_PAYMENT_REQUIRED, str(exc)) from exc
-    run = AgentRun(
-        conversation_id=conversation_id,
-        campaign_id=campaign_id,
-        user_id=user.id,
-        idempotency_key=idempotency_key,
-        request_hash=request_hash,
-        user_content=payload.content,
-    )
-    session.add(run)
-    session.commit()
+    run = existing
+    if run is None:
+        run = AgentRun(
+            conversation_id=conversation_id,
+            campaign_id=campaign_id,
+            user_id=user.id,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            user_content=payload.content,
+        )
+        session.add(run)
+        session.commit()
     runtime: AgentRuntime = request.app.state.agent_runtime
     try:
         domain_runtime = request.app.state.game_runtimes.get(campaign.system_id)
@@ -302,10 +306,67 @@ async def send_message(
                 "principal_id": principal_id,
                 "campaign_role": campaign_role,
                 "authority_context": authority_context,
+                "budget_user_id": quota_user_id,
                 **identity_context,
             },
             idempotency_key=f"agent-turn:{run.id}",
         )
+    except AgentRuntimeError as exc:
+        provider_tokens = exc.total_tokens
+        if provider_tokens is not None:
+            record_provider_consumption(
+                session,
+                user_id=quota_user_id,
+                campaign_id=campaign_id,
+                task_id=run.id,
+                reservation_id=reservation.id,
+                metric="llm_tokens",
+                quantity=Decimal(provider_tokens),
+                unit="tokens",
+                idempotency_key=f"agent-provider:{user.id}:{idempotency_key}",
+                provider="nanobot",
+                model=exc.model,
+                request_id=exc.request_id,
+                pricing_version="unknown",
+                pricing_inputs={
+                    "prompt_tokens": exc.prompt_tokens,
+                    "completion_tokens": exc.completion_tokens,
+                },
+                pricing_cache={"status": "unknown"},
+                pricing_output={"status": "unknown"},
+                details={"status": "partial_failure", "error_code": exc.code},
+            )
+            settle(
+                session,
+                reservation_id=reservation.id,
+                quantity=min(Decimal(provider_tokens), quota_quantity),
+                idempotency_key=f"agent-settle:{user.id}:{idempotency_key}",
+                unit="tokens",
+                provider="nanobot",
+                model=exc.model,
+                request_id=exc.request_id,
+                details={"provider_quantity": str(provider_tokens), "status": "partial_failure"},
+            )
+        else:
+            release(session, reservation.id)
+        run.status = "failed"
+        run.error_code = "agent_unavailable"
+        run.prompt_tokens = max(0, exc.prompt_tokens or 0)
+        run.completion_tokens = max(0, exc.completion_tokens or 0)
+        run.upstream_request_id = exc.request_id
+        run.model = exc.model
+        run.completed_at = now_utc()
+        session.add(
+            AuditEvent(
+                actor_user_id=user.id,
+                action="agent.failed",
+                subject_type="agent_run",
+                subject_id=run.id,
+                details={"campaign_id": campaign_id, "error_code": run.error_code},
+            )
+        )
+        session.commit()
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     except (RoomToolPolicyError, RuntimeError, ValueError) as exc:
         release(session, reservation.id)
         run.status = "failed"
@@ -322,7 +383,29 @@ async def send_message(
         )
         session.commit()
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
-    actual = min(result.total_tokens, int(quota_quantity))
+    provider_tokens = Decimal(result.total_tokens)
+    record_provider_consumption(
+        session,
+        user_id=quota_user_id,
+        campaign_id=campaign_id,
+        task_id=run.id,
+        reservation_id=reservation.id,
+        metric="llm_tokens",
+        quantity=provider_tokens,
+        unit="tokens",
+        idempotency_key=f"agent-provider:{user.id}:{idempotency_key}",
+        provider="nanobot",
+        model=result.model,
+        request_id=result.request_id,
+        pricing_version="unknown",
+        pricing_inputs={
+            "prompt_tokens": result.prompt_tokens,
+            "completion_tokens": result.completion_tokens,
+        },
+        pricing_cache={"status": "unknown"},
+        pricing_output={"status": "unknown"},
+    )
+    actual = min(provider_tokens, quota_quantity)
     settle(
         session,
         reservation_id=reservation.id,
@@ -332,6 +415,7 @@ async def send_message(
         provider="nanobot",
         model=result.model,
         request_id=result.request_id,
+        details={"provider_quantity": str(provider_tokens)},
     )
     run.assistant_content = result.content
     run.upstream_request_id = result.request_id
@@ -349,7 +433,8 @@ async def send_message(
             subject_id=run.id,
             details={
                 "campaign_id": campaign_id,
-                "tokens": actual,
+                "tokens": str(actual),
+                "provider_tokens": str(provider_tokens),
                 "quota_user_id": quota_user_id,
                 "identity_assignment_id": conversation.identity_assignment_id,
                 "requester_principal": authority_context["requester_principal"],

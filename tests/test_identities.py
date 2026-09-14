@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from conftest import FakeAgentRuntime, FakeDndRuntime
+from conftest import FakeAgentRuntime, FakeDndRuntime, promote_test_admin
 from fastapi.testclient import TestClient
 from test_community import login, publish, register
 
@@ -10,8 +10,8 @@ def test_dm_identity_invitation_memory_agent_and_revocation(
     dnd_runtime: FakeDndRuntime,
     agent_runtime: FakeAgentRuntime,
 ) -> None:
-    client.app.state.settings.bootstrap_admin_email = "admin@forge.example.com"
-    register(client, "admin@forge.example.com", "Moderator")
+    admin = register(client, "admin@forge.example.com", "Moderator")
+    promote_test_admin(client, admin["id"])
     identity_owner = register(client, "identity@forge.example.com", "Identity Owner")
     _soul, soul_release = publish(
         client,
@@ -155,8 +155,8 @@ def test_keeper_identity_uses_coc_campaign_runtime(
     dnd_runtime: FakeDndRuntime,
     agent_runtime: FakeAgentRuntime,
 ) -> None:
-    client.app.state.settings.bootstrap_admin_email = "admin@forge.example.com"
-    register(client, "admin@forge.example.com", "Keeper Moderator")
+    admin = register(client, "admin@forge.example.com", "Keeper Moderator")
+    promote_test_admin(client, admin["id"])
     register(client, "keeper-owner@example.com", "Keeper Owner")
     _soul, soul_release = publish(
         client,
@@ -214,8 +214,8 @@ def test_moderation_suspends_identity_and_revokes_mcp_grant(
     dnd_runtime: FakeDndRuntime,
     agent_runtime: FakeAgentRuntime,
 ) -> None:
-    client.app.state.settings.bootstrap_admin_email = "admin@forge.example.com"
-    register(client, "admin@forge.example.com", "Moderator")
+    admin = register(client, "admin@forge.example.com", "Moderator")
+    promote_test_admin(client, admin["id"])
     register(client, "host@example.com", "Host")
     _soul, soul_release = publish(
         client,

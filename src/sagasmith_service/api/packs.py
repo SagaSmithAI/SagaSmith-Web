@@ -20,6 +20,7 @@ from sagasmith_service.pack_archive import (
 )
 from sagasmith_service.schemas import CampaignPackView, PrivatePackView
 from sagasmith_service.storage import LocalPrivateStorage, PrivateStorageError
+from sagasmith_service.storage_quota import upload_allowance
 
 router = APIRouter(prefix="/api/packs", tags=["private-packs"])
 
@@ -116,9 +117,13 @@ def upload_private_pack(
     session.flush()
     key = f"users/{user.id}/packs/{item.id}{ARCHIVE_EXTENSION}"
     storage: LocalPrivateStorage = request.app.state.private_storage
+    allowance = upload_allowance(
+        session, user.id, quota=request.app.state.settings.user_upload_storage_bytes,
+        file_limit=request.app.state.settings.max_pack_bytes,
+    )
     try:
         checksum, size = storage.put(
-            key, archive.file, max_bytes=request.app.state.settings.max_pack_bytes
+            key, archive.file, max_bytes=allowance
         )
     except ValueError as exc:
         session.rollback()

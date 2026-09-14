@@ -36,7 +36,7 @@
       "postgres_17_alpine": "sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73",
       "redis_7_4_alpine": "sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2",
       "caddy_2_10_alpine": "sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d",
-      "minio_2025_04_22": "sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e"
+      "minio_2025_04_22": "sha256:92114c07a60d96f6d8bbdcb6fe770d3fea4be047e4bf0afb922ff529385f736a"
     }
   },
   "required_contracts": {
@@ -77,8 +77,8 @@
     },
     {
       "repository": "SagaSmith-agent",
-      "branch": "main",
-      "revision": "c0731c44775a045bb106000391ef6240f7b4d2a3",
+      "branch": "feat/hosted-budget-20260914",
+      "revision": "2780a2134201f5c2dd66eae43f7bcfcb87efd880",
       "remote": "https://github.com/SagaSmithAI/SagaSmith-agent.git",
       "usage": "build",
       "enforced": true

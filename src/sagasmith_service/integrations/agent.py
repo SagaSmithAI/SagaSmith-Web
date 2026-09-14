@@ -9,6 +9,7 @@ from urllib.parse import quote
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
+from sagasmith_service.config import Settings
 from sagasmith_service.observability import AGENT_UPSTREAM_SECONDS, observe_latency
 
 
@@ -62,10 +63,32 @@ class AgentResult:
 
 
 class AgentRuntimeError(RuntimeError):
-    def __init__(self, message: str, *, retryable: bool, code: str) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool,
+        code: str,
+        request_id: str | None = None,
+        model: str | None = None,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
+        total_tokens: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.retryable = retryable
         self.code = code
+        self.request_id = request_id
+        self.model = model
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
+        self.total_tokens_override = total_tokens
+
+    @property
+    def total_tokens(self) -> int | None:
+        if self.prompt_tokens is None and self.completion_tokens is None:
+            return self.total_tokens_override
+        return max(0, self.prompt_tokens or 0) + max(0, self.completion_tokens or 0)
 
 
 class ModernWorkerTrustedContext(BaseModel):
@@ -219,11 +242,13 @@ class HttpAgentRuntime:
         timeout_seconds: int = 180,
         boundary_mode: Literal["legacy", "modern"] = "modern",
         http_client: httpx.AsyncClient | None = None,
+        budget_settings: Settings | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
         self.boundary_mode = boundary_mode
+        self.budget_settings = budget_settings
         self._owns_http_client = http_client is None
         self.http_client = (
             http_client
@@ -262,6 +287,14 @@ class HttpAgentRuntime:
         idempotency_key: str | None = None,
         trace_context: dict[str, str] | None = None,
     ) -> AgentResult:
+        if self.budget_settings and self.budget_settings.provider_budget_enabled:
+            from sagasmith_service.provider_budget_api import callback_for
+
+            context = dict(context)
+            context["response_contract"] = {
+                **(context.get("response_contract") or {}),
+                "usage_callback": callback_for(self.budget_settings, context),
+            }
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
@@ -300,10 +333,35 @@ class HttpAgentRuntime:
                 ) from exc
             if response.status_code >= 400:
                 retryable = response.status_code in {408, 425, 429} or response.status_code >= 500
+                error_payload: dict[str, Any] = {}
+                try:
+                    decoded = response.json()
+                    if isinstance(decoded, dict):
+                        error_payload = decoded
+                except ValueError:
+                    pass
+                error_usage = error_payload.get("usage") or {}
                 raise AgentRuntimeError(
                     f"Agent returned HTTP {response.status_code}",
                     retryable=retryable,
                     code=f"agent_http_{response.status_code}",
+                    request_id=(str(error_payload["id"]) if error_payload.get("id") else None),
+                    model=(str(error_payload["model"]) if error_payload.get("model") else None),
+                    prompt_tokens=(
+                        int(error_usage["prompt_tokens"])
+                        if error_usage.get("prompt_tokens") is not None
+                        else None
+                    ),
+                    completion_tokens=(
+                        int(error_usage["completion_tokens"])
+                        if error_usage.get("completion_tokens") is not None
+                        else None
+                    ),
+                    total_tokens=(
+                        int(error_usage["total_tokens"])
+                        if error_usage.get("total_tokens") is not None
+                        else None
+                    ),
                 )
             payload = response.json()
             try:

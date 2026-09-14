@@ -19,7 +19,12 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from sagasmith_service.config import Settings, get_settings
 from sagasmith_service.database import make_engine, make_session_factory
-from sagasmith_service.integrations.agent import AgentResult, AgentRuntime, HttpAgentRuntime
+from sagasmith_service.integrations.agent import (
+    AgentResult,
+    AgentRuntime,
+    AgentRuntimeError,
+    HttpAgentRuntime,
+)
 from sagasmith_service.integrations.dnd_mcp import DndRuntime, StreamableHttpDndRuntime
 from sagasmith_service.models import (
     AuditEvent,
@@ -38,6 +43,7 @@ from sagasmith_service.quota import release as release_quota
 from sagasmith_service.realtime import install_transactional_outbox
 from sagasmith_service.room_tool_policy import campaign_phase_and_revision
 from sagasmith_service.storage import LocalPrivateStorage, S3PrivateStorage
+from sagasmith_service.usage_accounting import record_provider_consumption
 
 logger = logging.getLogger("sagasmith_service.module_worker")
 MODULE_RUNS = Counter(
@@ -188,9 +194,7 @@ class ModuleJobProcessor:
         self.storage = storage
         self.settings = settings
         self.worker_id = worker_id or f"{socket.gethostname()}-{id(self)}"
-        self.blocking_io = blocking_io or BoundedBlockingIo(
-            settings.module_worker_io_concurrency
-        )
+        self.blocking_io = blocking_io or BoundedBlockingIo(settings.module_worker_io_concurrency)
 
     def recover_expired(self) -> int:
         now = now_utc()
@@ -312,8 +316,7 @@ class ModuleJobProcessor:
             run.reservation_id = reservation.id
             session.commit()
             session_id = (
-                f"{project.authoring_campaign_id}:{user.id}:"
-                f"module-{project.id[:12]}-{run.run_type}"
+                f"{project.authoring_campaign_id}:{user.id}:module-{project.id[:12]}-{run.run_type}"
             )
             project_context = {
                 "project_id": project.id,
@@ -353,8 +356,7 @@ class ModuleJobProcessor:
             "system_id": "dnd5e",
             "base_revision": base_revision,
             "expires_at": (
-                now_utc()
-                + timedelta(seconds=self.settings.agent_delegation_ttl_seconds)
+                now_utc() + timedelta(seconds=self.settings.agent_delegation_ttl_seconds)
             ).isoformat(),
             "idempotency_key": agent_idempotency_key,
             "conversation_principal": conversation_principal,
@@ -380,6 +382,7 @@ class ModuleJobProcessor:
                 "principal_id": principal_id,
                 "campaign_role": "owner",
                 "authority_context": authority_context,
+                "budget_user_id": user.id,
             },
             idempotency_key=agent_idempotency_key,
         )
@@ -388,22 +391,45 @@ class ModuleJobProcessor:
             run, project, _ = self._entities(session, run_id)
             if run.cancel_requested or project.cancel_requested:
                 raise RuntimeError("Module run was canceled")
+            provider_tokens = Decimal(agent_result.total_tokens)
+            record_provider_consumption(
+                session,
+                user_id=run.requested_by_user_id,
+                campaign_id=project.authoring_campaign_id,
+                task_id=run.id,
+                reservation_id=str(run.reservation_id),
+                metric="llm_tokens",
+                quantity=provider_tokens,
+                unit="tokens",
+                idempotency_key=f"module-run-provider:{run.id}",
+                provider="hosted-agent",
+                model=agent_result.model,
+                request_id=agent_result.request_id,
+                pricing_version="unknown",
+                pricing_inputs={
+                    "prompt_tokens": agent_result.prompt_tokens,
+                    "completion_tokens": agent_result.completion_tokens,
+                },
+                pricing_cache={"status": "unknown"},
+                pricing_output={"status": "unknown"},
+            )
             settle(
                 session,
                 reservation_id=str(run.reservation_id),
-                quantity=Decimal(agent_result.total_tokens),
+                quantity=min(provider_tokens, reservation_quantity),
                 idempotency_key=f"module-run-settle:{run.id}",
                 unit="token",
                 provider="hosted-agent",
                 model=agent_result.model,
                 request_id=agent_result.request_id,
+                details={"provider_quantity": str(provider_tokens)},
             )
             run.prompt_tokens = agent_result.prompt_tokens
             run.completion_tokens = agent_result.completion_tokens
             run.model = agent_result.model
             run.upstream_request_id = agent_result.request_id
             run.result = {**dict(run.result or {}), "agent_decision": decision}
-            project.used_tokens += agent_result.total_tokens
+            project.used_tokens += int(provider_tokens)
             session.commit()
         return decision
 
@@ -425,9 +451,7 @@ class ModuleJobProcessor:
             source_name = source.name
             storage_key = source.storage_key
             source_id = source.id
-        source_text = await self.blocking_io.run(
-            "source.read", _source_text, self.storage, source
-        )
+        source_text = await self.blocking_io.run("source.read", _source_text, self.storage, source)
         payload: dict[str, Any] = {"title": project.title, "source_key": source_key}
         materialized: Path | None = None
         try:
@@ -451,9 +475,7 @@ class ModuleJobProcessor:
             )
         finally:
             if materialized is not None:
-                await self.blocking_io.run(
-                    "source.cleanup", materialized.unlink, missing_ok=True
-                )
+                await self.blocking_io.run("source.cleanup", materialized.unlink, missing_ok=True)
         with self.factory() as session:
             _, project, _ = self._entities(session, run_id)
             _sync_draft(project, receipt)
@@ -493,9 +515,7 @@ class ModuleJobProcessor:
             )
         return {"chunks": bounded_chunks, "package": _unwrap(package)}
 
-    async def _store_generated_source(
-        self, run_id: str, content: str, name: str
-    ) -> ModuleSource:
+    async def _store_generated_source(self, run_id: str, content: str, name: str) -> ModuleSource:
         raw = content.encode("utf-8")
         with self.factory() as session:
             _, project, _ = self._entities(session, run_id)
@@ -636,9 +656,7 @@ class ModuleJobProcessor:
         with self.factory() as session:
             _, project, _ = self._entities(session, run_id)
             source = self._current_source(session, project)
-        source_text = await self.blocking_io.run(
-            "source.read", _source_text, self.storage, source
-        )
+        source_text = await self.blocking_io.run("source.read", _source_text, self.storage, source)
         evidence = {"current_source": source_text[:1_000_000]} if source_text else {}
         decision = await self._agent_json(
             run_id,
@@ -821,9 +839,7 @@ class ModuleJobProcessor:
             _sync_draft(project, receipt)
             project.version = version
             project.final_artifact = artifact
-            project.final_pack_id = (
-                str(summary.get("pack_id") or pack_id) or None
-            )
+            project.final_pack_id = str(summary.get("pack_id") or pack_id) or None
             project.final_checksum = checksum or None
             project.finalization = {
                 "confirmation": confirmation,
@@ -936,6 +952,52 @@ class ModuleJobProcessor:
             if run is None:
                 return
             project = session.get(ModuleProject, run.project_id)
+            if (
+                isinstance(error, AgentRuntimeError)
+                and error.total_tokens is not None
+                and run.reservation_id
+                and project is not None
+            ):
+                provider_tokens = Decimal(error.total_tokens)
+                record_provider_consumption(
+                    session,
+                    user_id=run.requested_by_user_id,
+                    campaign_id=project.authoring_campaign_id,
+                    task_id=run.id,
+                    reservation_id=str(run.reservation_id),
+                    metric="llm_tokens",
+                    quantity=provider_tokens,
+                    unit="tokens",
+                    idempotency_key=f"module-run-provider:{run.id}",
+                    provider="hosted-agent",
+                    model=error.model,
+                    request_id=error.request_id,
+                    pricing_version="unknown",
+                    pricing_inputs={
+                        "prompt_tokens": error.prompt_tokens,
+                        "completion_tokens": error.completion_tokens,
+                    },
+                    pricing_cache={"status": "unknown"},
+                    pricing_output={"status": "unknown"},
+                    details={"status": "partial_failure", "error_code": error.code},
+                )
+                settle(
+                    session,
+                    reservation_id=str(run.reservation_id),
+                    quantity=min(
+                        provider_tokens,
+                        Decimal(self.settings.module_agent_reservation_tokens),
+                    ),
+                    idempotency_key=f"module-run-settle:{run.id}",
+                    unit="token",
+                    provider="hosted-agent",
+                    model=error.model,
+                    request_id=error.request_id,
+                    details={
+                        "provider_quantity": str(provider_tokens),
+                        "status": "partial_failure",
+                    },
+                )
             run.error = message
             run.lease_owner = None
             run.lease_expires_at = None
@@ -985,6 +1047,8 @@ def _storage(settings: Settings) -> Any:
             access_key=settings.object_access_key,
             secret_key=settings.object_secret_key.get_secret_value(),
             exchange_root=settings.exchange_dir,
+            region=settings.object_region,
+            create_bucket=settings.object_create_bucket,
         )
     return LocalPrivateStorage(settings.private_storage_dir, settings.exchange_dir)
 
@@ -1002,6 +1066,7 @@ async def run_workers(settings: Settings) -> None:
         settings.agent_api_key.get_secret_value(),
         timeout_seconds=settings.agent_completion_timeout_seconds,
         boundary_mode=settings.agent_boundary_mode,
+        budget_settings=settings,
     )
     storage = await asyncio.to_thread(_storage, settings)
     blocking_io = BoundedBlockingIo(settings.module_worker_io_concurrency)
