@@ -4,7 +4,7 @@ import os
 
 import pytest
 from playwright.sync_api import expect, sync_playwright
-from test_account_lifecycle import _register
+from test_account_lifecycle import LiveWeb, _register
 from test_account_lifecycle import live_web as _live_web
 
 live_web = _live_web
@@ -15,11 +15,11 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def test_timeline_batches_snapshot_and_preserves_order(live_web: str) -> None:
+def test_timeline_batches_snapshot_and_preserves_order(live_web: LiveWeb) -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(channel="chrome", headless=True)
         page = browser.new_page(service_workers="block")
-        page.goto(live_web)
+        page.goto(live_web.base_url)
         result = page.evaluate("""async () => {
           const { state } = await import('/assets/state/store.js');
           const { createRoomTimelineController } = await import('/assets/room/timeline.js');
@@ -72,11 +72,11 @@ def test_timeline_batches_snapshot_and_preserves_order(live_web: str) -> None:
         browser.close()
 
 
-def test_old_snapshot_and_event_source_cannot_mutate_new_room(live_web: str) -> None:
+def test_old_snapshot_and_event_source_cannot_mutate_new_room(live_web: LiveWeb) -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(channel="chrome", headless=True)
         page = browser.new_page(service_workers="block")
-        page.goto(live_web)
+        page.goto(live_web.base_url)
         result = page.evaluate("""async () => {
           const { state } = await import('/assets/state/store.js');
           const { createRoomTimelineController } = await import('/assets/room/timeline.js');
@@ -117,11 +117,11 @@ def test_old_snapshot_and_event_source_cannot_mutate_new_room(live_web: str) -> 
         browser.close()
 
 
-def test_character_transient_failure_recovers_and_coalesces(live_web: str) -> None:
+def test_character_transient_failure_recovers_and_coalesces(live_web: LiveWeb) -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(channel="chrome", headless=True)
         page = browser.new_page(service_workers="block")
-        page.goto(live_web)
+        page.goto(live_web.base_url)
         result = page.evaluate("""async () => {
           const { state } = await import('/assets/state/store.js');
           const { createCharacterController } = await import('/assets/room/characters.js');
@@ -156,7 +156,7 @@ def test_character_transient_failure_recovers_and_coalesces(live_web: str) -> No
         browser.close()
 
 
-def test_campaign_retry_keyboard_and_duplicate_submission(live_web: str) -> None:
+def test_campaign_retry_keyboard_and_duplicate_submission(live_web: LiveWeb) -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(channel="chrome", headless=True)
         page = browser.new_page(service_workers="block", viewport={"width": 390, "height": 844})
@@ -171,7 +171,7 @@ def test_campaign_retry_keyboard_and_duplicate_submission(live_web: str) -> None
                 route.continue_()
 
         page.route("**/api/campaigns", campaign_request)
-        _register(page, live_web)
+        _register(page, live_web.base_url)
         page.locator("#campaign-list").get_by_role("button", name="重试").click()
         expect(page.locator("#campaign-list")).to_contain_text("还没有战役")
         page.locator("#new-campaign").click()
@@ -209,11 +209,11 @@ def test_campaign_retry_keyboard_and_duplicate_submission(live_web: str) -> None
         browser.close()
 
 
-def test_failed_room_open_keeps_retry_when_sibling_snapshot_finishes(live_web: str) -> None:
+def test_failed_room_open_keeps_retry_when_sibling_snapshot_finishes(live_web: LiveWeb) -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(channel="chrome", headless=True)
         page = browser.new_page(service_workers="block")
-        page.goto(live_web)
+        page.goto(live_web.base_url)
         result = page.evaluate("""async () => {
           const { state } = await import('/assets/state/store.js');
           const { createRoomController } = await import('/assets/room/controller.js');
@@ -236,11 +236,11 @@ def test_failed_room_open_keeps_retry_when_sibling_snapshot_finishes(live_web: s
         browser.close()
 
 
-def test_installed_shell_reloads_offline_without_caching_api(live_web: str) -> None:
+def test_installed_shell_reloads_offline_without_caching_api(live_web: LiveWeb) -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(channel="chrome", headless=True)
         page = browser.new_page()
-        page.goto(live_web)
+        page.goto(live_web.base_url)
         page.evaluate("navigator.serviceWorker.ready.then(() => true)")
         page.reload()
         page.wait_for_function("navigator.serviceWorker.controller !== null")
