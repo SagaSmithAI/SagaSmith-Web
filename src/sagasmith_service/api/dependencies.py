@@ -87,3 +87,18 @@ def streaming_current_user(
 
 
 StreamingCurrentUser = Annotated[User, Depends(streaming_current_user)]
+
+
+def beta_authoring_gate(request: Request) -> None:
+    """Keep expensive authoring and publication operator-controlled during beta."""
+    if request.app.state.settings.env != "production":
+        return
+    if request.method in {"GET", "HEAD", "OPTIONS"}:
+        return
+    path = request.url.path
+    if not (path.startswith("/api/modules") or path.endswith(("/releases", "/agent-review"))):
+        return
+    with request.app.state.session_factory() as session:
+        authenticated = authenticate_session(session, request.cookies.get(SESSION_COOKIE))
+        if not authenticated or not authenticated[0].is_admin:
+            raise HTTPException(403, "beta authoring and publication require an administrator")

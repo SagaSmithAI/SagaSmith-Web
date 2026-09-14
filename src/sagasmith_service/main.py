@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 import httpx
 import httpx2
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.engine import Engine
@@ -28,6 +28,7 @@ from sagasmith_service.api.audit import router as audit_router
 from sagasmith_service.api.auth import router as auth_router
 from sagasmith_service.api.campaigns import router as campaign_router
 from sagasmith_service.api.community import router as community_router
+from sagasmith_service.api.dependencies import beta_authoring_gate
 from sagasmith_service.api.identities import router as identities_router
 from sagasmith_service.api.invites import router as invites_router
 from sagasmith_service.api.modules import NOTIFICATION_ROUTER
@@ -62,6 +63,7 @@ from sagasmith_service.observability import (
     reset_hot_path_observation,
     sample_max_event_loop_lag,
 )
+from sagasmith_service.provider_budget_api import router as provider_budget_router
 from sagasmith_service.rate_limit import (
     MemoryRateLimiter,
     RateLimiter,
@@ -75,7 +77,7 @@ from sagasmith_service.realtime import (
     install_transactional_outbox,
 )
 from sagasmith_service.room_jobs import RoomTurnJobProcessor
-from sagasmith_service.security import SESSION_COOKIE
+from sagasmith_service.security import SESSION_COOKIE, authenticate_session
 from sagasmith_service.storage import LocalPrivateStorage, S3PrivateStorage
 
 logger = logging.getLogger("sagasmith_service.http")
@@ -202,6 +204,7 @@ def create_app(
         settings.agent_api_key.get_secret_value(),
         timeout_seconds=settings.agent_completion_timeout_seconds,
         boundary_mode=settings.agent_boundary_mode,
+        budget_settings=settings,
         http_client=managed_http_client(
             "agent",
             timeout=httpx.Timeout(settings.agent_completion_timeout_seconds, connect=10),
@@ -233,6 +236,8 @@ def create_app(
             access_key=settings.object_access_key,
             secret_key=settings.object_secret_key.get_secret_value(),
             exchange_root=settings.exchange_dir,
+            region=settings.object_region,
+            create_bucket=settings.object_create_bucket,
         )
     else:
         app.state.private_storage = LocalPrivateStorage(
@@ -306,13 +311,31 @@ def create_app(
             if response is None and policy is not None:
                 category, limit, window_seconds = policy
                 client_host = request.client.host if request.client else "unknown"
-                identity = request.cookies.get(SESSION_COOKIE) or client_host
+                # Uvicorn resolves forwarded headers only from explicitly trusted proxies.
+                # Unverified cookie strings must never select a rate-limit bucket.
+                identities = [(f"{category}-ip", client_host, limit)]
+                if category != "auth" and request.cookies.get(SESSION_COOKIE):
+                    def authenticated_identity() -> str | None:
+                        with session_factory() as session:
+                            authenticated = authenticate_session(
+                                session, request.cookies.get(SESSION_COOKIE)
+                            )
+                            return authenticated[0].id if authenticated else None
+
+                    user_id = await asyncio.to_thread(authenticated_identity)
+                    if user_id:
+                        identities.append((f"{category}-user", str(user_id), limit))
+                identities.append(("site", "all", settings.global_rate_limit))
                 try:
-                    retry_after = await app.state.rate_limiter.hit(
-                        opaque_rate_key(category, identity),
-                        limit=limit,
-                        window_seconds=window_seconds,
-                    )
+                    retry_after = None
+                    for key_category, identity, bucket_limit in identities:
+                        blocked = await app.state.rate_limiter.hit(
+                            opaque_rate_key(key_category, identity),
+                            limit=bucket_limit,
+                            window_seconds=60 if key_category == "site" else window_seconds,
+                        )
+                        if blocked is not None:
+                            retry_after = max(retry_after or 0, blocked)
                 except RateLimiterUnavailableError:
                     response = JSONResponse(
                         status_code=503,
@@ -331,7 +354,7 @@ def create_app(
             reset_request_id(request_token)
         elapsed = time.perf_counter() - started
         route = request.scope.get("route")
-        route_path = getattr(route, "path", request.url.path)
+        route_path = getattr(route, "path", None) or "unmatched"
         REQUESTS.labels(request.method, route_path, response.status_code).inc()
         HTTP_LATENCY_SECONDS.labels(request.method, route_path).observe(elapsed)
         response.headers["X-Request-ID"] = request_id
@@ -356,9 +379,9 @@ def create_app(
 
     app.include_router(auth_router(settings))
     app.include_router(campaign_router)
-    app.include_router(community_router)
+    app.include_router(community_router, dependencies=[Depends(beta_authoring_gate)])
     app.include_router(identities_router)
-    app.include_router(modules_router)
+    app.include_router(modules_router, dependencies=[Depends(beta_authoring_gate)])
     app.include_router(NOTIFICATION_ROUTER)
     app.include_router(usage_router)
     app.include_router(agent_router)
@@ -368,6 +391,7 @@ def create_app(
     app.include_router(admin_router)
     app.include_router(audit_router)
     app.include_router(operations_router)
+    app.include_router(provider_budget_router)
 
     @app.get("/api/health", tags=["operations"])
     def health() -> dict[str, str]:

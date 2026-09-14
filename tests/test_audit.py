@@ -1,3 +1,4 @@
+from conftest import promote_test_admin
 from fastapi.testclient import TestClient
 
 PASSWORD = "correct horse battery staple"
@@ -19,8 +20,8 @@ def login(client: TestClient, email: str) -> None:
 
 
 def test_admin_can_filter_request_correlated_audit_events(client: TestClient) -> None:
-    client.app.state.settings.bootstrap_admin_email = "audit-admin@example.com"
-    register(client, "audit-admin@example.com", "Audit Admin")
+    admin = register(client, "audit-admin@example.com", "Audit Admin")
+    promote_test_admin(client, admin["id"])
     target = register(
         client,
         "audit-target@example.com",
@@ -42,8 +43,8 @@ def test_admin_can_filter_request_correlated_audit_events(client: TestClient) ->
 
 
 def test_logout_is_audited(client: TestClient) -> None:
-    client.app.state.settings.bootstrap_admin_email = "logout-admin@example.com"
     admin = register(client, "logout-admin@example.com", "Logout Admin")
+    promote_test_admin(client, admin["id"])
     response = client.post("/api/auth/logout", headers={"X-Request-ID": "audit-logout-001"})
     assert response.status_code == 204
     login(client, "logout-admin@example.com")

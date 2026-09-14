@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 import boto3
+from botocore.exceptions import ClientError
 
 from sagasmith_service.pack_archive import ARCHIVE_EXTENSION
 
@@ -43,15 +44,18 @@ class LocalPrivateStorage:
         destination.parent.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256()
         size = 0
-        with destination.open("xb") as target:
-            while chunk := source.read(1024 * 1024):
-                size += len(chunk)
-                if size > max_bytes:
-                    target.close()
-                    destination.unlink(missing_ok=True)
-                    raise ValueError("upload exceeds configured Pack size limit")
-                digest.update(chunk)
-                target.write(chunk)
+        target = destination.open("xb")
+        try:
+            with target:
+                while chunk := source.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > max_bytes:
+                        raise ValueError("upload exceeds configured Pack size limit")
+                    digest.update(chunk)
+                    target.write(chunk)
+        except BaseException:
+            destination.unlink(missing_ok=True)
+            raise
         return digest.hexdigest(), size
 
     def read_bytes(self, key: str, *, max_bytes: int) -> bytes:
@@ -137,6 +141,8 @@ class S3PrivateStorage:
         access_key: str,
         secret_key: str,
         exchange_root: str,
+        region: str = "us-east-1",
+        create_bucket: bool = False,
     ) -> None:
         self.bucket = bucket
         self.exchange_root = Path(exchange_root).resolve()
@@ -146,11 +152,20 @@ class S3PrivateStorage:
             endpoint_url=endpoint,
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
+            region_name=region,
         )
         try:
             self.client.head_bucket(Bucket=bucket)
-        except Exception:
-            self.client.create_bucket(Bucket=bucket)
+        except ClientError as exc:
+            code = str(exc.response.get("Error", {}).get("Code", ""))
+            if not create_bucket or code not in {"404", "NoSuchBucket"}:
+                raise PrivateStorageError(
+                    "private bucket is unavailable; provision it first"
+                ) from exc
+            options = {} if region == "us-east-1" else {
+                "CreateBucketConfiguration": {"LocationConstraint": region}
+            }
+            self.client.create_bucket(Bucket=bucket, **options)
 
     def probe(self) -> None:
         try:
@@ -178,15 +193,11 @@ class S3PrivateStorage:
                         raise ValueError("upload exceeds configured Pack size limit")
                     digest.update(chunk)
                     temporary.write(chunk)
-            self.client.upload_file(
-                temporary_name,
-                self.bucket,
-                key,
-                ExtraArgs={
-                    "ContentType": content_type,
-                    "Metadata": {"sha256": digest.hexdigest()},
-                },
-            )
+            with open(temporary_name, "rb") as body:
+                self.client.put_object(
+                    Bucket=self.bucket, Key=key, Body=body, ContentType=content_type,
+                    Metadata={"sha256": digest.hexdigest()}, IfNoneMatch="*",
+                )
             return digest.hexdigest(), size
         finally:
             if temporary_name:
@@ -196,9 +207,13 @@ class S3PrivateStorage:
         try:
             response = self.client.get_object(Bucket=self.bucket, Key=key)
             size = int(response.get("ContentLength") or 0)
-            if size > max_bytes:
-                raise PrivateStorageError("private object exceeds the read limit")
-            payload = response["Body"].read(max_bytes + 1)
+            body = response["Body"]
+            try:
+                if size > max_bytes:
+                    raise PrivateStorageError("private object exceeds the read limit")
+                payload = body.read(max_bytes + 1)
+            finally:
+                body.close()
         except PrivateStorageError:
             raise
         except Exception as exc:
@@ -217,12 +232,18 @@ class S3PrivateStorage:
     ) -> tuple[str, int]:
         if len(payload) > max_bytes:
             raise ValueError("object exceeds configured size limit")
-        return self.put(
-            key,
-            io.BytesIO(payload),
-            max_bytes=max_bytes,
-            content_type=content_type,
-        )
+        try:
+            return self.put(
+                key, io.BytesIO(payload), max_bytes=max_bytes, content_type=content_type,
+            )
+        except ClientError as exc:
+            code = str(exc.response.get("Error", {}).get("Code", ""))
+            if code not in {"PreconditionFailed", "412"}:
+                raise PrivateStorageError("conditional private object write failed") from exc
+            existing = self.read_bytes(key, max_bytes=max_bytes)
+            if existing != payload:
+                raise PrivateStorageError("idempotent object key contains different bytes") from exc
+            return hashlib.sha256(payload).hexdigest(), len(payload)
 
     def delete(self, key: str) -> None:
         try:

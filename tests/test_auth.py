@@ -1,14 +1,18 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from threading import Barrier
 
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
+from sagasmith_service.api.auth import _consume_registration_invite
 from sagasmith_service.api.dependencies import CurrentUser, DbSession
 from sagasmith_service.database import Base, make_engine, make_session_factory
+from sagasmith_service.invite_models import RegistrationInvite
 from sagasmith_service.models import AuditEvent, User, UserSession, now_utc
-from sagasmith_service.security import SESSION_COOKIE, create_session
+from sagasmith_service.security import SESSION_COOKIE, create_session, token_hash
 
 SESSION_ACTIVITY_SENTINEL = datetime(2000, 1, 1, tzinfo=UTC)
 
@@ -25,6 +29,26 @@ def register(client: TestClient, email: str = "dm@example.com"):
             "privacy_version": "2026-08-29",
         },
     )
+
+
+def add_registration_invite(
+    client: TestClient,
+    token: str,
+    *,
+    email: str | None = None,
+    expires_at=None,
+    max_uses: int = 1,
+) -> None:
+    factory = client.app.state.session_factory
+    with factory.begin() as session:
+        session.add(
+            RegistrationInvite(
+                token_hash=token_hash(token),
+                email=email,
+                expires_at=expires_at or (now_utc() + timedelta(hours=1)),
+                max_uses=max_uses,
+            )
+        )
 
 
 def test_register_me_logout_and_login(client: TestClient) -> None:
@@ -58,6 +82,102 @@ def test_duplicate_registration_and_wrong_password_are_bounded(client: TestClien
     )
     assert rejected.status_code == 401
     assert rejected.json()["detail"] == "invalid email or password"
+
+
+def test_bootstrap_email_can_never_escalate_registration(client: TestClient) -> None:
+    client.app.state.settings.bootstrap_admin_email = "Admin@Example.com"
+    created = register(client, "ADMIN@example.com")
+    assert created.status_code == 201
+    assert created.json()["user"]["is_admin"] is False
+
+
+def test_invite_registration_binds_email_and_consumes_atomically(client: TestClient) -> None:
+    client.app.state.settings.registration_mode = "invite"
+    assert register(client, "invitee@example.com").status_code == 403
+    add_registration_invite(
+        client,
+        "invite-token-123456789012345678901234567890",
+        email="invitee@example.com",
+    )
+    created = client.post(
+        "/api/auth/register",
+        json={
+            "email": "INVITEE@example.com",
+            "password": "correct-horse-battery-staple",
+            "display_name": "Invitee",
+            "invite_token": "invite-token-123456789012345678901234567890",
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert client.post(
+        "/api/auth/register",
+        json={
+            "email": "second@example.com",
+            "password": "correct-horse-battery-staple",
+            "display_name": "Second",
+            "invite_token": "invite-token-123456789012345678901234567890",
+        },
+    ).status_code == 403
+
+
+def test_concurrent_invite_consumption_allows_only_one_final_use(client: TestClient) -> None:
+    token = "concurrent-invite-123456789012345678901234"
+    add_registration_invite(client, token, max_uses=1)
+    factory = client.app.state.session_factory
+    barrier = Barrier(2)
+
+    def consume() -> bool:
+        with factory.begin() as session:
+            barrier.wait()
+            try:
+                _consume_registration_invite(session, token, "concurrent@example.com")
+            except HTTPException:
+                return False
+            return True
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: consume(), range(2)))
+
+    assert sorted(results) == [False, True]
+    with factory() as session:
+        invite = session.scalar(select(RegistrationInvite))
+        assert invite is not None and invite.used_count == 1
+
+
+@pytest.mark.parametrize("state", ["expired", "exhausted", "wrong-email"])
+def test_invalid_registration_invites_are_rejected(client: TestClient, state: str) -> None:
+    client.app.state.settings.registration_mode = "invite"
+    token = f"invite-{state}-123456789012345678901234"
+    expires_at = now_utc() - timedelta(seconds=1) if state == "expired" else None
+    add_registration_invite(
+        client,
+        token,
+        email="bound@example.com" if state == "wrong-email" else None,
+        expires_at=expires_at,
+        max_uses=1,
+    )
+    if state == "exhausted":
+        factory = client.app.state.session_factory
+        with factory.begin() as session:
+            invite = session.scalar(select(RegistrationInvite))
+            assert invite is not None
+            invite.used_count = invite.max_uses
+    response = client.post(
+        "/api/auth/register",
+        json={
+            "email": "other@example.com",
+            "password": "correct-horse-battery-staple",
+            "display_name": "Other",
+            "invite_token": token,
+        },
+    )
+    assert response.status_code == 403
+
+
+def test_registration_does_not_grant_automatic_quota(client: TestClient) -> None:
+    created = register(client, "no-quota@example.com")
+    assert created.status_code == 201
+    assert client.get("/api/usage/balance").json()["granted"] in {"0", "0.000000"}
 
 
 def test_registration_requires_current_legal_acceptance(client: TestClient) -> None:

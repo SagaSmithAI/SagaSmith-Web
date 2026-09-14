@@ -32,7 +32,7 @@ TERMINAL_ROOM_JOB_STATES = frozenset({"succeeded", "failed", "cancelled"})
 ACTIVE_ROOM_JOB_STATES = frozenset({"queued", "running", "waiting"})
 
 
-@dataclass(frozen=True)
+@dataclass
 class RoomJobError(RuntimeError):
     code: str
     message: str

@@ -7,15 +7,20 @@ import threading
 import time
 import urllib.request
 from collections.abc import Iterator
+from dataclasses import dataclass
+from datetime import timedelta
+from decimal import Decimal
 from typing import Any
 
 import pytest
 import uvicorn
 from playwright.sync_api import Page, expect, sync_playwright
+from sqlalchemy import select
 
 from sagasmith_service.config import Settings
 from sagasmith_service.database import make_engine
 from sagasmith_service.main import create_app
+from sagasmith_service.models import QuotaGrant, User, now_utc
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("SAGASMITH_BROWSER_TESTS") != "1",
@@ -29,8 +34,14 @@ def _free_port() -> int:
         return int(listener.getsockname()[1])
 
 
+@dataclass(frozen=True)
+class LiveWeb:
+    base_url: str
+    app: Any
+
+
 @pytest.fixture
-def live_web(tmp_path, dnd_runtime: Any, agent_runtime: Any) -> Iterator[str]:
+def live_web(tmp_path, dnd_runtime: Any, agent_runtime: Any) -> Iterator[LiveWeb]:
     port = _free_port()
     database_url = f"sqlite:///{(tmp_path / 'browser.db').as_posix()}"
     settings = Settings(
@@ -66,7 +77,7 @@ def live_web(tmp_path, dnd_runtime: Any, agent_runtime: Any) -> Iterator[str]:
         thread.join(timeout=5)
         raise RuntimeError("browser test server did not become healthy")
     try:
-        yield base_url
+        yield LiveWeb(base_url=base_url, app=app)
     finally:
         server.should_exit = True
         thread.join(timeout=10)
@@ -86,7 +97,25 @@ def _register(page: Page, base_url: str) -> None:
     page.locator("#app").wait_for(state="visible")
 
 
-def test_account_lifecycle_in_a_real_browser(live_web: str) -> None:
+def _grant_test_quota(live_web: LiveWeb) -> None:
+    """Give browser scenarios an explicit entitlement after registration."""
+    with live_web.app.state.session_factory.begin() as session:
+        user = session.scalar(select(User).where(User.email == "browser@example.com"))
+        assert user is not None
+        start = now_utc()
+        session.add(
+            QuotaGrant(
+                user_id=user.id,
+                metric="llm_tokens",
+                quantity=Decimal(1_000_000),
+                period_start=start,
+                period_end=start + timedelta(days=30),
+                source="test",
+            )
+        )
+
+
+def test_account_lifecycle_in_a_real_browser(live_web: LiveWeb) -> None:
     console_errors: list[str] = []
 
     def record_console_error(message) -> None:
@@ -98,7 +127,7 @@ def test_account_lifecycle_in_a_real_browser(live_web: str) -> None:
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         page.on("console", record_console_error)
 
-        _register(page, live_web)
+        _register(page, live_web.base_url)
         page.get_by_role("button", name="账户", exact=True).click()
         page.locator("#account-view").wait_for(state="visible")
         expect(page.locator("#account-email")).to_have_text("browser@example.com")
@@ -125,14 +154,14 @@ def test_account_lifecycle_in_a_real_browser(live_web: str) -> None:
         password_form.get_by_role("button", name="更换并退出其他会话").click()
         page.get_by_text("密码已更新，其他会话已退出").wait_for(state="visible")
 
-        page.goto(f"{live_web}/legal/privacy.html")
+        page.goto(f"{live_web.base_url}/legal/privacy.html")
         page.wait_for_load_state("networkidle")
         assert page.get_by_role("heading", name="隐私说明", exact=True).is_visible()
-        page.goto(f"{live_web}/legal/terms.html")
+        page.goto(f"{live_web.base_url}/legal/terms.html")
         page.wait_for_load_state("networkidle")
         assert page.get_by_role("heading", name="使用条款", exact=True).is_visible()
 
-        page.goto(live_web)
+        page.goto(live_web.base_url)
         page.wait_for_load_state("networkidle")
         page.get_by_role("button", name="账户", exact=True).click()
         page.locator("#account-deactivate-form").get_by_label("当前密码").fill(
@@ -150,7 +179,7 @@ def test_account_lifecycle_in_a_real_browser(live_web: str) -> None:
 
 
 def test_hosted_room_media_and_combat_grid_render_in_a_real_browser(
-    live_web: str, agent_runtime: Any
+    live_web: LiveWeb, agent_runtime: Any
 ) -> None:
     image = base64.b64decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUB"
@@ -173,18 +202,19 @@ def test_hosted_room_media_and_combat_grid_render_in_a_real_browser(
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(channel="chrome", headless=True)
         page = browser.new_page(viewport={"width": 1280, "height": 900})
-        _register(page, live_web)
+        _register(page, live_web.base_url)
+        _grant_test_quota(live_web)
         request = page.context.request
-        common_headers = {"Origin": live_web}
+        common_headers = {"Origin": live_web.base_url}
         campaign_response = request.post(
-            f"{live_web}/api/campaigns",
+            f"{live_web.base_url}/api/campaigns",
             headers={**common_headers, "Idempotency-Key": "browser-media-campaign"},
             data={"name": "Browser Media", "edition": "2024"},
         )
         assert campaign_response.status == 201, campaign_response.text()
         campaign_id = campaign_response.json()["id"]
         room_response = request.post(
-            f"{live_web}/api/campaigns/{campaign_id}/room/messages",
+            f"{live_web.base_url}/api/campaigns/{campaign_id}/room/messages",
             headers={**common_headers, "Idempotency-Key": "browser-media-turn"},
             data={"content": "Render the shared map.", "mode": "action"},
         )
@@ -193,7 +223,7 @@ def test_hosted_room_media_and_combat_grid_render_in_a_real_browser(
             "url"
         ]
         combat_response = request.post(
-            f"{live_web}/api/campaigns/{campaign_id}/room/panel/actions",
+            f"{live_web.base_url}/api/campaigns/{campaign_id}/room/panel/actions",
             headers={**common_headers, "Idempotency-Key": "browser-grid-start"},
             data={
                 "action": "combat.start",

@@ -124,7 +124,7 @@ services:
       context: .
       dockerfile: infrastructure/Dockerfile.agent-supervisor
       additional_contexts:
-        agent_source: ${SAGASMITH_AGENT_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-agent.git#c0731c44775a045bb106000391ef6240f7b4d2a3}
+        agent_source: ${SAGASMITH_AGENT_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-agent.git#2780a2134201f5c2dd66eae43f7bcfcb87efd880}
         core: ${SAGASMITH_CORE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-core.git#612bfe7e5290eb5b23f2811baa83b8a28293b36e}
         dnd_domain: ${SAGASMITH_DND_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-dnd.git#ba602ea103de67d19ffbfba2f69f3802a9e34dd3}
         coc_domain: ${SAGASMITH_COC_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-coc.git#eebab0986299b0cd9ce420c3521e4688356e9746}
@@ -213,11 +213,13 @@ services:
     restart: unless-stopped
 
   minio:
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+    # Docker Hub currently denies this upstream image to GitHub-hosted CI.
+    # Quay publishes the same verified release tag and digest.
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: sagasmith
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-local-only-minio-secret}
     volumes:
       - object-data:/data
     healthcheck:

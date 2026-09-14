@@ -1,6 +1,6 @@
 from typing import Any
 
-from conftest import FakeAgentRuntime
+from conftest import FakeAgentRuntime, grant_test_quota
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -16,6 +16,7 @@ def register_and_create_campaign(client: TestClient) -> dict[str, Any]:
             "display_name": "Agent User",
         },
     ).json()["user"]
+    grant_test_quota(client, user["id"])
     response = client.post(
         "/api/campaigns",
         headers={"Idempotency-Key": "agent-campaign-1"},

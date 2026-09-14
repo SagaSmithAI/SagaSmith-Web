@@ -12,6 +12,8 @@ import uuid
 from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +26,7 @@ from sagasmith_service.config import Settings
 from sagasmith_service.database import make_engine
 from sagasmith_service.integrations.agent import AgentResult
 from sagasmith_service.main import create_app
-from sagasmith_service.models import AgentRun
+from sagasmith_service.models import AgentRun, QuotaGrant, now_utc
 from sagasmith_service.observability import _HOT_PATH_OBSERVATION
 
 _STATEMENT_CLASSES = ("select", "insert", "update", "delete", "transaction", "other")
@@ -335,6 +337,19 @@ async def _prepare_lane(
         },
     )
     _checked(response, operation="register")
+    user_id = str(response.json()["user"]["id"])
+    with app.state.session_factory.begin() as session:
+        started = now_utc()
+        session.add(
+            QuotaGrant(
+                user_id=user_id,
+                metric="llm_tokens",
+                quantity=Decimal("1000000"),
+                period_start=started,
+                period_end=started + timedelta(days=30),
+                source="test",
+            )
+        )
     response = await client.post(
         "/api/campaigns",
         headers={"Idempotency-Key": f"{prefix}-campaign"},

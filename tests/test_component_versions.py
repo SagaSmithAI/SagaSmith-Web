@@ -138,7 +138,7 @@ def test_release_lock_matches_final_coordinated_component_set() -> None:
     revisions = {item["repository"]: item["revision"] for item in lock["components"]}
     expected = {
         ".github": "6ee83e94efda617c1e0f36d370f87150a4e0c7d5",
-        "SagaSmith-agent": "c0731c44775a045bb106000391ef6240f7b4d2a3",
+        "SagaSmith-agent": "2780a2134201f5c2dd66eae43f7bcfcb87efd880",
         "sagasmith-core": "612bfe7e5290eb5b23f2811baa83b8a28293b36e",
         "sagasmith-dnd": "ba602ea103de67d19ffbfba2f69f3802a9e34dd3",
         "sagasmith-coc": "eebab0986299b0cd9ce420c3521e4688356e9746",
@@ -161,7 +161,9 @@ def test_release_lock_matches_final_coordinated_component_set() -> None:
     agent_contract = json.loads(
         (ROOT / "tests/fixtures/agent-modern-worker-contract.json").read_text(encoding="utf-8")
     )
-    assert agent_contract["source"] == f"SagaSmith-agent@{expected['SagaSmith-agent']}"
+    # Keep the provenance of the captured authority-contract fixture truthful.
+    # The new budget capability has separate behavioral supervisor/Agent tests.
+    assert agent_contract["source"] == "SagaSmith-agent@c0731c44775a045bb106000391ef6240f7b4d2a3"
 
 
 def test_hosted_agent_uses_owned_modern_request_scoped_tool_contract() -> None:

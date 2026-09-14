@@ -1,5 +1,11 @@
 # SagaSmith Web
 
+Beta deployment is an invitation-only candidate with offline administration, zero automatic
+signup credit and reviewed per-request provider budgets. Start with the
+[readiness ledger](docs/beta-readiness-status.md), [budget setup](docs/provider-budgets.md)
+and [production operations](docs/operations.md). Live model and independent restore acceptance
+are required before inviting users.
+
 [简体中文](README.zh-CN.md) · [Website](https://sagasmithai.github.io) ·
 [Platform overview](https://github.com/SagaSmithAI/.github/blob/main/profile/README.md) ·
 [Public content catalog](https://github.com/SagaSmithAI/SagaSmith-dnd-content-library) ·
@@ -90,7 +96,7 @@ The hosted build is reproducible from [`component-versions.json`](component-vers
 
 | Enforced component | Reviewed revision |
 |---|---|
-| SagaSmith Agent | `c0731c44775a045bb106000391ef6240f7b4d2a3` |
+| SagaSmith Agent | `2780a2134201f5c2dd66eae43f7bcfcb87efd880` |
 | SagaSmith Core | `612bfe7e5290eb5b23f2811baa83b8a28293b36e` |
 | D&D | `ba602ea103de67d19ffbfba2f69f3802a9e34dd3` |
 | CoC | `eebab0986299b0cd9ce420c3521e4688356e9746` |

@@ -1,10 +1,24 @@
 from __future__ import annotations
 
+from datetime import datetime
+from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class ProviderPrice(BaseModel):
+    provider: Literal["OpenAICompatProvider"]
+    version: str = Field(min_length=1)
+    valid_until: datetime
+    input_usd_per_million: Decimal = Field(gt=0, allow_inf_nan=False)
+    cached_usd_per_million: Decimal = Field(ge=0, allow_inf_nan=False)
+    output_usd_per_million: Decimal = Field(gt=0, allow_inf_nan=False)
+    max_input_tokens: int = Field(ge=1)
+    max_output_tokens: int = Field(ge=1)
+    max_request_bytes: int = Field(ge=1)
 
 
 class Settings(BaseSettings):
@@ -33,7 +47,13 @@ class Settings(BaseSettings):
     coc_mcp_url: str = "http://127.0.0.1:8768/mcp"
     session_ttl_seconds: int = 60 * 60 * 24 * 30
     secure_cookies: bool = False
-    signup_token_quota: int = 1_000_000
+    signup_token_quota: int = 0
+    registration_mode: Literal["open", "invite", "closed"] = "open"
+    global_rate_limit: int = Field(default=1000, ge=1, le=100_000)
+    readiness_cache_seconds: int = Field(default=10, ge=1, le=300)
+    provider_budget_enabled: bool = False
+    provider_prices: dict[str, ProviderPrice] = Field(default_factory=dict)
+    task_budget_usd: Decimal = Field(default=Decimal("1"), gt=0, allow_inf_nan=False)
     agent_reservation_tokens: int = 32_768
     agent_api_url: str = "http://127.0.0.1:8910"
     agent_api_key: SecretStr = SecretStr("")
@@ -56,6 +76,7 @@ class Settings(BaseSettings):
     max_pack_bytes: int = 200 * 1024 * 1024
     max_pack_uncompressed_bytes: int = 2 * 1024 * 1024 * 1024
     max_module_source_bytes: int = 100 * 1024 * 1024
+    user_upload_storage_bytes: int = Field(default=512 * 1024 * 1024, ge=1)
     module_agent_reservation_tokens: int = 131_072
     module_worker_poll_seconds: float = 1.0
     module_worker_lease_seconds: int = 900
@@ -67,6 +88,8 @@ class Settings(BaseSettings):
     storage_backend: str = "local"
     object_endpoint: str = "http://127.0.0.1:9000"
     object_bucket: str = "sagasmith-private"
+    object_region: str = "us-east-1"
+    object_create_bucket: bool = False
     object_access_key: str = ""
     object_secret_key: SecretStr = SecretStr("")
     combat_render_cache_entries: int = Field(default=8, ge=1, le=4096)
@@ -112,6 +135,16 @@ class Settings(BaseSettings):
             )
         if self.storage_backend != "s3":
             failures.append("SAGASMITH_STORAGE_BACKEND must be s3")
+        if self.registration_mode == "open":
+            failures.append("SAGASMITH_REGISTRATION_MODE must be invite or closed")
+        if self.signup_token_quota != 0:
+            failures.append("SAGASMITH_SIGNUP_TOKEN_QUOTA must be zero for beta")
+        if self.bootstrap_admin_email:
+            failures.append("SAGASMITH_BOOTSTRAP_ADMIN_EMAIL must be empty; use the offline CLI")
+        if self.object_create_bucket:
+            failures.append("production object buckets must be provisioned before startup")
+        if not self.provider_budget_enabled or not self.provider_prices:
+            failures.append("production requires provider budgets and reviewed versioned prices")
         object_secret = self.object_secret_key.get_secret_value()
         if not self.object_access_key or len(object_secret) < 32 or is_placeholder(object_secret):
             failures.append("private object-store credentials are required")

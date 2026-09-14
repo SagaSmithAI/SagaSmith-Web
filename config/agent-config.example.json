@@ -3,11 +3,23 @@
     "openai": { "apiKey": "${OPENAI_API_KEY}" }
   },
   "modelPresets": {
-    "hosted": { "provider": "openai", "model": "gpt-5.4-mini" }
+    "hosted": {
+      "provider": "openai",
+      "model": "gpt-5.4-mini",
+      "maxTokens": 4096,
+      "contextWindowTokens": 65536
+    },
+    "module": {
+      "provider": "openai",
+      "model": "gpt-5.4-mini",
+      "maxTokens": 4096,
+      "contextWindowTokens": 65536
+    }
   },
   "agents": {
     "defaults": {
       "modelPreset": "hosted",
+      "maxToolIterations": 12,
       "externalSkillsDirs": [
         "/opt/sagasmith/skills/hosted",
         "/opt/sagasmith/skills/dnd/full/skills",

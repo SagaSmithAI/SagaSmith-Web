@@ -1,5 +1,9 @@
 # SagaSmith Web
 
+Beta 部署候选版采用邀请注册、离线管理员、零自动注册额度和逐次模型请求预算。
+请先阅读[就绪清单](docs/beta-readiness-status.md)、[预算配置](docs/provider-budgets.md)和
+[生产运维手册](docs/operations.md)。开放邀请前仍须完成真实模型与独立恢复验收。
+
 [English](README.md) · [官方网站](https://sagasmithai.github.io) ·
 [平台总览](https://github.com/SagaSmithAI/.github/blob/main/profile/README.md) ·
 [公开内容目录](https://github.com/SagaSmithAI/SagaSmith-dnd-content-library) ·
@@ -87,7 +91,7 @@ fallback 或新工作的目标。
 
 | 强制组件 | 审查 revision |
 |---|---|
-| SagaSmith Agent | `c0731c44775a045bb106000391ef6240f7b4d2a3` |
+| SagaSmith Agent | `2780a2134201f5c2dd66eae43f7bcfcb87efd880` |
 | SagaSmith Core | `612bfe7e5290eb5b23f2811baa83b8a28293b36e` |
 | D&D | `ba602ea103de67d19ffbfba2f69f3802a9e34dd3` |
 | CoC | `eebab0986299b0cd9ce420c3521e4688356e9746` |

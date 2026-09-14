@@ -9,6 +9,13 @@
       "reasoningEffort": "medium",
       "maxTokens": 16384,
       "contextWindowTokens": 1050000
+    },
+    "module": {
+      "provider": "openai_codex",
+      "model": "gpt-5.6-luna",
+      "reasoningEffort": "medium",
+      "maxTokens": 16384,
+      "contextWindowTokens": 1050000
     }
   },
   "agents": {

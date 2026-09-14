@@ -25,6 +25,24 @@ const moduleLabels = {
 };
 
 export function createModuleStudioController() {
+  let moduleViewGeneration = 0;
+  let moduleConnectionGeneration = 0;
+  let moduleReconnectAttempts = 0;
+  let moduleReconnectTimer = null;
+  let moduleStreamStatus = "idle";
+  let moduleStreamTerminal = false;
+  let renderGeneration = 0;
+
+  function isCurrentModule(moduleId, viewGeneration = moduleViewGeneration) {
+    return viewGeneration === moduleViewGeneration && state.module?.id === moduleId;
+  }
+
+  function setModuleStreamStatus(status, message = "") {
+    moduleStreamStatus = status;
+    if (message) toast(message);
+    if (state.module && Array.isArray(state.moduleRuns)) renderModuleActions();
+  }
+
   async function loadModules() {
     state.modules = await api("/api/modules");
     const root = $("#module-list");
@@ -49,30 +67,132 @@ export function createModuleStudioController() {
   }
 
   async function openModule(module) {
-    state.module = await api(`/api/modules/${module.id}`);
+    const viewGeneration = ++moduleViewGeneration;
+    const loaded = await api(`/api/modules/${module.id}`);
+    if (viewGeneration !== moduleViewGeneration) return;
+    state.module = loaded;
     $("#module-list").hidden = true;
     $("#module-form").hidden = true;
     $("#module-detail").hidden = false;
-    await renderModule();
+    await renderModule(null, viewGeneration);
     watchModule();
   }
 
-  function watchModule() {
+  function watchModule({ reconnect = false, viewGeneration = moduleViewGeneration } = {}) {
+    const moduleId = state.module?.id;
+    if (!moduleId || !isCurrentModule(moduleId, viewGeneration)) return;
+    if (moduleReconnectTimer) {
+      clearTimeout(moduleReconnectTimer);
+      moduleReconnectTimer = null;
+    }
+    if (!reconnect) moduleReconnectAttempts = 0;
     if (state.moduleEvents) state.moduleEvents.close();
-    state.moduleEvents = new EventSource(`/api/modules/${state.module.id}/events`);
-    state.moduleEvents.addEventListener("module", (event) => {
-      const data = JSON.parse(event.data);
+    const connectionGeneration = ++moduleConnectionGeneration;
+    moduleStreamTerminal = false;
+    setModuleStreamStatus(reconnect ? "reconnecting" : "connecting");
+    const source = new EventSource(`/api/modules/${moduleId}/events`);
+    state.moduleEvents = source;
+    source.addEventListener("module", (event) => {
+      if (
+        !isCurrentModule(moduleId, viewGeneration) ||
+        connectionGeneration !== moduleConnectionGeneration
+      ) {
+        source.close();
+        return;
+      }
+      let data;
+      try {
+        data = JSON.parse(event.data || "{}");
+      } catch {
+        return;
+      }
+      if (!data.project) return;
       state.module = data.project;
-      renderModule(data.run).catch(() => {});
+      moduleStreamTerminal = Boolean(
+        data.run && ["succeeded", "failed", "canceled"].includes(data.run.status),
+      );
+      renderModule(data.run, viewGeneration).catch(() => {});
     });
-    state.moduleEvents.onerror = () => {
-      state.moduleEvents?.close();
-      state.moduleEvents = null;
+    source.onopen = () => {
+      if (
+        !isCurrentModule(moduleId, viewGeneration) ||
+        connectionGeneration !== moduleConnectionGeneration
+      ) {
+        source.close();
+        return;
+      }
+      setModuleStreamStatus("online");
+    };
+    let errorHandled = false;
+    source.onerror = async () => {
+      if (errorHandled) return;
+      errorHandled = true;
+      source.close();
+      if (state.moduleEvents === source) state.moduleEvents = null;
+      if (
+        !isCurrentModule(moduleId, viewGeneration) ||
+        connectionGeneration !== moduleConnectionGeneration ||
+        moduleStreamTerminal
+      ) {
+        return;
+      }
+      setModuleStreamStatus("reconnecting", "模组任务流已断开，正在重新连接");
+      try {
+        const latest = await api(`/api/modules/${moduleId}`);
+        if (
+          !isCurrentModule(moduleId, viewGeneration) ||
+          connectionGeneration !== moduleConnectionGeneration
+        ) {
+          return;
+        }
+        state.module = latest;
+        await renderModule(null, viewGeneration);
+        if (moduleStreamTerminal) {
+          setModuleStreamStatus("online");
+          return;
+        }
+        if (
+          !isCurrentModule(moduleId, viewGeneration) ||
+          connectionGeneration !== moduleConnectionGeneration
+        ) {
+          return;
+        }
+      } catch {
+        // The scheduled reconnect will retry the state refresh as well.
+      }
+      scheduleModuleReconnect(moduleId, viewGeneration);
     };
   }
 
-  async function renderModule(latestRun = null) {
+  function scheduleModuleReconnect(moduleId, viewGeneration) {
+    if (
+      moduleReconnectTimer ||
+      moduleStreamTerminal ||
+      !isCurrentModule(moduleId, viewGeneration)
+    ) {
+      return;
+    }
+    const delays = [1000, 2000, 5000, 10000, 30000];
+    if (moduleReconnectAttempts >= delays.length) {
+      setModuleStreamStatus("failed", "模组任务流连接失败，请点击重试连接");
+      return;
+    }
+    const delay = delays[moduleReconnectAttempts++];
+    moduleReconnectTimer = setTimeout(() => {
+      moduleReconnectTimer = null;
+      if (isCurrentModule(moduleId, viewGeneration)) {
+        watchModule({ reconnect: true, viewGeneration });
+      }
+    }, delay);
+  }
+
+  async function renderModule(latestRun = null, expectedViewGeneration = moduleViewGeneration) {
+    if (!state.module || expectedViewGeneration !== moduleViewGeneration) return;
     const module = state.module;
+    const moduleId = module.id;
+    const currentRender = ++renderGeneration;
+    const isCurrentRender = () =>
+      currentRender === renderGeneration && isCurrentModule(moduleId, expectedViewGeneration);
     $("#module-state").textContent =
       `${moduleLabels[module.status] || module.status} · D&D ${module.edition}`;
     $("#module-title").textContent = module.title;
@@ -109,13 +229,23 @@ export function createModuleStudioController() {
         );
       }
     }
-    await Promise.all([renderModuleSources(), renderModuleRuns(latestRun)]);
+    await Promise.all([
+      renderModuleSources(moduleId, expectedViewGeneration, currentRender),
+      renderModuleRuns(latestRun, moduleId, expectedViewGeneration, currentRender),
+    ]);
+    if (!isCurrentRender()) return;
     renderModuleActions();
     renderInstallPublish();
   }
 
-  async function renderModuleSources() {
-    const items = await api(`/api/modules/${state.module.id}/sources`);
+  async function renderModuleSources(moduleId, viewGeneration, currentRender) {
+    const items = await api(`/api/modules/${moduleId}/sources`);
+    if (
+      currentRender !== renderGeneration ||
+      !isCurrentModule(moduleId, viewGeneration)
+    ) {
+      return;
+    }
     const root = $("#module-sources");
     root.replaceChildren();
     for (const item of items) {
@@ -138,8 +268,15 @@ export function createModuleStudioController() {
     }
   }
 
-  async function renderModuleRuns(latestRun) {
-    state.moduleRuns = await api(`/api/modules/${state.module.id}/runs`);
+  async function renderModuleRuns(latestRun, moduleId, viewGeneration, currentRender) {
+    const runs = await api(`/api/modules/${moduleId}/runs`);
+    if (
+      currentRender !== renderGeneration ||
+      !isCurrentModule(moduleId, viewGeneration)
+    ) {
+      return;
+    }
+    state.moduleRuns = runs;
     const root = $("#module-runs");
     root.replaceChildren();
     for (const run of state.moduleRuns) {
@@ -159,6 +296,10 @@ export function createModuleStudioController() {
       if (run.error) row.append(text("small", run.error, "error"));
       root.append(row);
     }
+    const newestRun = state.moduleRuns[0];
+    if (newestRun && ["succeeded", "failed", "canceled"].includes(newestRun.status)) {
+      moduleStreamTerminal = true;
+    }
     if (latestRun && ["succeeded", "failed", "canceled"].includes(latestRun.status)) {
       toast(
         latestRun.status === "succeeded"
@@ -171,8 +312,19 @@ export function createModuleStudioController() {
   function renderModuleActions() {
     const root = $("#module-actions");
     const module = state.module;
-    const active = state.moduleRuns.some((run) => ["queued", "running"].includes(run.status));
+    const active = (state.moduleRuns || []).some((run) =>
+      ["queued", "running"].includes(run.status),
+    );
     root.replaceChildren();
+    if (moduleStreamStatus === "reconnecting") {
+      root.append(text("span", "任务流已断开，正在重连", "muted"));
+    }
+    if (moduleStreamStatus === "failed") {
+      root.append(
+        text("span", "任务流连接失败", "error"),
+        button("重试连接", () => watchModule()),
+      );
+    }
     if (active) {
       root.append(text("span", "任务正在后台执行，可离开此页面", "muted"));
       return;
@@ -200,6 +352,8 @@ export function createModuleStudioController() {
   }
 
   async function queueModuleAction(action) {
+    const moduleId = state.module.id;
+    const viewGeneration = moduleViewGeneration;
     const instruction = $("#module-instruction").value;
     let body = { instruction };
     if (action === "finalize") {
@@ -210,24 +364,29 @@ export function createModuleStudioController() {
       };
     }
     try {
-      await api(`/api/modules/${state.module.id}/${action}`, {
+      await api(`/api/modules/${moduleId}/${action}`, {
         method: "POST",
         headers: { "Idempotency-Key": crypto.randomUUID() },
         body: JSON.stringify(body),
       });
-      state.module = await api(`/api/modules/${state.module.id}`);
-      await renderModule();
-      watchModule();
+      if (!isCurrentModule(moduleId, viewGeneration)) return;
+      const updated = await api(`/api/modules/${moduleId}`);
+      if (!isCurrentModule(moduleId, viewGeneration)) return;
+      state.module = updated;
+      await renderModule(null, viewGeneration);
+      watchModule({ viewGeneration });
     } catch (error) {
       toast(error.message);
     }
   }
 
   async function createModuleVersion() {
+    const moduleId = state.module.id;
+    const viewGeneration = moduleViewGeneration;
     const version = prompt("新版本号", state.module.version);
     if (!version || version === state.module.version) return;
     try {
-      await api(`/api/modules/${state.module.id}/revise`, {
+      await api(`/api/modules/${moduleId}/revise`, {
         method: "POST",
         headers: { "Idempotency-Key": crypto.randomUUID() },
         body: JSON.stringify({
@@ -237,41 +396,54 @@ export function createModuleStudioController() {
           version,
         }),
       });
-      renderModule();
-      watchModule();
+      if (!isCurrentModule(moduleId, viewGeneration)) return;
+      renderModule(null, viewGeneration);
+      watchModule({ viewGeneration });
     } catch (error) {
       toast(error.message);
     }
   }
 
   async function decideOutline(approved) {
+    const moduleId = state.module.id;
+    const viewGeneration = moduleViewGeneration;
     try {
-      state.module = await api(`/api/modules/${state.module.id}/outline-decision`, {
+      const updated = await api(`/api/modules/${moduleId}/outline-decision`, {
         method: "POST",
         body: JSON.stringify({
           approved,
           feedback: $("#module-instruction").value,
         }),
       });
-      await renderModule();
+      if (!isCurrentModule(moduleId, viewGeneration)) return;
+      state.module = updated;
+      await renderModule(null, viewGeneration);
     } catch (error) {
       toast(error.message);
     }
   }
 
   async function cancelModuleRun(run) {
-    await api(`/api/modules/${state.module.id}/runs/${run.id}/cancel`, { method: "POST" });
-    state.module = await api(`/api/modules/${state.module.id}`);
-    renderModule();
+    const moduleId = state.module.id;
+    const viewGeneration = moduleViewGeneration;
+    await api(`/api/modules/${moduleId}/runs/${run.id}/cancel`, { method: "POST" });
+    if (!isCurrentModule(moduleId, viewGeneration)) return;
+    const updated = await api(`/api/modules/${moduleId}`);
+    if (!isCurrentModule(moduleId, viewGeneration)) return;
+    state.module = updated;
+    renderModule(null, viewGeneration);
   }
 
   async function retryModuleRun(run) {
-    await api(`/api/modules/${state.module.id}/runs/${run.id}/retry`, {
+    const moduleId = state.module.id;
+    const viewGeneration = moduleViewGeneration;
+    await api(`/api/modules/${moduleId}/runs/${run.id}/retry`, {
       method: "POST",
       headers: { "Idempotency-Key": crypto.randomUUID() },
     });
-    renderModule();
-    watchModule();
+    if (!isCurrentModule(moduleId, viewGeneration)) return;
+    renderModule(null, viewGeneration);
+    watchModule({ viewGeneration });
   }
 
   function renderInstallPublish() {
@@ -319,21 +491,35 @@ export function createModuleStudioController() {
     };
 
     $("#close-module").onclick = () => {
+      moduleViewGeneration += 1;
+      moduleConnectionGeneration += 1;
+      if (moduleReconnectTimer) clearTimeout(moduleReconnectTimer);
+      moduleReconnectTimer = null;
       if (state.moduleEvents) state.moduleEvents.close();
+      state.moduleEvents = null;
       state.module = null;
+      state.moduleRuns = [];
+      moduleStreamStatus = "idle";
+      moduleStreamTerminal = false;
       loadModules();
     };
 
     $("#module-source-form").onsubmit = async (event) => {
       event.preventDefault();
+      const moduleId = state.module?.id;
+      const viewGeneration = moduleViewGeneration;
+      if (!moduleId) return;
       try {
-        await api(`/api/modules/${state.module.id}/sources`, {
+        await api(`/api/modules/${moduleId}/sources`, {
           method: "POST",
           body: new FormData(event.target),
         });
         event.target.reset();
-        state.module = await api(`/api/modules/${state.module.id}`);
-        await renderModule();
+        if (!isCurrentModule(moduleId, viewGeneration)) return;
+        const updated = await api(`/api/modules/${moduleId}`);
+        if (!isCurrentModule(moduleId, viewGeneration)) return;
+        state.module = updated;
+        await renderModule(null, viewGeneration);
         toast("来源资料已安全保存");
       } catch (error) {
         toast(error.message);
@@ -342,9 +528,12 @@ export function createModuleStudioController() {
 
     $("#module-install-form").onsubmit = async (event) => {
       event.preventDefault();
+      const moduleId = state.module?.id;
+      const viewGeneration = moduleViewGeneration;
+      if (!moduleId) return;
       const form = new FormData(event.target);
       try {
-        await api(`/api/modules/${state.module.id}/install`, {
+        await api(`/api/modules/${moduleId}/install`, {
           method: "POST",
           headers: { "Idempotency-Key": crypto.randomUUID() },
           body: JSON.stringify({
@@ -352,8 +541,9 @@ export function createModuleStudioController() {
             activate: form.has("activate"),
           }),
         });
-        renderModule();
-        watchModule();
+        if (!isCurrentModule(moduleId, viewGeneration)) return;
+        renderModule(null, viewGeneration);
+        watchModule({ viewGeneration });
         toast("安装任务已提交");
       } catch (error) {
         toast(error.message);
@@ -362,9 +552,12 @@ export function createModuleStudioController() {
 
     $("#module-publish-form").onsubmit = async (event) => {
       event.preventDefault();
+      const moduleId = state.module?.id;
+      const viewGeneration = moduleViewGeneration;
+      if (!moduleId) return;
       const form = new FormData(event.target);
       try {
-        await api(`/api/modules/${state.module.id}/publish`, {
+        await api(`/api/modules/${moduleId}/publish`, {
           method: "POST",
           body: JSON.stringify({
             visibility: "public",
@@ -377,8 +570,11 @@ export function createModuleStudioController() {
             changelog: "Module Studio release",
           }),
         });
-        state.module = await api(`/api/modules/${state.module.id}`);
-        renderModule();
+        if (!isCurrentModule(moduleId, viewGeneration)) return;
+        const updated = await api(`/api/modules/${moduleId}`);
+        if (!isCurrentModule(moduleId, viewGeneration)) return;
+        state.module = updated;
+        renderModule(null, viewGeneration);
         toast("已提交平台审核");
       } catch (error) {
         toast(error.message);

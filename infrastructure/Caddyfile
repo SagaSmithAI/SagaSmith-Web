@@ -1,5 +1,8 @@
 {$SAGASMITH_SITE_ADDRESS::80} {
 	encode zstd gzip
+	request_body {
+		max_size 32MB
+	}
 	# Prometheus scrapes the API over the private Compose network. Never expose
 	# process, dependency, or capacity metrics through the public edge.
 	@private_metrics path /metrics
@@ -11,7 +14,7 @@
 		X-Frame-Options "DENY"
 		Referrer-Policy "same-origin"
 		Permissions-Policy "camera=(), microphone=(), geolocation=()"
-		Content-Security-Policy "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+		Content-Security-Policy "default-src 'self'; connect-src 'self'; img-src 'self' https: data: blob:; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 		-Server
 	}
 }
