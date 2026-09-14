@@ -41,6 +41,7 @@ from sagasmith_service.schemas import (
     ModuleSourceView,
     NotificationView,
 )
+from sagasmith_service.storage_quota import upload_allowance
 
 router = APIRouter(prefix="/api/modules", tags=["module-studio"])
 NOTIFICATION_ROUTER = APIRouter(prefix="/api/notifications", tags=["notifications"])
@@ -307,11 +308,15 @@ def upload_source(
     ]
     safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(source.filename or "source").name)
     key = f"modules/{user.id}/{project.id}/{item_id}-{safe_name}"
+    allowance = upload_allowance(
+        session, user.id, quota=request.app.state.settings.user_upload_storage_bytes,
+        file_limit=request.app.state.settings.max_module_source_bytes,
+    )
     try:
         digest, size = request.app.state.private_storage.put(
             key,
             source.file,
-            max_bytes=request.app.state.settings.max_module_source_bytes,
+            max_bytes=allowance,
             content_type=SOURCE_MEDIA[suffix],
         )
     except ValueError as exc:

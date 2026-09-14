@@ -40,6 +40,26 @@ jobs:
           SAGASMITH_AGENT_INTERNAL_KEY: ci-only
           SAGASMITH_WORKER_SERVICE_TOKEN: ci-worker-service-token-at-least-32-bytes
           SAGASMITH_AUTH_CONTEXT_SECRET: ci-auth-context-secret-at-least-32-bytes
+      - name: Validate digest-only beta production overlay
+        run: docker compose -f compose.yaml -f compose.production.yaml config --quiet
+        env:
+          POSTGRES_PASSWORD: ci-only
+          OPENAI_API_KEY: ci-only
+          SAGASMITH_AGENT_INTERNAL_KEY: ci-agent-internal-key-at-least-32-bytes
+          SAGASMITH_WORKER_SERVICE_TOKEN: ci-worker-service-token-at-least-32-bytes
+          SAGASMITH_AUTH_CONTEXT_SECRET: ci-auth-context-secret-at-least-32-bytes
+          SAGASMITH_WEB_IMAGE: ghcr.io/example/web@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SAGASMITH_AGENT_IMAGE: ghcr.io/example/agent@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          SAGASMITH_DND_IMAGE: ghcr.io/example/dnd@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+          SAGASMITH_COC_IMAGE: ghcr.io/example/coc@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+          SAGASMITH_OBJECT_ENDPOINT: https://sgp1.digitaloceanspaces.com
+          SAGASMITH_OBJECT_REGION: sgp1
+          SAGASMITH_OBJECT_BUCKET: ci-private-beta
+          SAGASMITH_OBJECT_ACCESS_KEY: ci-access-key
+          SAGASMITH_OBJECT_SECRET_KEY: ci-secret-key
+          SAGASMITH_PROVIDER_BUDGET_ENABLED: "true"
+          SAGASMITH_PROVIDER_PRICES: "{}"
+          SAGASMITH_TASK_BUDGET_USD: "1"
       - run: >-
           docker compose -f compose.yaml -f compose.observability.yaml
           --profile observability config --quiet
@@ -71,11 +91,24 @@ jobs:
           prune-cache: true
       - run: uv sync --frozen --all-extras
       - run: mkdir -p secrets && cp tests/e2e/agent-config.json secrets/agent-config.json
-      - name: Build and start the complete pinned stack
+      - name: Build and start the fixture dependencies
         run: >-
           docker compose -p sagasmith-service-e2e
           -f compose.yaml -f compose.e2e.yaml
-          up -d --build --wait --wait-timeout 300
+          up -d --build --wait --wait-timeout 300 postgres minio
+      - name: Run migrations and provision offline E2E fixture
+        run: >-
+          docker compose -p sagasmith-service-e2e
+          -f compose.yaml -f compose.e2e.yaml
+          run --build --no-deps --rm --entrypoint alembic api upgrade head
+          && docker compose -p sagasmith-service-e2e
+          -f compose.yaml -f compose.e2e.yaml
+          run --no-deps --rm --entrypoint python api /tmp/container_e2e_fixture.py
+      - name: Start the complete pinned stack
+        run: >-
+          docker compose -p sagasmith-service-e2e
+          -f compose.yaml -f compose.e2e.yaml
+          up -d --wait --wait-timeout 300
       - name: Run D&D, CoC, and Narrative hosted acceptance
         run: uv run python scripts/container_e2e.py
       - name: Run Redis, MCP restart, and Worker lifecycle acceptance

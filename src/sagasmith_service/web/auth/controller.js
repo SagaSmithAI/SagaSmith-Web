@@ -25,6 +25,7 @@ export function createAuthController({ onAuthenticated }) {
       control.onclick = () => {
         $$('[data-mode]').forEach((item) => item.classList.toggle("active", item === control));
         $("#name-row").hidden = control.dataset.mode !== "register";
+        $("#invite-row").hidden = control.dataset.mode !== "register";
         $("#terms-row").hidden = control.dataset.mode !== "register";
         $("#terms-row input").required = control.dataset.mode === "register";
         $("#auth-form input[name=password]").autocomplete =
@@ -43,6 +44,7 @@ export function createAuthController({ onAuthenticated }) {
           const body = { email: form.get("email"), password: form.get("password") };
           if (mode === "register") {
             body.display_name = form.get("display_name");
+            body.invite_token = form.get("invite_token") || undefined;
             body.terms_accepted = form.get("terms_accepted") === "on";
             body.terms_version = "2026-08-29";
             body.privacy_version = "2026-08-29";

@@ -77,8 +77,8 @@
     },
     {
       "repository": "SagaSmith-agent",
-      "branch": "main",
-      "revision": "c0731c44775a045bb106000391ef6240f7b4d2a3",
+      "branch": "feat/hosted-budget-20260914",
+      "revision": "2780a2134201f5c2dd66eae43f7bcfcb87efd880",
       "remote": "https://github.com/SagaSmithAI/SagaSmith-agent.git",
       "usage": "build",
       "enforced": true

@@ -1,0 +1,135 @@
+name: sagasmith-service-beta
+
+# Production is layered on compose.yaml so the reviewed service topology stays
+# in one place. Every application image is supplied as a complete digest
+# reference by .env.production; this file must never build from source.
+services:
+  api:
+    build: !reset null
+    image: ${SAGASMITH_WEB_IMAGE:?set SAGASMITH_WEB_IMAGE to an image@sha256 digest}
+    env_file:
+      - path: .env.production
+        required: false
+    environment:
+      SAGASMITH_ENV: production
+      SAGASMITH_STORAGE_BACKEND: s3
+      SAGASMITH_OBJECT_ENDPOINT: ${SAGASMITH_OBJECT_ENDPOINT:?set SAGASMITH_OBJECT_ENDPOINT}
+      SAGASMITH_OBJECT_REGION: ${SAGASMITH_OBJECT_REGION:?set SAGASMITH_OBJECT_REGION}
+      SAGASMITH_OBJECT_BUCKET: ${SAGASMITH_OBJECT_BUCKET:?set SAGASMITH_OBJECT_BUCKET}
+      SAGASMITH_OBJECT_ACCESS_KEY: ${SAGASMITH_OBJECT_ACCESS_KEY:?set SAGASMITH_OBJECT_ACCESS_KEY}
+      SAGASMITH_OBJECT_SECRET_KEY: ${SAGASMITH_OBJECT_SECRET_KEY:?set SAGASMITH_OBJECT_SECRET_KEY}
+      SAGASMITH_OBJECT_CREATE_BUCKET: "${SAGASMITH_OBJECT_CREATE_BUCKET:-false}"
+      SAGASMITH_PROVIDER_BUDGET_ENABLED: "${SAGASMITH_PROVIDER_BUDGET_ENABLED:?set SAGASMITH_PROVIDER_BUDGET_ENABLED}"
+      SAGASMITH_PROVIDER_PRICES: "${SAGASMITH_PROVIDER_PRICES:?set SAGASMITH_PROVIDER_PRICES with reviewed versioned prices}"
+      SAGASMITH_TASK_BUDGET_USD: "${SAGASMITH_TASK_BUDGET_USD:?set SAGASMITH_TASK_BUDGET_USD}"
+      SAGASMITH_REGISTRATION_MODE: "${SAGASMITH_REGISTRATION_MODE:-invite}"
+      SAGASMITH_SIGNUP_TOKEN_QUOTA: "${SAGASMITH_SIGNUP_TOKEN_QUOTA:-0}"
+    depends_on: !override
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      dnd-mcp:
+        condition: service_healthy
+      coc-mcp:
+        condition: service_healthy
+      agent:
+        condition: service_healthy
+    init: true
+    pids_limit: 256
+    mem_limit: 1g
+    cpus: 1.0
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev
+    logging: &beta-logging
+      driver: json-file
+      options:
+        max-size: 25m
+        max-file: "3"
+
+  module-worker:
+    build: !reset null
+    image: ${SAGASMITH_WEB_IMAGE:?set SAGASMITH_WEB_IMAGE to an image@sha256 digest}
+    env_file:
+      - path: .env.production
+        required: false
+    environment:
+      SAGASMITH_ENV: production
+      SAGASMITH_STORAGE_BACKEND: s3
+      SAGASMITH_OBJECT_ENDPOINT: ${SAGASMITH_OBJECT_ENDPOINT:?set SAGASMITH_OBJECT_ENDPOINT}
+      SAGASMITH_OBJECT_REGION: ${SAGASMITH_OBJECT_REGION:?set SAGASMITH_OBJECT_REGION}
+      SAGASMITH_OBJECT_BUCKET: ${SAGASMITH_OBJECT_BUCKET:?set SAGASMITH_OBJECT_BUCKET}
+      SAGASMITH_OBJECT_ACCESS_KEY: ${SAGASMITH_OBJECT_ACCESS_KEY:?set SAGASMITH_OBJECT_ACCESS_KEY}
+      SAGASMITH_OBJECT_SECRET_KEY: ${SAGASMITH_OBJECT_SECRET_KEY:?set SAGASMITH_OBJECT_SECRET_KEY}
+      SAGASMITH_OBJECT_CREATE_BUCKET: "${SAGASMITH_OBJECT_CREATE_BUCKET:-false}"
+      SAGASMITH_PROVIDER_BUDGET_ENABLED: "${SAGASMITH_PROVIDER_BUDGET_ENABLED:?set SAGASMITH_PROVIDER_BUDGET_ENABLED}"
+      SAGASMITH_PROVIDER_PRICES: "${SAGASMITH_PROVIDER_PRICES:?set SAGASMITH_PROVIDER_PRICES with reviewed versioned prices}"
+      SAGASMITH_TASK_BUDGET_USD: "${SAGASMITH_TASK_BUDGET_USD:?set SAGASMITH_TASK_BUDGET_USD}"
+    depends_on: !override
+      postgres:
+        condition: service_healthy
+      dnd-mcp:
+        condition: service_healthy
+      agent:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    init: true
+    pids_limit: 128
+    mem_limit: 768m
+    cpus: 0.75
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev
+    logging: *beta-logging
+
+  dnd-mcp:
+    build: !reset null
+    image: ${SAGASMITH_DND_IMAGE:?set SAGASMITH_DND_IMAGE to an image@sha256 digest}
+    mem_limit: 1g
+    cpus: 1.0
+    pids_limit: 256
+    logging: *beta-logging
+
+  coc-mcp:
+    build: !reset null
+    image: ${SAGASMITH_COC_IMAGE:?set SAGASMITH_COC_IMAGE to an image@sha256 digest}
+    mem_limit: 1g
+    cpus: 1.0
+    pids_limit: 256
+    logging: *beta-logging
+
+  agent:
+    build: !reset null
+    image: ${SAGASMITH_AGENT_IMAGE:?set SAGASMITH_AGENT_IMAGE to an image@sha256 digest}
+    environment:
+      SAGASMITH_AGENT_MAX_WORKERS: "${SAGASMITH_AGENT_MAX_WORKERS:-6}"
+      SAGASMITH_AGENT_SPAWN_CONCURRENCY: "${SAGASMITH_AGENT_SPAWN_CONCURRENCY:-1}"
+      SAGASMITH_ROOM_TURN_WORKER_CONCURRENCY: "${SAGASMITH_ROOM_TURN_WORKER_CONCURRENCY:-2}"
+      SAGASMITH_ROOM_TURN_PER_ROOM_CONCURRENCY: "${SAGASMITH_ROOM_TURN_PER_ROOM_CONCURRENCY:-1}"
+    mem_limit: 2g
+    cpus: 2.0
+    pids_limit: 512
+    logging: *beta-logging
+
+  proxy:
+    mem_limit: 256m
+    cpus: 0.25
+    pids_limit: 128
+    logging: *beta-logging
+
+  postgres:
+    mem_limit: 1g
+    cpus: 1.0
+    pids_limit: 256
+    logging: *beta-logging
+
+  redis:
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 128
+    logging: *beta-logging
+
+  # The base file retains MinIO for local development and CI. Keeping it in a
+  # non-default profile prevents a production invocation from pulling it.
+  minio:
+    profiles: [local-object-storage]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import timedelta
 from decimal import Decimal
 from typing import Annotated, Any
@@ -9,7 +10,7 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from sqlalchemy import exists, func, literal_column, or_, select
 
 from sagasmith_service.api.dependencies import CurrentUser, DbSession
-from sagasmith_service.integrations.agent import AgentRuntime
+from sagasmith_service.integrations.agent import AgentRuntime, AgentRuntimeError
 from sagasmith_service.models import (
     AgentConversation,
     AgentIdentity,
@@ -49,6 +50,7 @@ from sagasmith_service.schemas import (
     ModerationDecision,
 )
 from sagasmith_service.storage import PrivateStorageError
+from sagasmith_service.usage_accounting import record_provider_consumption
 
 router = APIRouter(prefix="/api/community", tags=["community"])
 
@@ -191,16 +193,13 @@ def _artifact_catalog_statement():
         .correlate(Artifact)
         .scalar_subquery()
     )
-    return (
-        select(
-            Artifact,
-            User.display_name.label("owner_display_name"),
-            favorite_count.label("favorite_count"),
-            latest_release_id.label("latest_release_id"),
-            latest_version.label("latest_version"),
-        )
-        .outerjoin(User, User.id == Artifact.owner_user_id)
-    )
+    return select(
+        Artifact,
+        User.display_name.label("owner_display_name"),
+        favorite_count.label("favorite_count"),
+        latest_release_id.label("latest_release_id"),
+        latest_version.label("latest_version"),
+    ).outerjoin(User, User.id == Artifact.owner_user_id)
 
 
 def _artifact_catalog_view(row: Any) -> ArtifactView:
@@ -732,8 +731,7 @@ async def agent_review_release(
         "system_id": runtime_system_id,
         "base_revision": 0,
         "expires_at": (
-            now_utc()
-            + timedelta(seconds=request.app.state.settings.agent_delegation_ttl_seconds)
+            now_utc() + timedelta(seconds=request.app.state.settings.agent_delegation_ttl_seconds)
         ).isoformat(),
         "idempotency_key": agent_idempotency_key,
         "conversation_principal": f"community-release:{item.id}",
@@ -752,6 +750,7 @@ async def agent_review_release(
                 "principal_id": user.principal_id,
                 "campaign_role": "author",
                 "authority_context": authority_context,
+                "budget_user_id": user.id,
             },
             idempotency_key=agent_idempotency_key,
             trace_context={
@@ -761,18 +760,84 @@ async def agent_review_release(
             },
         )
         review = _review_json(result.content)
+    except AgentRuntimeError as exc:
+        if exc.total_tokens is not None:
+            provider_tokens = Decimal(exc.total_tokens)
+            record_provider_consumption(
+                session,
+                user_id=user.id,
+                campaign_id=None,
+                task_id=item.id,
+                reservation_id=reservation.id,
+                metric="llm_tokens",
+                quantity=provider_tokens,
+                unit="tokens",
+                idempotency_key=f"artifact-review-provider:{user.id}:{idempotency_key}",
+                provider="nanobot",
+                model=exc.model,
+                request_id=exc.request_id,
+                pricing_version="unknown",
+                pricing_inputs={
+                    "prompt_tokens": exc.prompt_tokens,
+                    "completion_tokens": exc.completion_tokens,
+                },
+                pricing_cache={"status": "unknown"},
+                pricing_output={"status": "unknown"},
+                details={"status": "partial_failure", "error_code": exc.code},
+            )
+            settle(
+                session,
+                reservation_id=reservation.id,
+                quantity=min(provider_tokens, reservation_quantity),
+                idempotency_key=f"artifact-review-settle:{user.id}:{idempotency_key}",
+                unit="tokens",
+                provider="nanobot",
+                model=exc.model,
+                request_id=exc.request_id,
+                details={
+                    "provider_quantity": str(provider_tokens),
+                    "status": "partial_failure",
+                },
+            )
+            session.commit()
+        else:
+            release(session, reservation.id)
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
     except (RuntimeError, ValueError) as exc:
         release(session, reservation.id)
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+    provider_tokens = Decimal(result.total_tokens)
+    record_provider_consumption(
+        session,
+        user_id=user.id,
+        campaign_id=None,
+        task_id=item.id,
+        reservation_id=reservation.id,
+        metric="llm_tokens",
+        quantity=provider_tokens,
+        unit="tokens",
+        idempotency_key=f"artifact-review-provider:{user.id}:{idempotency_key}",
+        provider="nanobot",
+        model=result.model,
+        request_id=result.request_id,
+        pricing_version="unknown",
+        pricing_inputs={
+            "prompt_tokens": result.prompt_tokens,
+            "completion_tokens": result.completion_tokens,
+        },
+        pricing_cache={"status": "unknown"},
+        pricing_output={"status": "unknown"},
+    )
     settle(
         session,
         reservation_id=reservation.id,
-        quantity=Decimal(min(result.total_tokens, int(reservation_quantity))),
+        quantity=min(provider_tokens, reservation_quantity),
         idempotency_key=f"artifact-review-settle:{user.id}:{idempotency_key}",
         unit="tokens",
         provider="nanobot",
         model=result.model,
         request_id=result.request_id,
+        details={"provider_quantity": str(provider_tokens)},
     )
     item.agent_review = {**review, "idempotency_key": idempotency_key}
     item.agent_reviewed_at = now_utc()
@@ -1292,14 +1357,15 @@ def list_posts(
         .offset(offset)
         .limit(limit)
     ).all()
-    return [
-        _post_catalog_view(row.CommunityPost, row.author_display_name) for row in rows
-    ]
+    return [_post_catalog_view(row.CommunityPost, row.author_display_name) for row in rows]
 
 
 @router.post("/posts", response_model=CommunityPostView, status_code=status.HTTP_201_CREATED)
 def create_post(
-    payload: CommunityPostCreate, user: CurrentUser, session: DbSession
+    payload: CommunityPostCreate, user: CurrentUser, session: DbSession,
+    idempotency_key: Annotated[
+        str | None, Header(alias="Idempotency-Key", min_length=8, max_length=160)
+    ] = None,
 ) -> CommunityPostView:
     if payload.target_type == "artifact":
         artifact = _visible_artifact(session, payload.target_id, user)
@@ -1343,7 +1409,21 @@ def create_post(
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_CONTENT, "release does not belong to target"
             )
+    post_id = None
+    if idempotency_key:
+        # Serialize same-user submissions and bind retries to their exact payload.
+        session.execute(
+            User.__table__.update().where(User.id == user.id).values(status=User.status)
+        )
+        post_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"community-post:{user.id}:{idempotency_key}"))
+        existing = session.get(CommunityPost, post_id)
+        if existing:
+            if any(getattr(existing, key) != value for key, value in payload.model_dump().items()):
+                raise HTTPException(status.HTTP_409_CONFLICT, "post retry payload changed")
+            return _post_view(session, existing)
     item = CommunityPost(author_user_id=user.id, **payload.model_dump())
+    if post_id:
+        item.id = post_id
     session.add(item)
     session.flush()
     session.add(

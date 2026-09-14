@@ -2,6 +2,7 @@ import asyncio
 import time
 from datetime import UTC, datetime
 
+from conftest import grant_test_quota
 from fastapi import Request
 from fastapi.testclient import TestClient
 from prometheus_client import REGISTRY
@@ -120,6 +121,7 @@ def test_room_action_keeps_request_db_async_and_worker_db_off_event_loop(
         },
     )
     assert registered.status_code == 201
+    grant_test_quota(client, registered.json()["user"]["id"])
     campaign = client.post(
         "/api/campaigns",
         headers={"Idempotency-Key": "hotpath-room-async-campaign"},
@@ -181,6 +183,7 @@ def test_projection_refresh_uses_only_async_driver_database_work(
         },
     )
     assert registered.status_code == 201
+    grant_test_quota(client, registered.json()["user"]["id"])
     campaign = client.post(
         "/api/campaigns",
         headers={"Idempotency-Key": "hotpath-projection-async-campaign"},
@@ -270,6 +273,7 @@ def test_agent_message_metrics_capture_worker_auth_and_event_loop_handler_db(
         },
     )
     assert registered.status_code == 201
+    grant_test_quota(client, registered.json()["user"]["id"])
     campaign = client.post(
         "/api/campaigns",
         headers={"Idempotency-Key": "hotpath-agent-campaign"},
@@ -309,6 +313,7 @@ def test_activity_callback_metrics_keep_database_work_off_event_loop(
         },
     )
     assert registered.status_code == 201
+    grant_test_quota(client, registered.json()["user"]["id"])
     campaign = client.post(
         "/api/campaigns",
         headers={"Idempotency-Key": "hotpath-activity-campaign"},

@@ -319,6 +319,13 @@ def run(base_url: str) -> None:
             "display_name": "E2E Player",
         },
     )
+    expect(
+        owner.post(
+            f"/api/admin/users/{player_user['id']}/quota-grants",
+            json={"metric": "llm_tokens", "quantity": 1_000_000, "valid_days": 30},
+        ),
+        201,
+    )
     campaign = expect(
         owner.post(
             "/api/campaigns",

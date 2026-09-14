@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 import pytest
+from conftest import grant_test_quota
 from fastapi.testclient import TestClient
 
 from sagasmith_service.database import make_session_factory
@@ -8,7 +9,7 @@ from sagasmith_service.models import QuotaGrant, User, now_utc
 from sagasmith_service.quota import QuotaExceededError, balance, release, reserve, settle
 
 
-def test_signup_grant_is_visible(client: TestClient) -> None:
+def test_signup_does_not_grant_quota(client: TestClient) -> None:
     client.post(
         "/api/auth/register",
         json={
@@ -21,10 +22,10 @@ def test_signup_grant_is_visible(client: TestClient) -> None:
     assert response.status_code == 200
     assert response.json() == {
         "metric": "llm_tokens",
-        "granted": "1000000.000000",
-        "used": "0.000000",
+        "granted": "0",
+        "used": "0",
         "reserved": "0.000000",
-        "available": "1000000.000000",
+        "available": "0",
     }
 
 
@@ -37,6 +38,7 @@ def test_reserve_settle_release_and_idempotency(client: TestClient) -> None:
             "display_name": "Ledger User",
         },
     ).json()
+    grant_test_quota(client, registered["user"]["id"], quantity=1_000_000)
     factory = make_session_factory(client.app.state.engine)
     with factory() as session:
         reservation = reserve(

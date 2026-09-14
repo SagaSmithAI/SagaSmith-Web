@@ -37,9 +37,20 @@ SagaSmith Web releases use `v<project.version>` tags on commits already containe
 The release workflow refuses a mismatched version, a non-main commit, a dirty candidate, a missing
 release input, or a component lock that fails strict remote verification. A successful release
 publishes the Python wheel and source distribution, SHA-256 checksums, a machine-readable release
-manifest, and two immutable GHCR image references (semantic version and commit SHA). GitHub records
-build provenance for the Python artifacts and container, while BuildKit attaches a software bill
-of materials and maximum-mode provenance to the registry image.
+manifest, and four immutable GHCR image references for Web, Agent, D&D MCP, and CoC MCP (semantic
+version and commit SHA tags are only build aliases). GitHub records build provenance for the Python
+artifacts and each container, while BuildKit attaches a software bill of materials and maximum-mode
+provenance to every registry image.
+The image repository names are lowercase OCI references: `ghcr.io/sagasmithai/sagasmith-web`,
+`ghcr.io/sagasmithai/sagasmith-web-agent`, `ghcr.io/sagasmithai/sagasmith-web-dnd-mcp`, and
+`ghcr.io/sagasmithai/sagasmith-web-coc-mcp`.
+
+The release workflow fails closed unless the repository variable
+`SAGASMITH_ATTESTATIONS_ENABLED=true` has been set after verifying that the organisation plan
+exposes artifact and container attestations. An attestation step failure fails the release; it is
+never made advisory. CodeQL uses the separate `SAGASMITH_CODEQL_PRIVATE_ENABLED=true` capability
+variable for a private repository. When that capability is absent the CodeQL analysis is explicitly
+skipped and the capability job records why; when enabled, analysis failures remain failures.
 
 Before creating the tag, merge the version bump and current component lock through the protected
 branch, confirm the required CI and CodeQL checks, and review the generated dependency lock. Create
@@ -69,9 +80,33 @@ repository is not a release input. Pin reviewed tags or commit SHAs for producti
 moving branch references. Remote Git contexts deliberately avoid sending unrelated local worktrees,
 virtual environments or private content to Docker.
 
-The private stack contains Caddy, SagaSmith Web API/frontend, persistent Module worker, PostgreSQL, Redis,
-MinIO, D&D MCP, CoC MCP and the Agent Supervisor. Narrative remains process-local to each Hosted
-Worker and is probed through the Supervisor rather than exposed as a network service.
+The local stack contains Caddy, SagaSmith Web API/frontend, persistent Module worker, PostgreSQL, Redis,
+MinIO, D&D MCP, CoC MCP and the Agent Supervisor. The beta production overlay
+(`compose.production.yaml`) removes the MinIO dependency and requires the four digest-pinned
+application images plus an external private S3-compatible bucket (DigitalOcean Spaces is the
+documented candidate). Set `SAGASMITH_OBJECT_CREATE_BUCKET=false` and create the bucket and
+restricted credentials before deployment. Narrative remains process-local to each Hosted Worker and
+is probed through the Supervisor rather than exposed as a network service.
+
+Prepare `.env.production` from `.env.production.example`, run
+`uv run python scripts/production_preflight.py --env-file .env.production`, and pass the same file
+to Compose because `env_file` values are container inputs and do not supply Compose interpolation:
+
+```powershell
+docker compose --env-file .env.production -f compose.yaml -f compose.production.yaml config --quiet
+docker compose --env-file .env.production -f compose.yaml -f compose.production.yaml up -d --wait proxy
+```
+
+The preflight checks only configuration shape and secret strength. The first command renders the
+deployment model; the second is the operator's explicit deployment action after reviewing the
+rendered model and release manifest.
+
+Production also requires `SAGASMITH_PROVIDER_BUDGET_ENABLED=true`, a non-empty
+`SAGASMITH_PROVIDER_PRICES` JSON object containing reviewed versioned prices for the exact provider
+class/model and positive request limits, and a reviewed positive `SAGASMITH_TASK_BUDGET_USD`.
+The examples intentionally contain markers rather than prices; replace them from the approved
+pricing record before running preflight. Do not guess rates or treat a passing Compose render as
+budget readiness.
 Only ports 80/443 are public. SagaSmith Web starts with `alembic upgrade head`. For a real hostname set
 `SAGASMITH_SITE_ADDRESS` to the hostname and `SAGASMITH_SECURE_COOKIES=true`.
 
@@ -204,10 +239,20 @@ handled as DM-private campaign data, not community content.
 
 ## Backup
 
+The production backup and restore helpers are PowerShell scripts. On Linux, install
+PowerShell 7 (`pwsh`), Docker Compose, and the AWS CLI, then invoke them with
+`pwsh -NoProfile -File` instead of `powershell -NoProfile -File`; the scripts require
+Docker Engine access and external S3 credentials in the process environment.
+
 `powershell -NoProfile -File scripts/backup.ps1` creates a timestamped folder containing a
-PostgreSQL custom dump and compressed copies
-of private object storage, D&D/CoC state and Agent workspaces, plus SHA-256 checksums. Copy the completed
-folder to encrypted off-host storage. Redis is a queue/cache and is not a recovery authority.
+PostgreSQL custom dump and compressed copies of local private object storage, D&D/CoC state and
+Agent workspaces, plus SHA-256 checksums. For the beta overlay,
+`powershell -NoProfile -File scripts/backup-production.ps1` stops all application writers, copies
+the external S3 bucket to `object-storage/`, and records the endpoint, region, bucket, release,
+image IDs, and checksums in a schema-versioned manifest. Copy the completed folder to encrypted
+off-host storage; `scripts/encrypt-backup.ps1` provides an age recipient workflow and prints the
+encrypted archive checksum. The backup folder and generated archive contain no deployment secrets.
+Redis is a queue/cache and is not a recovery authority.
 The script stops all application writers for a consistent cut, records the SagaSmith Web commit and dirty
 state, verifies the finished manifest, checks every native Docker/Git exit code, and only then
 restarts healthy services. The destination filesystem itself must provide encryption at rest; the
@@ -219,10 +264,11 @@ procedure.
 Recommended policy: daily backups retained 30 days, weekly retained 12 weeks, monthly retained one
 year. Object versioning is additional protection, not a substitute for a separate backup.
 
-`.github/workflows/nightly-recovery.yml` now seeds all three hosted domains, creates and verifies an
-application-consistent backup, restores it under a distinct Compose project and host ports, and
-exercises the restored control database, object storage and domain state. Both projects and their
-volumes are removed in the unconditional cleanup step.
+`.github/workflows/nightly-recovery.yml` exercises the local MinIO recovery path. A beta drill uses
+`scripts/restore-production.ps1` with a distinct Compose project and a separate S3 bucket, then
+runs `scripts/production_acceptance.py` against the isolated edge. Both scripts refuse the live
+project name and the restore script never starts the proxy. A successful local or configuration test
+does not establish that a live S3 restore succeeded.
 
 The normal container acceptance also stops Redis and requires protected requests to fail closed,
 restarts D&D/CoC MCP while a Worker has a live session, restarts the Agent before resuming a
@@ -250,5 +296,17 @@ Narrative conversation, and waits for every idle Worker to disappear with no `/p
 fresh project with no existing volumes, verifies hashes before extraction, and never starts the
 proxy. The automated smoke waits for external readiness, logs in, checks control-plane/audit state,
 reads authoritative campaign state, then downloads a restored private Pack from object storage and
-imports it through the restored D&D MCP. Never test destructive restore commands against the live
-volumes. Quarterly drills should record RPO, RTO, release hashes, backup ids and discrepancies.
+imports it through the restored D&D MCP. The production counterpart,
+`scripts/restore-production.ps1`, restores the database, D&D/CoC state, Agent and process-local
+Narrative state, and an explicitly supplied isolated S3 bucket. Never test destructive restore
+commands against live volumes or the live bucket. Quarterly drills should record RPO, RTO, release
+hashes, backup IDs and discrepancies.
+
+For a beta launch, complete the authenticated checklist after
+`scripts/production_acceptance.py`: register or invite a user, verify session and secure cookie
+behavior, create and approve a campaign join, execute one D&D, CoC, and Narrative turn, verify
+quota reserve/settle/release and idempotent retry, upload and privately read a Pack through S3,
+revoke access, restart one MCP and the Agent, and confirm a queued room turn reaches exactly one
+terminal state. Then run the isolated restore drill and repeat the readiness and private Pack checks
+before admitting writes. These are required operator actions; this repository contains no live
+deployment or restore result.

@@ -12,6 +12,16 @@ def test_production_rejects_development_security_defaults() -> None:
 def test_production_accepts_explicit_secure_dependencies() -> None:
     settings = Settings(
         env="production",
+        registration_mode="invite",
+        signup_token_quota=0,
+        provider_budget_enabled=True,
+        provider_prices={"test": {
+            "provider": "OpenAICompatProvider", "version": "test-only",
+            "valid_until": "2099-01-01T00:00:00Z",
+            "input_usd_per_million": "1", "cached_usd_per_million": "0.1",
+            "output_usd_per_million": "2", "max_input_tokens": 65536,
+            "max_output_tokens": 4096, "max_request_bytes": 262144,
+        }},
         database_url="postgresql+psycopg://sagasmith:strong-password@postgres/service",
         rate_limit_backend="redis",
         secure_cookies=True,

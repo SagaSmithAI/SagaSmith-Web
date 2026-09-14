@@ -239,3 +239,27 @@ def test_pack_form_must_match_archive_descriptor(client: TestClient) -> None:
     )
     assert response.status_code == 422
     assert "id" in response.json()["detail"]
+
+
+def test_user_upload_quota_cannot_be_reset_by_new_session(client: TestClient) -> None:
+    setup_dm(client)
+    payload = pack_archive()
+    client.app.state.settings.user_upload_storage_bytes = len(payload)
+
+    def upload(version):
+        return client.post(
+            "/api/packs",
+            data={"pack_id": "private-module", "version": version, "title": "Private",
+                  "kind": "module", "rights_attested": "true"},
+            files={"archive": ("private.sagasmith-pack", pack_archive(version=version),
+                               "application/zip")},
+        )
+
+    assert upload("1.0.0").status_code == 201
+    client.cookies.clear()
+    assert client.post(
+        "/api/auth/login", json={"email": "packs@example.com",
+                                "password": "correct horse battery staple"}
+    ).status_code == 200
+    assert upload("2.0.0").status_code == 413
+    assert len(client.get("/api/packs").json()) == 1

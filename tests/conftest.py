@@ -1,5 +1,7 @@
 import hashlib
 from collections.abc import Iterator
+from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +13,31 @@ from sagasmith_service.database import make_engine
 from sagasmith_service.integrations.agent import AgentResult
 from sagasmith_service.integrations.dnd_mcp import DndCombatRender
 from sagasmith_service.main import create_app
+from sagasmith_service.models import QuotaGrant, User, now_utc
+
+
+def grant_test_quota(client: TestClient, user_id: str, quantity: int = 1_000_000) -> None:
+    """Give integration scenarios an explicit entitlement after registration."""
+
+    with client.app.state.session_factory.begin() as session:
+        start = now_utc()
+        session.add(
+            QuotaGrant(
+                user_id=user_id,
+                metric="llm_tokens",
+                quantity=Decimal(quantity),
+                period_start=start,
+                period_end=start + timedelta(days=30),
+                source="test",
+            )
+        )
+
+
+def promote_test_admin(client: TestClient, user_id: str) -> None:
+    with client.app.state.session_factory.begin() as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        user.is_admin = True
 
 
 class FakeDndRuntime:

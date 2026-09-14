@@ -79,3 +79,50 @@ def test_protected_route_fails_closed_when_rate_limiter_is_unavailable(tmp_path)
         response = client.post("/api/auth/register", json=registration(20))
     assert response.status_code == 503
     assert response.headers["X-Content-Type-Options"] == "nosniff"
+
+
+def test_forged_cookies_cannot_rotate_auth_limit(tmp_path) -> None:
+    database_url = f"sqlite:///{(tmp_path / 'forged-cookie.db').as_posix()}"
+    settings = Settings(
+        env="test", database_url=database_url, public_origin="http://testserver",
+        auth_rate_limit=2,
+    )
+    with TestClient(create_app(settings, make_engine(database_url))) as client:
+        client.headers["Origin"] = "http://testserver"
+        for index in range(3):
+            client.cookies.clear()
+            client.cookies.set("sagasmith_session", f"forged-{index}")
+            result = client.post("/api/auth/register", json=registration(100 + index))
+            assert result.status_code == (201 if index < 2 else 429)
+
+
+def test_authenticated_rate_key_is_stable_across_sessions(client) -> None:
+    class RecordingLimiter:
+        def __init__(self):
+            self.keys = []
+
+        async def hit(self, key, **kwargs):
+            self.keys.append(key)
+            return None
+
+    assert client.post("/api/auth/register", json=registration(201)).status_code == 201
+    limiter = RecordingLimiter()
+    client.app.state.rate_limiter = limiter
+    client.post("/api/packs")
+    first_keys = list(limiter.keys)
+    client.cookies.clear()
+    assert client.post(
+        "/api/auth/login", json={"email": registration(201)["email"], "password": PASSWORD}
+    ).status_code == 200
+    limiter.keys.clear()
+    client.post("/api/packs")
+    assert limiter.keys == first_keys
+    assert len(first_keys) == 3  # IP, verified user and site budgets.
+
+
+def test_beta_module_authoring_requires_admin(client):
+    assert client.post("/api/auth/register", json=registration(202)).status_code == 201
+    client.app.state.settings.env = "production"
+    denied = client.post("/api/modules", json={"title": "Test"})
+    assert denied.status_code == 403
+    assert "administrator" in denied.json()["detail"]

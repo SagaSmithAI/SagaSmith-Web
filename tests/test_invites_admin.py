@@ -1,5 +1,8 @@
 from conftest import FakeDndRuntime
 from fastapi.testclient import TestClient
+from sqlalchemy import select
+
+from sagasmith_service.models import User
 
 
 def register(client: TestClient, email: str, name: str) -> dict:
@@ -51,9 +54,11 @@ def test_request_and_auto_join_invites(client: TestClient, dnd_runtime: FakeDndR
 
 
 def test_admin_quota_grant(client: TestClient) -> None:
-    client.app.state.settings.bootstrap_admin_email = "admin@example.com"
     admin = register(client, "admin@example.com", "Admin")
-    assert admin["is_admin"] is True
+    with client.app.state.session_factory.begin() as session:
+        user = session.scalar(select(User).where(User.id == admin["id"]))
+        assert user is not None
+        user.is_admin = True
     target = register(client, "quota-target@example.com", "Target")
     denied = client.post(
         f"/api/admin/users/{admin['id']}/quota-grants",
@@ -68,4 +73,4 @@ def test_admin_quota_grant(client: TestClient) -> None:
     assert granted.status_code == 201
     assert granted.json()["source"] == "admin"
     login(client, "quota-target@example.com")
-    assert client.get("/api/usage/balance").json()["granted"] == "1005000.000000"
+    assert client.get("/api/usage/balance").json()["granted"] in {"5000", "5000.000000"}

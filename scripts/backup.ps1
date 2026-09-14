@@ -24,7 +24,17 @@ $resolvedDestination = [System.IO.Path]::GetFullPath($Destination)
 if ($resolvedDestination -eq [System.IO.Path]::GetFullPath($repo)) {
     throw "Backup destination cannot be the repository root."
 }
-New-Item -ItemType Directory -Force -Path $resolvedDestination | Out-Null
+if (Test-Path -LiteralPath $resolvedDestination -PathType Leaf) {
+    throw "Backup destination must be a directory."
+}
+if (Test-Path -LiteralPath $resolvedDestination -PathType Container) {
+    $existingEntries = @(Get-ChildItem -LiteralPath $resolvedDestination -Force)
+    if ($existingEntries.Count -gt 0) {
+        throw "Backup destination must be empty: $resolvedDestination"
+    }
+} else {
+    New-Item -ItemType Directory -Force -Path $resolvedDestination | Out-Null
+}
 
 $writers = @("api", "module-worker", "agent", "dnd-mcp", "coc-mcp", "minio")
 $stopped = $false

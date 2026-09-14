@@ -5,7 +5,7 @@ import threading
 import time
 from datetime import timedelta
 
-from conftest import FakeAgentRuntime, FakeDndRuntime
+from conftest import FakeAgentRuntime, FakeDndRuntime, grant_test_quota
 from fastapi.testclient import TestClient
 
 from sagasmith_service.models import ArtifactRelease, ModuleRun, now_utc
@@ -49,7 +49,9 @@ def register(client: TestClient) -> dict:
         },
     )
     assert response.status_code == 201, response.text
-    return response.json()["user"]
+    user = response.json()["user"]
+    grant_test_quota(client, user["id"])
+    return user
 
 
 def project_payload() -> dict:

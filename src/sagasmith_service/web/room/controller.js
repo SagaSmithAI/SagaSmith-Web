@@ -551,7 +551,7 @@ export function createRoomController({
         });
         if (generation !== state.roomGeneration) return;
         $$(".suggestion-row").forEach((row) => row.remove());
-        timelineController.updateMessage(result.message);
+        timelineController.updateMessage(result.message, result.job);
         if (result.agent_message) timelineController.updateMessage(result.agent_message);
         if (mode === "action") {
           state.selectedTargetId = null;
