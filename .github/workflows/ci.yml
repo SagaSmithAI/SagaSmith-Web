@@ -91,11 +91,24 @@ jobs:
           prune-cache: true
       - run: uv sync --frozen --all-extras
       - run: mkdir -p secrets && cp tests/e2e/agent-config.json secrets/agent-config.json
-      - name: Build and start the complete pinned stack
+      - name: Build and start the fixture dependencies
         run: >-
           docker compose -p sagasmith-service-e2e
           -f compose.yaml -f compose.e2e.yaml
-          up -d --build --wait --wait-timeout 300
+          up -d --build --wait --wait-timeout 300 postgres minio
+      - name: Run migrations and provision offline E2E fixture
+        run: >-
+          docker compose -p sagasmith-service-e2e
+          -f compose.yaml -f compose.e2e.yaml
+          run --build --no-deps --rm --entrypoint alembic api upgrade head
+          && docker compose -p sagasmith-service-e2e
+          -f compose.yaml -f compose.e2e.yaml
+          run --no-deps --rm --entrypoint python api /tmp/container_e2e_fixture.py
+      - name: Start the complete pinned stack
+        run: >-
+          docker compose -p sagasmith-service-e2e
+          -f compose.yaml -f compose.e2e.yaml
+          up -d --wait --wait-timeout 300
       - name: Run D&D, CoC, and Narrative hosted acceptance
         run: uv run python scripts/container_e2e.py
       - name: Run Redis, MCP restart, and Worker lifecycle acceptance

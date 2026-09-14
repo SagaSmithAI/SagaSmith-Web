@@ -14,14 +14,20 @@ services:
       SAGASMITH_AGENT_API_KEY: e2e-internal-agent-key
       SAGASMITH_AGENT_BOUNDARY_MODE: modern
       SAGASMITH_SECURE_COOKIES: "false"
-      SAGASMITH_BOOTSTRAP_ADMIN_EMAIL: owner-e2e@example.com
+      SAGASMITH_REGISTRATION_MODE: open
+      SAGASMITH_BOOTSTRAP_ADMIN_EMAIL: ""
+      SAGASMITH_E2E_FIXTURE: "1"
       SAGASMITH_STORAGE_BACKEND: s3
       SAGASMITH_OBJECT_ENDPOINT: http://minio:9000
+      SAGASMITH_OBJECT_REGION: us-east-1
       SAGASMITH_OBJECT_BUCKET: sagasmith-private-e2e
       SAGASMITH_OBJECT_ACCESS_KEY: sagasmith
       SAGASMITH_OBJECT_SECRET_KEY: e2e-minio-secret
-      SAGASMITH_SIGNUP_TOKEN_QUOTA: "100000"
+      SAGASMITH_OBJECT_CREATE_BUCKET: "false"
+      SAGASMITH_SIGNUP_TOKEN_QUOTA: "0"
       SAGASMITH_MODULE_AGENT_RESERVATION_TOKENS: "32768"
+    volumes:
+      - ./scripts/container_e2e_fixture.py:/tmp/container_e2e_fixture.py:ro
     ports:
       - "${SAGASMITH_E2E_API_PORT:-18088}:8080"
 
@@ -34,9 +40,11 @@ services:
       SAGASMITH_AGENT_API_KEY: e2e-internal-agent-key
       SAGASMITH_STORAGE_BACKEND: s3
       SAGASMITH_OBJECT_ENDPOINT: http://minio:9000
+      SAGASMITH_OBJECT_REGION: us-east-1
       SAGASMITH_OBJECT_BUCKET: sagasmith-private-e2e
       SAGASMITH_OBJECT_ACCESS_KEY: sagasmith
       SAGASMITH_OBJECT_SECRET_KEY: e2e-minio-secret
+      SAGASMITH_OBJECT_CREATE_BUCKET: "false"
       SAGASMITH_MODULE_AGENT_RESERVATION_TOKENS: "32768"
       SAGASMITH_MODULE_WORKER_CONCURRENCY: "1"
   postgres:
