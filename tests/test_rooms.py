@@ -4,6 +4,7 @@ import hashlib
 import json
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -24,6 +25,7 @@ from sagasmith_service.models import (
     AuditEvent,
     CampaignMembershipProjection,
     CampaignMessage,
+    CampaignRoom,
     CampaignRoomEvent,
     CampaignSuggestion,
     OutboxEvent,
@@ -38,6 +40,40 @@ from sagasmith_service.room_jobs import RoomTurnJobProcessor
 from sagasmith_service.security import SESSION_COOKIE
 
 PASSWORD = "correct horse battery staple"
+
+
+def test_history_scans_past_hidden_messages(client: TestClient) -> None:
+    owner = register(client, "room-owner@example.com", "DM")
+    create_campaign(client)
+    player = add_player(client, "history-player@example.com", "Player")
+    with client.app.state.session_factory.begin() as session:
+        room = session.scalar(select(CampaignRoom))
+        for sequence in range(1, 306):
+            session.add(CampaignMessage(
+                room_id=room.id, campaign_id="campaign-1", sequence=sequence,
+                sender_user_id=owner["id"], sender_display_name="DM", sender_type="user",
+                message_type="chat", audience="public" if sequence in {1, 153, 305} else "dm",
+                content=f"message-{sequence}", status="completed",
+                client_message_id=f"history-{sequence}",
+            ))
+        room.next_message_sequence = 306
+    login(client, "history-player@example.com")
+    base = "/api/campaigns/campaign-1/room"
+    first = client.get(f"{base}/messages?limit=2")
+    assert first.status_code == 200
+    assert [item["sequence"] for item in first.json()] == [1, 153]
+    assert [item["sequence"] for item in client.get(
+        f"{base}/messages?after=153&limit=2"
+    ).json()] == [305]
+    snapshot = client.get(f"{base}/snapshot?limit=2")
+    assert snapshot.status_code == 200
+    assert [item["sequence"] for item in snapshot.json()["messages"]] == [153, 305]
+    from sagasmith_service.api.rooms import _recent_context
+
+    with client.app.state.session_factory() as session:
+        room = session.scalar(select(CampaignRoom))
+        context = _recent_context(session, room, "player", player["id"], limit=2)
+        assert [item["sequence"] for item in context] == [153, 305]
 
 
 def register(client: TestClient, email: str, name: str) -> dict[str, Any]:
@@ -661,6 +697,173 @@ def test_room_turn_reuses_agent_result_when_projection_retry_recovers(
         assert job.attempt == 2
         assert job.agent_result["request_id"] == "agent-request-1"
         assert reservation.status == "settled"
+
+
+def test_committed_tools_survive_missing_final_output(client, agent_runtime):
+    import httpx
+
+    register(client, "room-owner@example.com", "DM")
+    create_campaign(client)
+    calls = 0
+
+    async def fail_after_tool(**arguments):
+        nonlocal calls
+        calls += 1
+        callback = arguments["context"]["response_contract"]["operation_callback"]
+        call_id = str(uuid.uuid4())
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=client.app)) as internal:
+            for state in ("dispatched", "returned"):
+                result = await internal.post(callback["url"],
+                    headers={"Authorization": f"Bearer {callback['token']}"},
+                    json={"call_id": call_id, "tool": "character_check", "state": state,
+                          "result": {"is_error": False} if state == "returned" else {}},
+                )
+                assert result.status_code == 200, result.text
+        raise AgentRuntimeError("final output missing", retryable=True, code="agent_http_502")
+
+    agent_runtime.complete = fail_after_tool
+    response = client.post("/api/campaigns/campaign-1/room/messages",
+        headers={"Idempotency-Key": "recover-before-final"},
+        json={"content": "Check once", "mode": "action"})
+    assert response.status_code == 200, response.text
+    assert calls == 1
+    assert response.json()["job"]["status"] == "succeeded"
+
+    with client.app.state.session_factory() as session:
+        job = session.scalar(select(RoomTurnJob))
+        reservation = session.get(QuotaReservation, job.reservation_id)
+        assert job.agent_result["usage_known"] is False
+        assert reservation.status == "released"
+        assert session.scalar(select(AuditEvent).where(
+            AuditEvent.action == "campaign.room.usage.reconciliation_required"
+        )) is not None
+
+
+def test_unknown_tool_outcome_never_restarts_model(client, agent_runtime):
+    import httpx
+
+    register(client, "room-owner@example.com", "DM")
+    create_campaign(client)
+    calls = 0
+
+    async def lose_receipt(**arguments):
+        nonlocal calls
+        calls += 1
+        callback = arguments["context"]["response_contract"]["operation_callback"]
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=client.app)) as internal:
+            response = await internal.post(callback["url"],
+                headers={"Authorization": f"Bearer {callback['token']}"},
+                json={"call_id": str(uuid.uuid4()), "tool": "character_check",
+                      "state": "dispatched"})
+            assert response.status_code == 200
+        raise AgentRuntimeError("timeout", retryable=True, code="agent_timeout")
+
+    agent_runtime.complete = lose_receipt
+    response = client.post("/api/campaigns/campaign-1/room/messages",
+        headers={"Idempotency-Key": "unknown-operation"},
+        json={"content": "Check once", "mode": "action"})
+    assert calls == 1
+    with client.app.state.session_factory() as session:
+        job = session.scalar(select(RoomTurnJob))
+        assert job.error_code == "operation_result_unknown", response.text
+        assert job.retryable is False
+
+
+def test_combat_roll_handoff_is_bounded_and_charges_both_stages(client, agent_runtime, dnd_runtime):
+    from dataclasses import replace
+
+    register(client, "room-owner@example.com", "DM")
+    create_campaign(client)
+    dnd_runtime.campaign_phase = "combat"
+    original = agent_runtime.complete
+
+    async def choose_catalog(**arguments):
+        result = await original(**arguments)
+        if len(agent_runtime.calls) == 1:
+            return replace(result, structured_output={
+                **result.structured_output, "next_task": "roll",
+            })
+        return result
+
+    agent_runtime.complete = choose_catalog
+    response = client.post("/api/campaigns/campaign-1/room/messages",
+        headers={"Idempotency-Key": "roll-handoff"},
+        json={"content": "Roll a generic check", "mode": "action"})
+    assert response.status_code == 200, response.text
+    assert response.json()["job"]["status"] == "succeeded", response.text
+    assert len(agent_runtime.calls) == 2
+    catalogs = [call["context"]["authority_context"]["allowed_operations"]
+                for call in agent_runtime.calls]
+    assert all(len(catalog) <= 16 for catalog in catalogs)
+    assert {"dnd_check", "dnd_dice_roll"} <= set(catalogs[1])
+    with client.app.state.session_factory() as session:
+        job = session.scalar(select(RoomTurnJob))
+        reservation = session.get(QuotaReservation, job.reservation_id)
+        assert reservation.status == "settled"
+        assert reservation.settled_quantity == 300
+
+
+def test_unknown_operation_reconciles_from_domain_without_model_replay(client, agent_runtime,
+                                                                      dnd_runtime):
+    import httpx
+
+    register(client, "room-owner@example.com", "DM")
+    create_campaign(client)
+    original = agent_runtime.complete
+    call_id = str(uuid.uuid4())
+
+    async def lost_receipt(**arguments):
+        await original(**arguments)
+        callback = arguments["context"]["response_contract"]["operation_callback"]
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=client.app)) as internal:
+            known_id = str(uuid.uuid4())
+            for phase in ("dispatched", "returned"):
+                response = await internal.post(callback["url"],
+                    headers={"Authorization": f"Bearer {callback['token']}"},
+                    json={"call_id": known_id, "tool": "character_check", "state": phase,
+                          "result": {"structured_content": {"result": {
+                              "resolution_id": "known-roll",
+                          }}} if phase == "returned" else {}},
+                )
+                assert response.status_code == 200
+            await internal.post(callback["url"],
+                headers={"Authorization": f"Bearer {callback['token']}"},
+                json={"call_id": call_id, "tool": "character_check", "state": "dispatched"})
+        raise AgentRuntimeError("timeout", retryable=True, code="agent_timeout")
+
+    async def lookup(**arguments):
+        assert arguments["key"] == f"room-operation:{call_id}"
+        return {"result": {"key": arguments["key"], "response": {"status": "committed"}}}
+
+    agent_runtime.complete = lost_receipt
+    dnd_runtime.operation_receipt = lookup
+    dnd_runtime.resolution_presentations["known-roll"] = {
+        "schema": "sagasmith.resolution-presentation/v1", "system_id": "dnd5e",
+        "thread_id": "known-roll", "event_sequence": 1, "operation": "character.ability",
+        "status": "settled", "audience": {"scope": "public", "actor_refs": [],
+                                            "disclosure": "public"},
+        "actor_refs": [], "rolls": [], "outcome": {"success": True},
+        "pending_choice": None, "campaign_revision": 1,
+    }
+    response = client.post("/api/campaigns/campaign-1/room/messages",
+        headers={"Idempotency-Key": "reconcile-no-reroll"},
+        json={"content": "Check once", "mode": "action"})
+    with client.app.state.session_factory() as session:
+        job = session.scalar(select(RoomTurnJob))
+        job_id = job.id
+        assert job.status == "failed", response.text
+    snapshot = client.get("/api/campaigns/campaign-1/room/snapshot").json()
+    assert any("仍有操作结果未知" in item["content"] for item in snapshot["messages"])
+    assert any(block.get("resolution_id") == "known-roll" and block.get("verified")
+               for item in snapshot["messages"]
+               for block in (item.get("structured_payload") or {}).get("blocks", []))
+    reconciled = client.post(f"/api/campaigns/campaign-1/room/jobs/{job_id}/reconcile")
+    assert reconciled.status_code == 200, reconciled.text
+    assert reconciled.json()["unknown_operations"] == 0
+    client.portal.call(client.app.state.room_turn_jobs.wait, job_id, 5)
+    assert len(agent_runtime.calls) == 1
+    with client.app.state.session_factory() as session:
+        assert session.get(RoomTurnJob, job_id).status == "succeeded"
 
 
 def test_queued_room_turn_can_be_cancelled_without_agent_call(

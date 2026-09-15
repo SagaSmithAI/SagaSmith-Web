@@ -20,7 +20,7 @@ MCP_SERVICE_BY_SYSTEM = {
 
 _ROLES = frozenset({"owner", "dm", "player"})
 _DM_ROLES = frozenset({"owner", "dm"})
-_TASKS = frozenset({"chat", "action", "narration"})
+_TASKS = frozenset({"chat", "action", "narration", "roll"})
 
 
 class RoomToolPolicyError(ValueError):
@@ -61,7 +61,11 @@ _POLICIES: dict[_PolicyKey, tuple[str, ...]] = {
         "campaign_query character_query combat_cast_spell combat_choice "
         "combat_common_action combat_end_turn combat_movement combat_preflight_attack "
         "combat_query combat_reaction_attack combat_resolve_attack combat_use_activity "
-        "dnd_check dnd_dice_roll resolution_presentation skill_query"
+        "combat_reaction_defense rule_search resolution_presentation skill_query"
+    ),
+    _PolicyKey("dnd5e", "combat", "roll"): _ids(
+        "campaign_query character_query combat_query dnd_check dnd_dice_roll "
+        "rule_search resolution_presentation skill_query"
     ),
     _PolicyKey("dnd5e", "lobby", "narration"): _ids(
         "campaign_change campaign_event campaign_query module_query module_set_progress "
@@ -69,7 +73,8 @@ _POLICIES: dict[_PolicyKey, tuple[str, ...]] = {
     ),
     _PolicyKey("dnd5e", "play", "narration"): _ids(
         "campaign_change campaign_event campaign_query module_query module_set_progress "
-        "npc_conversation snapshot_create skill_query"
+        "npc_conversation combat_start combat_query resolution_presentation "
+        "snapshot_create skill_query"
     ),
     _PolicyKey("dnd5e", "combat", "narration"): _ids(
         "campaign_query combat_end combat_join combat_map_patch combat_query snapshot_create "
@@ -204,6 +209,8 @@ def select_room_turn_tools(
         raise RoomToolPolicyError("narration requires an owner or dm role")
     service_for_system(system_id)
     operations = _POLICIES.get(_PolicyKey(system_id, phase, task), ())
+    if system_id == "dnd5e" and phase == "play" and task == "action" and role in _DM_ROLES:
+        operations = tuple(sorted((*operations, "combat_start", "combat_query")))
     if not operations:
         raise RoomToolPolicyError(
             f"no reviewed MCP tool subset for {system_id}/{phase}/{role}/{task}"

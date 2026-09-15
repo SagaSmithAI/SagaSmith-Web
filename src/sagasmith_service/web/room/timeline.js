@@ -1,7 +1,7 @@
 import { api } from "/assets/api/client.js";
 import { $, $$, button, text } from "/assets/components/dom.js";
 import { toast } from "/assets/components/toast.js";
-import { characters } from "/assets/room/model.js";
+import { characters, isDm } from "/assets/room/model.js";
 import { state } from "/assets/state/store.js";
 
 export function createRoomTimelineController({
@@ -60,6 +60,7 @@ export function createRoomTimelineController({
       );
       if (!isCurrent()) return;
       if (result.job) rememberJob(result.job, message.id);
+      toast("推理已取消；已完成的规则结算不会撤销，请查看房间面板。");
       await syncJob(job.id, campaignId, generation);
     } catch (error) {
       if (isCurrent()) toast(`取消失败：${error.message}`);
@@ -390,11 +391,34 @@ export function createRoomTimelineController({
   }
 
   function renderJobControls(message) {
-    if (message.sender_user_id !== state.user?.id) return null;
     const job = roomJobs.get(String(message.id));
     if (!job) return null;
     const actions = text("div", "", "message-actions");
     actions.setAttribute("aria-label", "任务操作");
+    if (isDm() && job.error_code === "operation_result_unknown") {
+      const reconcile = button("核对原操作结果", async () => {
+        const campaignId = state.campaign?.id;
+        const generation = state.roomGeneration;
+        if (!campaignId) return;
+        const isCurrent = () => state.campaign?.id === campaignId &&
+          state.roomGeneration === generation;
+        reconcile.disabled = true;
+        try {
+          const result = await api(
+            `/api/campaigns/${campaignId}/room/jobs/${job.id}/reconcile`,
+            { method: "POST" },
+          );
+          if (!isCurrent()) return;
+          toast(result.unknown_operations ? "尚未找到完整回执，未重新执行动作。" : "回执已确认，正在恢复展示。");
+          await syncJob(job.id, campaignId, generation);
+        } catch (error) { if (isCurrent()) toast(error.message); }
+        finally { reconcile.disabled = false; }
+      }, "message-action");
+      actions.append(reconcile);
+    }
+    if (message.sender_user_id !== state.user?.id) {
+      return actions.childElementCount ? actions : null;
+    }
     const busy = pendingJobActions.has(job.id);
     if (message.status === "processing" && ["queued", "waiting", "running"].includes(job.status)) {
       const cancel = button("取消", () => cancelJob(message, job), "message-action");

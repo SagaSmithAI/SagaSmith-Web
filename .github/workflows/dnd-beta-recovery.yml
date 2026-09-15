@@ -1,0 +1,70 @@
+name: dnd-beta-recovery
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feat/dnd-beta-readiness-20260915]
+  pull_request:
+    paths:
+      - 'compose.dnd*'
+      - 'component-versions.dnd-beta.json'
+      - 'scripts/*backup*'
+      - 'scripts/restore*'
+      - '.github/workflows/dnd-beta-recovery.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      POSTGRES_PASSWORD: recovery-postgres
+      MINIO_ROOT_PASSWORD: recovery-minio-secret
+      OPENAI_API_KEY: e2e-only-key
+      SAGASMITH_AGENT_INTERNAL_KEY: e2e-internal-agent-key
+      SAGASMITH_WORKER_SERVICE_TOKEN: recovery-worker-service-token-at-least-32-bytes
+      SAGASMITH_AUTH_CONTEXT_SECRET: e2e-auth-context-secret-at-least-32-bytes
+      COMPOSE_FILE: compose.yaml:compose.e2e.yaml:compose.dnd.yaml:compose.dnd.e2e.yaml
+      COMPOSE_PROJECT_NAME: sagasmith-dnd-recovery-source
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          python-version: '3.12'
+      - run: uv sync --frozen --all-extras
+      - run: uv run pytest tests/test_dnd_beta_lock.py tests/test_production_deployment.py
+      - run: mkdir -p secrets && cp tests/e2e/agent-config.dnd.json secrets/agent-config.json
+      - name: Build and initialize the DND-only fixture
+        run: |
+          docker compose up -d --wait postgres minio
+          docker compose build
+          docker compose run --no-deps --rm --entrypoint alembic api upgrade head
+          docker compose run --no-deps --rm --entrypoint python api /tmp/container_e2e_fixture.py
+          docker compose up -d --wait --wait-timeout 300
+      - name: Dual-user DND and private-object acceptance with deterministic provider
+        run: uv run python scripts/container_e2e.py --dnd-only | tee dnd-e2e.json
+      - name: Backup and isolated restore of the same images
+        shell: pwsh
+        run: |
+          ./scripts/backup.ps1 -Destination "$env:RUNNER_TEMP/dnd-backup" -ProjectName sagasmith-dnd-recovery-source -ComposeFiles compose.yaml,compose.e2e.yaml,compose.dnd.yaml,compose.dnd.e2e.yaml
+          uv run python scripts/restore_image_overlay.py "$env:RUNNER_TEMP/dnd-backup" "$env:RUNNER_TEMP/restore-images.yaml"
+          if ($LASTEXITCODE -ne 0) { throw 'image manifest conversion failed' }
+          $env:SAGASMITH_E2E_API_PORT = '18089'
+          $env:SAGASMITH_E2E_AGENT_PORT = '18911'
+          ./scripts/restore.ps1 -BackupDirectory "$env:RUNNER_TEMP/dnd-backup" -ProjectName sagasmith-dnd-recovery-target -ComposeFiles @('compose.yaml','compose.e2e.yaml','compose.dnd.yaml','compose.dnd.e2e.yaml',"$env:RUNNER_TEMP/restore-images.yaml") -ConfirmRestore RESTORE-sagasmith-dnd-recovery-target
+      - name: Continue the restored campaign
+        run: uv run python scripts/restore_smoke.py --base-url http://127.0.0.1:18089 | tee dnd-restore.json
+      - name: Diagnostics
+        if: failure()
+        run: docker compose logs --no-color --tail 150
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: dnd-beta-recovery-evidence
+          path: |
+            dnd-e2e.json
+            dnd-restore.json
+            ${{ runner.temp }}/dnd-backup/manifest.json
+          retention-days: 14

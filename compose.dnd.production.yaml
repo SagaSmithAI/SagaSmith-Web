@@ -1,0 +1,6 @@
+# Apply last; production always consumes published digest images.
+services:
+  agent:
+    build: !reset null
+  dnd-mcp:
+    build: !reset null

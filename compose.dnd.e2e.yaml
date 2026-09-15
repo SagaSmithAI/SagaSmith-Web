@@ -1,0 +1,6 @@
+services:
+  agent:
+    volumes:
+      - ./tests/e2e/agent-config.dnd.json:/config/agent-config.json:ro
+    depends_on:
+      mock-llm: {condition: service_started}

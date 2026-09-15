@@ -5,6 +5,7 @@ import { state } from "/assets/state/store.js";
 
 export function createCampaignController({ openCampaign }) {
   let loading;
+  let createAttempt;
   async function loadCampaigns({ fresh = false } = {}) {
     if (loading) {
       if (!fresh) return loading;
@@ -51,7 +52,18 @@ export function createCampaignController({ openCampaign }) {
   }
 
   function initialize() {
-    $("#new-campaign").onclick = () => {
+    $("#new-campaign").onclick = async () => {
+      try {
+        const product = await api("/api/product");
+        for (const option of $("#campaign-form select[name=system_id]").options) {
+          option.disabled = !product.enabled_systems.includes(option.value);
+          option.hidden = option.disabled;
+        }
+        $("#campaign-form select[name=system_id]").value = product.enabled_systems[0];
+      } catch (error) {
+        toast(error.message);
+        return;
+      }
       $("#campaign-form").hidden = false;
       $("#campaign-form input").focus();
     };
@@ -64,12 +76,15 @@ export function createCampaignController({ openCampaign }) {
       event.preventDefault();
       await withBusy(event.target, async () => {
         const form = new FormData(event.target);
+        const body = JSON.stringify(Object.fromEntries(form));
+        if (createAttempt?.body !== body) createAttempt = { body, key: crypto.randomUUID() };
         try {
           await api("/api/campaigns", {
             method: "POST",
-            headers: { "Idempotency-Key": crypto.randomUUID() },
-            body: JSON.stringify(Object.fromEntries(form)),
+            headers: { "Idempotency-Key": createAttempt.key },
+            body,
           });
+          createAttempt = null;
           event.target.hidden = true;
           event.target.reset();
           toast("战役已创建");

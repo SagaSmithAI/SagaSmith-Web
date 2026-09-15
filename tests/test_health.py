@@ -74,6 +74,34 @@ def test_readiness_metrics_and_request_id(dnd_runtime, agent_runtime, tmp_path) 
         assert metric_name in metrics.text
 
 
+def test_dnd_only_does_not_probe_disabled_domains(dnd_runtime, agent_runtime, tmp_path):
+    from conftest import FakeDndRuntime
+
+    disabled = FakeDndRuntime()
+    disabled.fail_probe = True
+    url = f"sqlite:///{(tmp_path / 'dnd-only.db').as_posix()}"
+    settings = Settings(env="test", database_url=url, enabled_systems={"dnd5e"})
+    with TestClient(create_app(
+        settings, make_engine(url), dnd_runtime, agent_runtime,
+        coc_runtime=disabled, narrative_runtime=disabled,
+    )) as client:
+        assert client.get("/api/product").json() == {"enabled_systems": ["dnd5e"]}
+        ready = client.get("/api/ready")
+        assert ready.status_code == 200
+        assert "coc_mcp" not in ready.json()["components"]
+        assert "narrative_mcp" not in ready.json()["components"]
+        assert client.post("/api/auth/register", json={
+            "email": "beta@example.com", "password": "correct horse battery staple",
+            "display_name": "Beta",
+        }).status_code == 201
+        for system in ("coc7e", "narrative"):
+            result = client.post("/api/campaigns", json={"name": "Disabled", "system_id": system},
+                                 headers={"Idempotency-Key": f"disabled-{system}",
+                                          "Origin": settings.public_origin})
+            assert result.status_code == 422
+        assert disabled.calls == []
+
+
 def test_readiness_rejects_an_unavailable_required_component(
     dnd_runtime, agent_runtime, tmp_path
 ) -> None:

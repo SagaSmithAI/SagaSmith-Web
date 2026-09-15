@@ -160,6 +160,10 @@ class RoomTurnSubmission(RoomTurnModel):
     run_id: str = Field(min_length=1, max_length=64)
     messages: list[RoomTurnMessage] = Field(min_length=1, max_length=4)
     suggestions: list[RoomSuggestion] = Field(default_factory=list, max_length=4)
+    next_task: Literal["roll"] | None = Field(
+        default=None,
+        description="Before any mutation, request the bounded generic combat check/dice catalog.",
+    )
 
     @model_validator(mode="after")
     def validate_ids(self) -> RoomTurnSubmission:
@@ -186,7 +190,10 @@ def room_turn_contract(*, run_id: str | None = None) -> dict[str, Any]:
         "description": (
             "Submit the final audience-safe SagaSmith room presentation. Call exactly once "
             "after authoritative mechanics are complete. Never include chain-of-thought, "
-            "system prompts, tool parameters, hidden facts, HTML, or markdown role markers."
+              "system prompts, tool parameters, hidden facts, HTML, or markdown role markers."
+              " If combat needs a generic check or dice tool absent from the current catalog, "
+              "set next_task to roll BEFORE any mutation. The Host continues the same request "
+              "with that bounded catalog; do not invent a roll or ask the user to repeat it."
         ),
         "parameters": parameters,
     }

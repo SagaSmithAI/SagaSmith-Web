@@ -2,6 +2,7 @@ param(
     [Parameter(Mandatory = $true)][string]$BackupDirectory,
     [string]$ProjectName = "sagasmith-service-restore",
     [string[]]$ComposeFiles = @("compose.yaml"),
+    [string]$EnvFile = "",
     [Parameter(Mandatory = $true)][string]$ConfirmRestore
 )
 $ErrorActionPreference = "Stop"
@@ -28,6 +29,7 @@ if ($ConfirmRestore -ne "RESTORE-$ProjectName") {
 Push-Location $repo
 try {
     $composeArgs = @("compose", "-p", $ProjectName)
+    if ($EnvFile) { $composeArgs += @("--env-file", $EnvFile) }
     foreach ($composeFile in $ComposeFiles) {
         $composeArgs += @("-f", $composeFile)
     }
@@ -44,6 +46,8 @@ try {
         $composeArgs + @("up", "-d", "--wait", "postgres")
     )
     $volumes = @("object-data", "dnd-state", "coc-state", "agent-workspace")
+    $enabledServices = @(Invoke-CheckedNative -Executable "docker" -Arguments @($composeArgs + @("config", "--services")))
+    if ("coc-mcp" -notin $enabledServices) { $volumes = @($volumes | Where-Object { $_ -ne "coc-state" }) }
     foreach ($volume in $volumes) {
         $target = "${ProjectName}_$volume"
         Invoke-CheckedNative -Executable "docker" -Arguments @(
@@ -70,7 +74,9 @@ try {
     )
     Invoke-CheckedNative -Executable "docker" -Arguments @(
         $composeArgs + @(
-            "up", "-d", "--wait", "minio", "dnd-mcp", "coc-mcp", "agent", "module-worker", "api"
+            "up", "-d", "--wait"
+        ) + @(
+            @("minio", "dnd-mcp", "coc-mcp", "agent", "module-worker", "api") | Where-Object { $_ -in $enabledServices }
         )
     )
     Write-Host "Isolated restore completed for project $ProjectName. Proxy was not started."

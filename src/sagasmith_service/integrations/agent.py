@@ -23,6 +23,7 @@ class AgentResult:
     structured_output: dict[str, Any] | None = None
     tool_receipts: tuple[dict[str, Any], ...] = ()
     mcp_results: tuple[dict[str, Any], ...] = ()
+    usage_known: bool = True
 
     @property
     def total_tokens(self) -> int:
@@ -38,6 +39,7 @@ class AgentResult:
             "structured_output": self.structured_output,
             "tool_receipts": list(self.tool_receipts),
             "mcp_results": list(self.mcp_results),
+            "usage_known": self.usage_known,
         }
 
     @classmethod
@@ -59,6 +61,7 @@ class AgentResult:
             mcp_results=tuple(
                 dict(item) for item in value.get("mcp_results") or [] if isinstance(item, dict)
             ),
+            usage_known=value.get("usage_known", True) is True,
         )
 
 
@@ -340,13 +343,17 @@ class HttpAgentRuntime:
                         error_payload = decoded
                 except ValueError:
                     pass
-                error_usage = error_payload.get("usage") or {}
+                detail = error_payload.get("detail")
+                detail = detail if isinstance(detail, dict) else {}
+                error_usage = error_payload.get("usage") or detail.get("usage") or {}
+                error_model = error_payload.get("model") or detail.get("model")
                 raise AgentRuntimeError(
                     f"Agent returned HTTP {response.status_code}",
-                    retryable=retryable,
-                    code=f"agent_http_{response.status_code}",
+                    retryable=detail.get("retryable", retryable) is True,
+                    code=(detail["code"] if isinstance(detail.get("code"), str)
+                          else f"agent_http_{response.status_code}"),
                     request_id=(str(error_payload["id"]) if error_payload.get("id") else None),
-                    model=(str(error_payload["model"]) if error_payload.get("model") else None),
+                    model=str(error_model) if error_model else None,
                     prompt_tokens=(
                         int(error_usage["prompt_tokens"])
                         if error_usage.get("prompt_tokens") is not None

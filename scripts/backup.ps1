@@ -1,9 +1,11 @@
 param(
     [string]$Destination = "",
     [string]$ProjectName = "sagasmith-service",
-    [string[]]$ComposeFiles = @("compose.yaml")
+    [string[]]$ComposeFiles = @("compose.yaml"),
+    [string]$EnvFile = ""
 )
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "backup-hash.ps1")
 
 function Invoke-CheckedNative {
     param(
@@ -41,9 +43,12 @@ $stopped = $false
 Push-Location $repo
 try {
     $composeArgs = @("compose", "-p", $ProjectName)
+    if ($EnvFile) { $composeArgs += @("--env-file", $EnvFile) }
     foreach ($composeFile in $ComposeFiles) {
         $composeArgs += @("-f", $composeFile)
     }
+    $enabledServices = @(Invoke-CheckedNative -Executable "docker" -Arguments @($composeArgs + @("config", "--services")))
+    $writers = @($writers | Where-Object { $_ -in $enabledServices })
     Invoke-CheckedNative -Executable "docker" -Arguments @($composeArgs + @("stop") + $writers)
     $stopped = $true
     Invoke-CheckedNative -Executable "docker" -Arguments @(
@@ -56,6 +61,7 @@ try {
         $composeArgs + @("exec", "-T", "postgres", "rm", "-f", "/tmp/control.dump")
     )
     $volumes = @("object-data", "dnd-state", "coc-state", "agent-workspace")
+    if ("coc-mcp" -notin $enabledServices) { $volumes = @($volumes | Where-Object { $_ -ne "coc-state" }) }
     foreach ($volume in $volumes) {
         $source = "${ProjectName}_$volume"
         Invoke-CheckedNative -Executable "docker" -Arguments @(
@@ -83,7 +89,7 @@ try {
             @{
                 name = $_.Name
                 size_bytes = $_.Length
-                sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLower()
+                sha256 = Get-BackupSha256 -LiteralPath $_.FullName
             }
         })
     }
@@ -94,9 +100,7 @@ try {
 } finally {
     if ($stopped) {
         Invoke-CheckedNative -Executable "docker" -Arguments @(
-            $composeArgs + @(
-                "up", "-d", "--wait", "minio", "dnd-mcp", "coc-mcp", "agent", "module-worker", "api"
-            )
+            $composeArgs + @("up", "-d", "--wait") + $writers
         )
     }
     Pop-Location

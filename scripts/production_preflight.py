@@ -40,7 +40,9 @@ def load_env(path: Path) -> dict[str, str]:
         {
             key: value
             for key, value in os.environ.items()
-            if key.startswith("SAGASMITH_") or key in {"OPENAI_API_KEY", "POSTGRES_PASSWORD"}
+            if key.startswith("SAGASMITH_") or key in {
+                "OPENAI_API_KEY", "DEEPSEEK_API_KEY", "POSTGRES_PASSWORD"
+            }
         }
     )
     return values
@@ -53,7 +55,22 @@ def validate(values: dict[str, str]) -> list[str]:
         lowered = value.casefold()
         return any(marker in lowered for marker in ("replace-", "change-me", "development-only"))
 
+    try:
+        enabled = json.loads(values.get(
+            "SAGASMITH_ENABLED_SYSTEMS", '["dnd5e","coc7e","narrative"]'
+        ))
+    except ValueError:
+        enabled = None
+    if not isinstance(enabled, list) or not enabled or not all(
+        isinstance(item, str) for item in enabled
+    ) or not set(enabled) <= {
+        "dnd5e", "coc7e", "narrative"
+    }:
+        failures.append("SAGASMITH_ENABLED_SYSTEMS must list supported systems")
+        enabled = ["dnd5e", "coc7e", "narrative"]
     for key in REQUIRED_IMAGES:
+        if key == "SAGASMITH_COC_IMAGE" and "coc7e" not in enabled:
+            continue
         value = values.get(key, "")
         if not DIGEST_IMAGE.fullmatch(value):
             failures.append(f"{key} must be a complete image@sha256:<64-hex> reference")
@@ -185,12 +202,17 @@ def validate(values: dict[str, str]) -> list[str]:
         "SAGASMITH_AGENT_INTERNAL_KEY",
         "SAGASMITH_WORKER_SERVICE_TOKEN",
         "SAGASMITH_AUTH_CONTEXT_SECRET",
-        "OPENAI_API_KEY",
     ):
         if not values.get(key) or is_placeholder(values[key]):
             failures.append(f"{key} must be supplied")
         elif len(values[key]) < 32:
             failures.append(f"{key} must contain at least 32 characters")
+    provider_key = (
+        "DEEPSEEK_API_KEY" if values.get("SAGASMITH_MODEL_PROFILE") == "dnd-flash"
+        else "OPENAI_API_KEY"
+    )
+    if not values.get(provider_key) or is_placeholder(values[provider_key]):
+        failures.append(f"{provider_key} must be supplied")
     try:
         completion_timeout = int(values.get("SAGASMITH_AGENT_COMPLETION_TIMEOUT_SECONDS", "900"))
         reservation_ttl = int(values.get("SAGASMITH_AGENT_RESERVATION_TTL_SECONDS", "1200"))

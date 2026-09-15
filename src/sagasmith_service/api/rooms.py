@@ -16,7 +16,7 @@ from typing import Annotated, Any, TypeVar, cast
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import Response, StreamingResponse
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
@@ -49,6 +49,7 @@ from sagasmith_service.models import (
     IdentityMemoryEntry,
     QuotaReservation,
     RoomMediaArtifact,
+    RoomOperation,
     RoomTurnJob,
     User,
     now_utc,
@@ -70,6 +71,7 @@ from sagasmith_service.room_jobs import (
     TERMINAL_ROOM_JOB_STATES,
     RoomJobError,
 )
+from sagasmith_service.room_operations import OperationReport, recover_operations
 from sagasmith_service.room_tool_policy import (
     RoomToolPolicyError,
     campaign_phase_and_revision,
@@ -929,6 +931,43 @@ def _append_message(
     return item
 
 
+def _visible_history(
+    session: Session,
+    room: CampaignRoom,
+    membership_role: str,
+    user_id: str,
+    *,
+    limit: int,
+    after: int = 0,
+    newest: bool = False,
+) -> list[CampaignMessage]:
+    """Scan with a keyset cursor until a visible page is full or history ends."""
+    visible: list[CampaignMessage] = []
+    cursor: int | None = None
+    batch_size = max(100, limit)
+    while len(visible) < limit:
+        query = select(CampaignMessage).where(
+            CampaignMessage.room_id == room.id, CampaignMessage.sequence > after
+        )
+        if cursor is not None:
+            query = query.where(
+                CampaignMessage.sequence < cursor if newest else CampaignMessage.sequence > cursor
+            )
+        rows = session.scalars(query.order_by(
+            CampaignMessage.sequence.desc() if newest else CampaignMessage.sequence.asc()
+        ).limit(batch_size)).all()
+        if not rows:
+            break
+        visible.extend(
+            item for item in rows if _message_visible_for_role(item, membership_role, user_id)
+        )
+        cursor = rows[-1].sequence
+        if len(rows) < batch_size:
+            break
+    page = visible[:limit]
+    return list(reversed(page)) if newest else page
+
+
 def _recent_context(
     session: Session,
     room: CampaignRoom,
@@ -937,17 +976,9 @@ def _recent_context(
     *,
     limit: int = 40,
 ) -> list[dict[str, Any]]:
-    candidates = session.scalars(
-        select(CampaignMessage)
-        .where(CampaignMessage.room_id == room.id)
-        .order_by(CampaignMessage.sequence.desc())
-        .limit(limit * 3)
-    ).all()
-    visible = [
-        item
-        for item in reversed(candidates)
-        if _message_visible_for_role(item, membership_role, user_id)
-    ]
+    visible = _visible_history(
+        session, room, membership_role, user_id, limit=limit, newest=True
+    )
     return [
         {
             "sequence": item.sequence,
@@ -1493,13 +1524,14 @@ def _prepare_agent_transaction(
         job.agent_run_id = run.id
     target_service = service_for_system(campaign.system_id)
     previous_authority = dict(job.authority_context or {})
+    selected_task = previous_authority.get("handoff_task") or trigger.message_type
     previous_selection_matches = (
         previous_authority.get("schema") == "sagasmith.auth-context/v2"
         and previous_authority.get("target_service") == target_service
         and previous_authority.get("campaign_id") == campaign.id
         and previous_authority.get("system_id") == campaign.system_id
         and previous_authority.get("catalog_role") == host_role
-        and previous_authority.get("catalog_task") == trigger.message_type
+        and previous_authority.get("catalog_task") == selected_task
         and isinstance(previous_authority.get("allowed_operations"), list)
         and bool(previous_authority.get("allowed_operations"))
     )
@@ -1544,7 +1576,9 @@ def _prepare_agent_transaction(
             str(previous_authority.get("catalog_phase") or "") if previous_selection_matches else ""
         ),
         "catalog_role": host_role,
-        "catalog_task": trigger.message_type,
+        "catalog_task": selected_task,
+        "handoff_task": previous_authority.get("handoff_task"),
+        "handoff_usage": previous_authority.get("handoff_usage", {}),
     }
     job.authority_context = authority_context
     room_context = _recent_context(
@@ -1575,7 +1609,7 @@ def _prepare_agent_transaction(
         room_id=room.id,
         trigger_id=trigger.id,
         trigger_content=trigger.content,
-        trigger_mode=trigger.message_type,
+        trigger_mode=selected_task,
         trigger_payload=dict(trigger.structured_payload or {}),
         sender_display_name=sender_display_name,
         session_id=session_id,
@@ -1650,6 +1684,20 @@ def _persist_agent_result(
             True,
             "state",
         )
+    if not result.usage_known:
+        # Presentation recovery has no new model consumption. Missing original
+        # token usage is not a zero-usage receipt. Release the user token hold;
+        # independent per-call monetary claims remain fail-closed if uncertain.
+        release(session, job.reservation_id)
+        job.agent_result = result.to_json()
+        session.add(AuditEvent(
+            actor_user_id=job.user_id, action="campaign.room.usage.reconciliation_required",
+            subject_type="room_turn_job", subject_id=job.id,
+            details={"campaign_id": job.campaign_id, "usage_status": "unknown",
+                     "token_reservation": "released_without_estimated_charge"},
+        ))
+        session.commit()
+        return
     provider_tokens = Decimal(result.total_tokens)
     record_provider_consumption(
         session,
@@ -1835,6 +1883,41 @@ def _room_job_result(
     }
 
 
+def _handoff_room_task(session: Session, *, preparation: _AgentPreparation,
+                       result: AgentResult) -> None:
+    try:
+        submission = RoomTurnSubmission.model_validate(result.structured_output)
+    except ValidationError:
+        return
+    if submission.next_task is None:
+        return
+    if submission.run_id != preparation.run_id:
+        raise RoomJobError("agent_run_mismatch", "Task handoff belongs to another run", False)
+    job = session.get(RoomTurnJob, preparation.job_id)
+    authority = dict(job.authority_context)
+    has_operations = session.scalar(select(RoomOperation.id).where(
+        RoomOperation.job_id == job.id
+    ).limit(1))
+    if has_operations or authority.get("handoff_task"):
+        raise RoomJobError("task_handoff_denied",
+                           "Task handoff is allowed once, before any mutation", False)
+    try:
+        operations = select_room_turn_tools(
+            system_id=preparation.campaign_system_id, phase=authority["catalog_phase"],
+            role=preparation.host_role, task=submission.next_task,
+        )
+    except RoomToolPolicyError as exc:
+        raise RoomJobError("task_handoff_denied", str(exc), False) from exc
+    authority.update(handoff_task=submission.next_task, catalog_task=submission.next_task,
+                     allowed_operations=list(operations), handoff_usage={
+                         "prompt": result.prompt_tokens, "completion": result.completion_tokens,
+                     })
+    job.authority_context = authority
+    job.max_attempts = max(job.max_attempts, job.attempt + 1)
+    session.commit()
+    raise RoomJobError("task_handoff", "Continue with the requested bounded tool catalog", True)
+
+
 async def execute_room_turn_job(app: FastAPI, job_id: str) -> None:
     """Execute or resume a durable Web Host room turn.
 
@@ -1854,6 +1937,17 @@ async def execute_room_turn_job(app: FastAPI, job_id: str) -> None:
                     )
                     session.expunge(user)
                     saved_result = dict(job.agent_result or {})
+                    if not saved_result:
+                        trigger = session.get(CampaignMessage, job.trigger_message_id)
+                        recovered = recover_operations(
+                            session, job_id=job.id, run_id=preparation.run_id, trigger=trigger
+                        )
+                        if recovered is not None:
+                            saved_result = recovered.to_json()
+                            _persist_agent_result(
+                                session, job_id=job.id, result=recovered,
+                                reservation_quantity=preparation.reservation_quantity,
+                            )
                     reservation_quantity = preparation.reservation_quantity
                 break
             except OperationalError:
@@ -1912,6 +2006,11 @@ async def execute_room_turn_job(app: FastAPI, job_id: str) -> None:
                         preparation.run_id,
                     ),
                 },
+                "operation_callback": {
+                    "url": activity_callback.replace("/internal-activity/", "/internal-operation/"),
+                    "token": _activity_token(app.state.settings.session_secret,
+                                             preparation.campaign.id, preparation.run_id),
+                },
             },
             **preparation.identity_context,
         }
@@ -1921,7 +2020,9 @@ async def execute_room_turn_job(app: FastAPI, job_id: str) -> None:
                 session_id=preparation.session_id,
                 content=preparation.trigger_content,
                 context=context,
-                idempotency_key=f"room-turn:{job_id}",
+                idempotency_key=(f"room-turn:{job_id}:{preparation.trigger_mode}"
+                                 if preparation.authority_context.get("handoff_task")
+                                 else f"room-turn:{job_id}"),
                 trace_context=preparation.trace_context,
             )
         except AgentRuntimeError as exc:
@@ -1929,7 +2030,10 @@ async def execute_room_turn_job(app: FastAPI, job_id: str) -> None:
                 with app.state.session_factory() as session:
                     job = session.get(RoomTurnJob, job_id)
                     if job is not None and job.reservation_id is not None:
-                        provider_tokens = Decimal(exc.total_tokens)
+                        prior_usage = preparation.authority_context.get("handoff_usage") or {}
+                        provider_tokens = Decimal(exc.total_tokens) + Decimal(
+                            prior_usage.get("prompt", 0) + prior_usage.get("completion", 0)
+                        )
                         record_provider_consumption(
                             session,
                             user_id=job.user_id,
@@ -1947,6 +2051,7 @@ async def execute_room_turn_job(app: FastAPI, job_id: str) -> None:
                             pricing_inputs={
                                 "prompt_tokens": exc.prompt_tokens,
                                 "completion_tokens": exc.completion_tokens,
+                                "prior_task_usage": prior_usage,
                             },
                             pricing_cache={"status": "unknown"},
                             pricing_output={"status": "unknown"},
@@ -1975,12 +2080,36 @@ async def execute_room_turn_job(app: FastAPI, job_id: str) -> None:
             raise RoomJobError("agent_unavailable", str(exc), True, "upstream") from exc
         async with app.state.room_turn_jobs.transaction_lock():
             with app.state.session_factory() as session:
+                _handoff_room_task(session, preparation=preparation, result=result)
+                prior_usage = preparation.authority_context.get("handoff_usage") or {}
+                result = replace(result,
+                                 prompt_tokens=result.prompt_tokens + prior_usage.get("prompt", 0),
+                                 completion_tokens=(result.completion_tokens
+                                                    + prior_usage.get("completion", 0)))
                 _persist_agent_result(
                     session,
                     job_id=job_id,
                     result=result,
                     reservation_quantity=reservation_quantity,
                 )
+
+    # A model terminal message cannot erase a dispatched call with no receipt.
+    with app.state.session_factory() as session:
+        unknown = session.scalar(select(RoomOperation.id).where(
+            RoomOperation.job_id == job_id, RoomOperation.state != "returned"
+        ).limit(1))
+        try:
+            parsed = RoomTurnSubmission.model_validate(result.structured_output)
+            valid = parsed.run_id == preparation.run_id
+        except ValidationError:
+            valid = False
+        if not valid or unknown:
+            trigger = session.get(CampaignMessage, preparation.trigger_id)
+            recovered = recover_operations(
+                session, job_id=job_id, run_id=preparation.run_id, trigger=trigger
+            )
+            if recovered is not None:
+                result = recovered
 
     if result.structured_output is None:
         raise RoomJobError(
@@ -2149,11 +2278,11 @@ async def execute_room_turn_job(app: FastAPI, job_id: str) -> None:
                     )
                 )
             run.assistant_content = "\n\n".join(item.content for item in assistants)
-            run.status = "completed"
+            run.status = "waiting" if unknown else "completed"
             run.completed_at = now_utc()
             trigger.status = "completed"
             trigger.completed_at = now_utc()
-            job.status = "succeeded"
+            job.status = "running" if unknown else "succeeded"
             job.result_revision = revision
             job.result_message_ids = [item.id for item in assistants]
             job.lease_owner = None
@@ -2164,7 +2293,7 @@ async def execute_room_turn_job(app: FastAPI, job_id: str) -> None:
             _emit(
                 session,
                 room,
-                "agent.completed",
+                "agent.partial" if unknown else "agent.completed",
                 {
                     "message_id": trigger.id,
                     "agent_message_ids": [item.id for item in assistants],
@@ -2215,6 +2344,12 @@ async def execute_room_turn_job(app: FastAPI, job_id: str) -> None:
                 )
             )
             session.commit()
+
+
+    if unknown:
+        raise RoomJobError("operation_result_unknown",
+                           "已展示确认结果；仍有操作结果未知，请主持人核对原回执。",
+                           False, "tool_execution")
 
 
 async def _post_message(
@@ -2430,6 +2565,112 @@ def get_room_media_artifact(
     )
 
 
+@router.post("/internal-operation/{run_id}")
+def report_room_operation(
+    campaign_id: str, run_id: str, payload: OperationReport,
+    request: Request, session: DbSession,
+    authorization: Annotated[str, Header(alias="Authorization")],
+) -> dict[str, bool]:
+    expected = "Bearer " + _activity_token(
+        request.app.state.settings.session_secret, campaign_id, run_id
+    )
+    if not hmac.compare_digest(authorization, expected):
+        raise HTTPException(401, "invalid operation token")
+    if len(json.dumps(payload.result).encode()) > 262144:
+        raise HTTPException(413, "operation receipt too large")
+    job = session.scalar(select(RoomTurnJob).where(
+        RoomTurnJob.agent_run_id == run_id, RoomTurnJob.campaign_id == campaign_id
+    ).with_for_update())
+    if job is None:
+        raise HTTPException(404, "room turn unavailable")
+    row = session.get(RoomOperation, str(payload.call_id))
+    if payload.state == "dispatched":
+        if job.status != "running" or job.cancel_requested or row is not None:
+            raise HTTPException(409, "operation cannot be dispatched")
+        pending = session.scalar(select(RoomOperation.id).where(
+            RoomOperation.job_id == job.id, RoomOperation.state == "dispatched"
+        ).limit(1))
+        if pending:
+            raise HTTPException(409, "previous operation outcome is unknown")
+        session.add(RoomOperation(id=str(payload.call_id), job_id=job.id, tool=payload.tool,
+                                  state="dispatched", result={}))
+    else:
+        if row is None or row.job_id != job.id or row.tool != payload.tool:
+            raise HTTPException(409, "operation identity mismatch")
+        if row.state == "returned" and row.result != payload.result:
+            raise HTTPException(409, "operation receipt mismatch")
+        row.state, row.result = "returned", payload.result
+        session.flush()
+        _resume_reconciled_job(session, job)
+    session.commit()
+    request.app.state.room_turn_jobs.notify()
+    return {"accepted": True}
+
+
+def _resume_reconciled_job(session: Session, job: RoomTurnJob) -> None:
+    if job.error_code != "operation_result_unknown" or job.cancel_requested:
+        return
+    pending = session.scalar(select(RoomOperation.id).where(
+        RoomOperation.job_id == job.id, RoomOperation.state != "returned"
+    ).limit(1))
+    if pending is not None:
+        return
+    job.status = "queued"
+    job.agent_result = {}
+    job.available_at = now_utc()
+    job.completed_at = None
+    job.error_code = None
+    job.max_attempts = max(job.max_attempts, job.attempt + 1)
+
+
+@router.post("/jobs/{job_id}/reconcile")
+async def reconcile_room_operations(
+    campaign_id: str, job_id: str, request: Request, user: CurrentUser, session: DbSession,
+) -> dict[str, Any]:
+    membership = _membership(session, campaign_id, user.id)
+    if membership.role not in {"owner", "dm"}:
+        raise HTTPException(403, "only the current host can reconcile operation receipts")
+    job = session.get(RoomTurnJob, job_id)
+    if job is None or job.campaign_id != campaign_id:
+        raise HTTPException(404, "room turn not found")
+    if job.error_code != "operation_result_unknown" or job.status != "failed":
+        raise HTTPException(409, "room turn is not awaiting operation reconciliation")
+    runtime = _campaign_runtime(request, session, campaign_id)
+    lookup = getattr(runtime, "operation_receipt", None)
+    if lookup is None:
+        raise HTTPException(409, "domain does not provide read-only receipt recovery")
+    rows = session.scalars(select(RoomOperation).where(
+        RoomOperation.job_id == job.id, RoomOperation.state != "returned"
+    )).all()
+    for row in rows:
+        try:
+            envelope = await lookup(campaign_id=campaign_id, principal_id=user.principal_id,
+                                    key=f"room-operation:{row.id}")
+        except RuntimeError:
+            # Absence or unavailability never proves that an action did not run.
+            continue
+        receipt = envelope.get("result", envelope)
+        if not isinstance(receipt, dict) or receipt.get("key") != f"room-operation:{row.id}":
+            continue
+        result = receipt.get("response")
+        if not isinstance(result, dict):
+            continue
+        row.state = "returned"
+        row.result = {"structured_content": result, "is_error": False,
+                      "recovery_receipt": receipt}
+    session.flush()
+    _resume_reconciled_job(session, job)
+    remaining = session.scalar(select(func.count()).select_from(RoomOperation).where(
+        RoomOperation.job_id == job.id, RoomOperation.state != "returned"
+    ))
+    session.add(AuditEvent(actor_user_id=user.id, action="campaign.room.operations.reconcile",
+                           subject_type="room_turn_job", subject_id=job.id,
+                           details={"campaign_id": campaign_id, "remaining": remaining}))
+    session.commit()
+    request.app.state.room_turn_jobs.notify()
+    return {"job": _room_job_view(job), "unknown_operations": remaining}
+
+
 @router.post("/internal-activity/{run_id}")
 def report_room_activity(
     campaign_id: str,
@@ -2569,17 +2810,9 @@ def room_snapshot(
     # The room row serializes message/event sequence allocation. Holding this
     # lock until the snapshot cursor is captured prevents a load/subscribe gap.
     room = _room(session, campaign_id)
-    candidates = session.scalars(
-        select(CampaignMessage)
-        .where(CampaignMessage.room_id == room.id)
-        .order_by(CampaignMessage.sequence.desc())
-        .limit(limit * 3)
-    ).all()
-    visible_rows = [
-        item
-        for item in reversed(candidates)
-        if _message_visible(item, membership, user.id)
-    ][-limit:]
+    visible_rows = _visible_history(
+        session, room, membership.role, user.id, limit=limit, newest=True
+    )
     visible = [
         CampaignMessageView.model_validate(_message_view(item, user.id))
         for item in visible_rows
@@ -2590,7 +2823,10 @@ def room_snapshot(
         job_rows = session.scalars(
             select(RoomTurnJob).where(
                 RoomTurnJob.campaign_id == campaign_id,
-                RoomTurnJob.user_id == user.id,
+                or_(RoomTurnJob.user_id == user.id, and_(
+                    membership.role in {"owner", "dm"},
+                    RoomTurnJob.error_code == "operation_result_unknown",
+                )),
                 RoomTurnJob.trigger_message_id.in_(visible_ids),
                 RoomTurnJob.status.in_((*ACTIVE_ROOM_JOB_STATES, "failed")),
             )
@@ -2619,12 +2855,9 @@ def list_messages(
 ) -> list[CampaignMessageView]:
     membership = _membership(session, campaign_id, user.id)
     room = _room(session, campaign_id)
-    candidates = session.scalars(
-        select(CampaignMessage)
-        .where(CampaignMessage.room_id == room.id, CampaignMessage.sequence > after)
-        .order_by(CampaignMessage.sequence)
-        .limit(limit * 3)
-    ).all()
+    candidates = _visible_history(
+        session, room, membership.role, user.id, limit=limit, after=after
+    )
     return [
         CampaignMessageView.model_validate(_message_view(item, user.id))
         for item in candidates

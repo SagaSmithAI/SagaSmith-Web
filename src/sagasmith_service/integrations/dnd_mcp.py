@@ -546,6 +546,17 @@ class StreamableHttpDndRuntime:
             campaign_id=arguments["campaign_id"],
         )
 
+    async def operation_receipt(
+        self, *, campaign_id: str, principal_id: str, key: str,
+    ) -> dict[str, Any]:
+        """Read an existing authoritative receipt; never dispatch its operation."""
+        return await self._call(
+            "state_revision",
+            {"campaign_id": campaign_id, "principal_id": principal_id,
+             "action": "receipt", "payload": {"idempotency_key": key}},
+            exposure_principal=principal_id, campaign_id=campaign_id,
+        )
+
     async def grant_campaign_access(self, **arguments: Any) -> dict[str, Any]:
         return await self._call(
             "access_grant",

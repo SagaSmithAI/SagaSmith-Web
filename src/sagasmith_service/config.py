@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     )
 
     env: str = "development"
+    enabled_systems: set[Literal["dnd5e", "coc7e", "narrative"]] = Field(
+        default_factory=lambda: {"dnd5e", "coc7e", "narrative"}, min_length=1
+    )
     database_url: str = "sqlite:///./sagasmith-service.db"
     redis_url: str = "redis://127.0.0.1:6379/0"
     rate_limit_backend: Literal["memory", "redis"] = "memory"
