@@ -1,6 +1,8 @@
 # Recent beta behavior review — 2026-09-15
 
-Status updated 2026-09-16: the six findings below are repaired and verified.
+Historical review, updated 2026-09-17: the six findings below have been repaired.
+The [MCP/Runtime/Skill follow-up](mcp-runtime-skill-repair-20260917.md) also corrects
+the nonexistent defensive-reaction tool name and adds actual combat acceptance.
 The following original findings are retained as review history, not current defects.
 See [final acceptance and repair evidence](beta-readiness-20260916.md).
 

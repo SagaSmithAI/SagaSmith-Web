@@ -1,5 +1,10 @@
 # DND invitation beta — preparation and acceptance
 
+The [September 17 MCP/Runtime/Skill repair](mcp-runtime-skill-repair-20260917.md)
+supersedes this historical candidate's tool routing and architecture evidence.
+Use `component-versions.dnd-beta.json` for current revisions. The previous container
+run proved the lobby path; the new acceptance also requires a real combat Search.
+
 Updated 2026-09-16, Asia/Singapore. Local preparation and the six reported behavior
 repairs are complete. Live launch acceptance is pending because the user explicitly
 left the domain, server and DeepSeek configuration blank. No public deployment,

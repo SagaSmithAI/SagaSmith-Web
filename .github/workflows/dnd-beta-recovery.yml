@@ -45,6 +45,10 @@ jobs:
           docker compose up -d --wait --wait-timeout 300
       - name: Dual-user DND and private-object acceptance with deterministic provider
         run: uv run python scripts/container_e2e.py --dnd-only | tee dnd-e2e.json
+      - name: Verify all room policies against the actual built Runtime
+        run: |
+          docker compose exec -T dnd-mcp python - < scripts/export_dnd_catalog.py > dnd-catalog.json
+          uv run python scripts/check_dnd_room_catalog.py < dnd-catalog.json | tee dnd-room-catalog.json
       - name: Backup and isolated restore of the same images
         shell: pwsh
         run: |
@@ -66,5 +70,6 @@ jobs:
           path: |
             dnd-e2e.json
             dnd-restore.json
+            dnd-room-catalog.json
             ${{ runner.temp }}/dnd-backup/manifest.json
           retention-days: 14

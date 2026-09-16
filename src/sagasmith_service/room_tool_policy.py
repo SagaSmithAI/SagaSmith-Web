@@ -61,10 +61,10 @@ _POLICIES: dict[_PolicyKey, tuple[str, ...]] = {
         "campaign_query character_query combat_cast_spell combat_choice "
         "combat_common_action combat_end_turn combat_movement combat_preflight_attack "
         "combat_query combat_reaction_attack combat_resolve_attack combat_use_activity "
-        "combat_reaction_defense rule_search resolution_presentation skill_query"
+        "combat_check rule_search resolution_presentation skill_query"
     ),
     _PolicyKey("dnd5e", "combat", "roll"): _ids(
-        "campaign_query character_query combat_query dnd_check dnd_dice_roll "
+        "campaign_query character_query combat_query combat_check dnd_check dnd_dice_roll "
         "rule_search resolution_presentation skill_query"
     ),
     _PolicyKey("dnd5e", "lobby", "narration"): _ids(

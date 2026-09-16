@@ -1,6 +1,6 @@
 {
   "schema": "sagasmith.release-lock/v3",
-  "lock": "2026.09.16-dnd-beta-candidate",
+  "lock": "2026.09.17-dnd-beta-candidate",
   "release_status": "local-validated-live-acceptance-pending",
   "product_scope": "hosted-dnd-only",
   "components": [
@@ -16,7 +16,7 @@
     },
     {
       "repository": "sagasmith-dnd",
-      "revision": "ccd9af68439b0d50948b64fdd8da472a1ae6742d",
+      "revision": "09d967827ae0625a6f776b6e1f238d49bdd568e5",
       "remote": "https://github.com/SagaSmithAI/sagasmith-dnd.git"
     },
     {
@@ -54,7 +54,7 @@
   },
   "skills": {
     "owner": "sagasmith-dnd",
-    "revision": "ccd9af68439b0d50948b64fdd8da472a1ae6742d",
+    "revision": "09d967827ae0625a6f776b6e1f238d49bdd568e5",
     "paths": [
       "skills/hosted",
       "skills/dnd-module-generator"

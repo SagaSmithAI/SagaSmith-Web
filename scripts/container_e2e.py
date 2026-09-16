@@ -4,10 +4,13 @@ import argparse
 import hashlib
 import io
 import json
+import os
+import subprocess
 import time
 import uuid
 import zipfile
 from decimal import Decimal
+from pathlib import Path
 
 import httpx
 
@@ -719,6 +722,47 @@ def run(base_url: str, *, dnd_only: bool = False) -> None:
     )
     if (room_turn.get("job") or {}).get("status") != "succeeded":
         raise RuntimeError(f"hosted Identity room turn did not settle: {room_turn}")
+    combat_acceptance = None
+    if dnd_only:
+        fixture_script = Path(__file__).with_name("prepare_dnd_combat.py").read_text()
+
+        def combat_fixture(mode: str) -> dict:
+            project = os.environ.get("COMPOSE_PROJECT_NAME", "sagasmith-dnd-recovery-source")
+            container = os.environ.get("SAGASMITH_E2E_DND_CONTAINER", f"{project}-dnd-mcp-1")
+            command = ["docker", "exec", "-i", container, "python", "-",
+                       campaign_id, f"user:{owner_user['id']}", mode, f"combat-{run_id}"]
+            result = subprocess.run(command, input=fixture_script, text=True,
+                                    encoding="utf-8", capture_output=True, timeout=120)
+            if result.returncode:
+                raise RuntimeError(f"combat fixture {mode} failed: {result.stderr}")
+            return json.loads(result.stdout)
+
+        combat_arguments = combat_fixture("prepare")
+        # Hosted DM identity does not elevate the requesting player's authority.
+        # Search adjudication is issued by the campaign owner/DM.
+        combat_turn = expect(owner.post(
+            f"/api/campaigns/{campaign_id}/room/messages",
+            headers={"Idempotency-Key": f"combat-room-{run_id}"},
+            json={"content": "DND_COMBAT_ACCEPTANCE=" + json.dumps(combat_arguments),
+                  "mode": "action"},
+        ), 200)
+        if (combat_turn.get("job") or {}).get("status") != "succeeded":
+            raise RuntimeError(f"combat room turn failed: {combat_turn}")
+        combat_state = combat_fixture("read")
+        state = combat_state.get("result", combat_state)
+        # A successful narration is insufficient: Search must have been committed.
+        serialized = json.dumps(state)
+        if '"search"' not in serialized:
+            raise RuntimeError(f"combat Search did not reach the rules engine: {combat_state}")
+        encounter = state.get("combat", state)
+        actor = next((item for item in encounter.get("combatants", [])
+                      if item.get("actor_id") == combat_arguments["actor_id"]), None)
+        if actor is None or actor.get("turn_budget", {}).get("main_action") != 0:
+            raise RuntimeError(f"Search did not spend the actor action: {combat_state}")
+        combat_acceptance = {"status": "ok", "actor_id": combat_arguments["actor_id"],
+                             "operation": "combat_check", "action": "search",
+                             "job_id": combat_turn["job"]["id"]}
+        runtime = expect(owner.get(f"/api/campaigns/{campaign_id}/runtime"), 200)
     expect(
         owner.put(
             f"/api/campaigns/{campaign_id}/room/host",
@@ -802,6 +846,7 @@ def run(base_url: str, *, dnd_only: bool = False) -> None:
             for item in audit
             if item["action"] == "campaign.room.agent.complete"
             and item["details"].get("campaign_id") == campaign_id
+            and item["details"].get("job_id") == (room_turn.get("job") or {}).get("id")
         ),
         None,
     )
@@ -857,6 +902,7 @@ def run(base_url: str, *, dnd_only: bool = False) -> None:
                 "identity_id": identity["id"],
                 "mcp_protocol": "2026-07-28",
                 "authority_contract": "sagasmith.authoritative-mcp/v2",
+                "combat_acceptance": combat_acceptance,
                 "revocation": "enforced",
                 "audit_actions": len(actions),
             },
