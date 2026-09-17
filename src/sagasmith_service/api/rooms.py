@@ -1390,7 +1390,8 @@ def _prepare_agent_transaction(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "campaign action context not found")
     if job.trigger_message_id != trigger.id or job.user_id != user_id:
         raise HTTPException(status.HTTP_409_CONFLICT, "room turn job context mismatch")
-    if job.base_revision is not None and campaign.mcp_revision != job.base_revision:
+    if (job.base_revision is not None and campaign.mcp_revision != job.base_revision
+            and not (job.authority_context or {}).get("handoff_count")):
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             detail={
@@ -1579,6 +1580,9 @@ def _prepare_agent_transaction(
         "catalog_task": selected_task,
         "handoff_task": previous_authority.get("handoff_task"),
         "handoff_usage": previous_authority.get("handoff_usage", {}),
+        "handoff_count": previous_authority.get("handoff_count", 0),
+        "continued_operation_ids": previous_authority.get("continued_operation_ids", []),
+        "continuation_receipts": previous_authority.get("continuation_receipts", []),
     }
     job.authority_context = authority_context
     room_context = _recent_context(
@@ -1767,6 +1771,15 @@ async def _ensure_room_turn_tool_selection(
         and isinstance(authority.get("catalog_phase"), str)
         and bool(authority["catalog_phase"])
     ):
+        if authority.get("handoff_count"):
+            current = await preparation.domain_runtime.get_campaign(
+                campaign_id=preparation.campaign.id, principal_id=preparation.principal_id,
+            )
+            phase, revision = campaign_phase_and_revision(preparation.campaign_system_id, current)
+            if (phase, revision) != (authority["catalog_phase"], authority["base_revision"]):
+                raise RoomJobError(
+                    "stale_revision", "Campaign changed before continuation", False, "conflict"
+                )
         return preparation
 
     runtime_state = await preparation.domain_runtime.get_campaign(
@@ -1884,7 +1897,7 @@ def _room_job_result(
 
 
 def _handoff_room_task(session: Session, *, preparation: _AgentPreparation,
-                       result: AgentResult) -> None:
+                       result: AgentResult, runtime_state: object = None) -> None:
     try:
         submission = RoomTurnSubmission.model_validate(result.structured_output)
     except ValidationError:
@@ -1895,22 +1908,64 @@ def _handoff_room_task(session: Session, *, preparation: _AgentPreparation,
         raise RoomJobError("agent_run_mismatch", "Task handoff belongs to another run", False)
     job = session.get(RoomTurnJob, preparation.job_id)
     authority = dict(job.authority_context)
-    has_operations = session.scalar(select(RoomOperation.id).where(
+    operations_done = session.scalars(select(RoomOperation).where(
         RoomOperation.job_id == job.id
-    ).limit(1))
-    if has_operations or authority.get("handoff_task"):
-        raise RoomJobError("task_handoff_denied",
-                           "Task handoff is allowed once, before any mutation", False)
+    ).order_by(RoomOperation.created_at, RoomOperation.id)).all()
+    if (any(row.state != "returned" for row in operations_done)
+            or authority.get("handoff_count", 0) >= 6):
+        raise RoomJobError(
+            "task_handoff_denied",
+            "Task continuation requires known results and at most six handoffs", False,
+        )
+    phase, revision = campaign_phase_and_revision(preparation.campaign_system_id, runtime_state)
+    expected = preparation.base_revision
+    prior_ids = set(authority.get("continued_operation_ids", []))
+    receipts = list(authority.get("continuation_receipts", []))
+    for row in operations_done:
+        if row.id in prior_ids:
+            continue
+        if row.tool in {"campaign_query", "character_query", "combat_query", "module_query",
+                        "rule_search", "skill_query", "resolution_presentation"}:
+            continue
+        receipt = row.result.get("auth_context_receipt") or {}
+        if row.result.get("is_error"):
+            continue
+        if (receipt.get("campaign_id") != preparation.campaign.id
+                or receipt.get("room_turn_id") != job.id
+                or receipt.get("requester_principal") != authority["requester_principal"]
+                or receipt.get("tool") != row.tool
+                or receipt.get("base_revision") != expected):
+            raise RoomJobError(
+                "task_handoff_denied", "Continuation requires an authoritative receipt chain",
+                False,
+            )
+        value = receipt.get("campaign_revision", receipt.get("revision"))
+        if not isinstance(value, int) or isinstance(value, bool) or value < expected:
+            raise RoomJobError(
+                "task_handoff_denied", "Continuation receipt has no campaign revision", False,
+            )
+        expected = value
+        receipts.append({"tool": row.tool, **row.result})
+    if revision != expected:
+        raise RoomJobError(
+            "stale_revision", "Campaign changed outside this continuation", False, "conflict",
+        )
     try:
         operations = select_room_turn_tools(
-            system_id=preparation.campaign_system_id, phase=authority["catalog_phase"],
+            system_id=preparation.campaign_system_id, phase=phase,
             role=preparation.host_role, task=submission.next_task,
         )
     except RoomToolPolicyError as exc:
         raise RoomJobError("task_handoff_denied", str(exc), False) from exc
+    prior_usage = authority.get("handoff_usage") or {}
     authority.update(handoff_task=submission.next_task, catalog_task=submission.next_task,
+                     catalog_phase=phase, base_revision=revision,
+                     handoff_count=authority.get("handoff_count", 0) + 1,
+                     continued_operation_ids=[row.id for row in operations_done],
+                     continuation_receipts=receipts,
                      allowed_operations=list(operations), handoff_usage={
-                         "prompt": result.prompt_tokens, "completion": result.completion_tokens,
+                         "prompt": result.prompt_tokens + prior_usage.get("prompt", 0),
+                         "completion": result.completion_tokens + prior_usage.get("completion", 0),
                      })
     job.authority_context = authority
     job.max_attempts = max(job.max_attempts, job.attempt + 1)
@@ -1940,7 +1995,10 @@ async def execute_room_turn_job(app: FastAPI, job_id: str) -> None:
                     if not saved_result:
                         trigger = session.get(CampaignMessage, job.trigger_message_id)
                         recovered = recover_operations(
-                            session, job_id=job.id, run_id=preparation.run_id, trigger=trigger
+                            session, job_id=job.id, run_id=preparation.run_id, trigger=trigger,
+                            continued_ids=tuple(
+                                job.authority_context.get("continued_operation_ids", [])
+                            ),
                         )
                         if recovered is not None:
                             saved_result = recovered.to_json()
@@ -1991,6 +2049,7 @@ async def execute_room_turn_job(app: FastAPI, job_id: str) -> None:
             "base_revision": preparation.base_revision,
             "room_context": preparation.room_context,
             "action_context": preparation.trigger_payload,
+            "completed_operations": preparation.authority_context.get("continuation_receipts", []),
             "run_id": preparation.run_id,
             "trigger_message_id": preparation.trigger_id,
             "authority_context": preparation.authority_context,
@@ -2020,7 +2079,8 @@ async def execute_room_turn_job(app: FastAPI, job_id: str) -> None:
                 session_id=preparation.session_id,
                 content=preparation.trigger_content,
                 context=context,
-                idempotency_key=(f"room-turn:{job_id}:{preparation.trigger_mode}"
+                idempotency_key=(f"room-turn:{job_id}:continuation:"
+                                 f"{preparation.authority_context.get('handoff_count', 0)}"
                                  if preparation.authority_context.get("handoff_task")
                                  else f"room-turn:{job_id}"),
                 trace_context=preparation.trace_context,
@@ -2078,11 +2138,20 @@ async def execute_room_turn_job(app: FastAPI, job_id: str) -> None:
             raise RoomJobError(exc.code, str(exc), exc.retryable, "upstream") from exc
         except RuntimeError as exc:
             raise RoomJobError("agent_unavailable", str(exc), True, "upstream") from exc
+        handoff_runtime = None
+        if isinstance(result.structured_output, dict) and result.structured_output.get("next_task"):
+            handoff_runtime = await preparation.domain_runtime.get_campaign(
+                campaign_id=preparation.campaign.id, principal_id=preparation.principal_id,
+            )
         async with app.state.room_turn_jobs.transaction_lock():
             with app.state.session_factory() as session:
-                _handoff_room_task(session, preparation=preparation, result=result)
+                _handoff_room_task(
+                    session, preparation=preparation, result=result, runtime_state=handoff_runtime,
+                )
                 prior_usage = preparation.authority_context.get("handoff_usage") or {}
                 result = replace(result,
+                                 tool_receipts=(tuple(preparation.authority_context.get(
+                                     "continuation_receipts", [])) + result.tool_receipts),
                                  prompt_tokens=result.prompt_tokens + prior_usage.get("prompt", 0),
                                  completion_tokens=(result.completion_tokens
                                                     + prior_usage.get("completion", 0)))

@@ -20,7 +20,7 @@ MCP_SERVICE_BY_SYSTEM = {
 
 _ROLES = frozenset({"owner", "dm", "player"})
 _DM_ROLES = frozenset({"owner", "dm"})
-_TASKS = frozenset({"chat", "action", "narration", "roll"})
+_TASKS = frozenset({"chat", "action", "narration", "roll", "combat_support"})
 
 
 class RoomToolPolicyError(ValueError):
@@ -66,6 +66,11 @@ _POLICIES: dict[_PolicyKey, tuple[str, ...]] = {
     _PolicyKey("dnd5e", "combat", "roll"): _ids(
         "campaign_query character_query combat_query combat_check dnd_check dnd_dice_roll "
         "rule_search resolution_presentation skill_query"
+    ),
+    _PolicyKey("dnd5e", "combat", "combat_support"): _ids(
+        "campaign_query character_query combat_query combat_ready combat_common_action "
+        "combat_choice combat_hp_change combat_concentration_check combat_use_official_item "
+        "combat_resolve_hide combat_end_turn resolution_presentation rule_search skill_query"
     ),
     _PolicyKey("dnd5e", "lobby", "narration"): _ids(
         "campaign_change campaign_event campaign_query module_query module_set_progress "
@@ -209,6 +214,8 @@ def select_room_turn_tools(
         raise RoomToolPolicyError("narration requires an owner or dm role")
     service_for_system(system_id)
     operations = _POLICIES.get(_PolicyKey(system_id, phase, task), ())
+    if role == "player" and task == "combat_support":
+        operations = tuple(name for name in operations if name != "combat_resolve_hide")
     if system_id == "dnd5e" and phase == "play" and task == "action" and role in _DM_ROLES:
         operations = tuple(sorted((*operations, "combat_start", "combat_query")))
     if not operations:

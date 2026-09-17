@@ -23,11 +23,14 @@ class OperationReport(BaseModel):
 
 
 def recover_operations(session: Session, *, job_id: str, run_id: str,
-                       trigger: CampaignMessage) -> AgentResult | None:
+                       trigger: CampaignMessage,
+                       continued_ids: tuple[str, ...] = ()) -> AgentResult | None:
     rows = session.scalars(select(RoomOperation).where(
         RoomOperation.job_id == job_id
     ).order_by(RoomOperation.created_at, RoomOperation.id)).all()
     if not rows:
+        return None
+    if continued_ids and all(row.id in continued_ids and row.state == "returned" for row in rows):
         return None
     unknown = [row for row in rows if row.state != "returned"]
     audience: dict[str, Any] = {"kind": trigger.audience}

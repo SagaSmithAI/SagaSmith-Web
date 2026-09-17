@@ -56,7 +56,7 @@ def test_policy_matrix_covers_all_reviewed_system_phases_and_tasks() -> None:
             for task in ("chat", "action", "narration"):
                 assert (system_id, phase, task) in matrix
     for (system_id, phase, task), expected in matrix.items():
-        role = "owner" if task == "narration" else "player"
+        role = "owner" if task in {"narration", "combat_support"} else "player"
         selected = select_room_turn_tools(
             system_id=system_id,
             phase=phase,

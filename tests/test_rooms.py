@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pytest
 from conftest import FakeAgentRuntime, FakeDndRuntime, grant_test_quota
 from fastapi import Request
 from fastapi.testclient import TestClient
@@ -801,6 +802,80 @@ def test_combat_roll_handoff_is_bounded_and_charges_both_stages(client, agent_ru
         reservation = session.get(QuotaReservation, job.reservation_id)
         assert reservation.status == "settled"
         assert reservation.settled_quantity == 300
+
+
+@pytest.mark.parametrize("query_first", [True, False])
+@pytest.mark.parametrize("fault", [None, "unknown", "concurrent", "foreign_receipt"])
+def test_confirmed_operations_continue_without_replay(
+    client, agent_runtime, dnd_runtime, query_first, fault,
+):
+    from dataclasses import replace
+
+    import httpx
+
+    register(client, "continuation-owner@example.com", "DM")
+    create_campaign(client)
+    dnd_runtime.campaign_phase = "combat"
+    original = agent_runtime.complete
+    writes = []
+
+    async def continue_work(**arguments):
+        result = await original(**arguments)
+        stage = len(agent_runtime.calls)
+        context = arguments["context"]
+        authority = context["authority_context"]
+        if stage > 2:
+            return result
+        tool = "combat_query" if query_first and stage == 1 and fault != "foreign_receipt" else (
+            "combat_common_action" if stage == 1 else "combat_ready"
+        )
+        assert tool in authority["allowed_operations"]
+        previous = dnd_runtime.campaign_revision
+        if tool != "combat_query":
+            writes.append(tool)
+            dnd_runtime.campaign_revision += 1
+        callback = context["response_contract"]["operation_callback"]
+        identity = {"call_id": str(uuid.uuid4()), "tool": tool}
+        receipt = {**authority, "tool": tool, "revision": dnd_runtime.campaign_revision,
+                   "base_revision": previous}
+        if fault == "foreign_receipt":
+            receipt["campaign_id"] = "another-campaign"
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=client.app)) as internal:
+            for state in ("dispatched", "returned"):
+                if fault == "unknown" and state == "returned":
+                    continue
+                response = await internal.post(callback["url"],
+                    headers={"Authorization": f"Bearer {callback['token']}"},
+                    json={**identity, "state": state, "result": {} if state == "dispatched" else {
+                        "structured_content": {"campaign_revision": dnd_runtime.campaign_revision},
+                        "auth_context_receipt": receipt, "is_error": False}})
+                assert response.status_code == 200, response.text
+        if fault == "concurrent":
+            dnd_runtime.campaign_revision += 1
+        return replace(result, structured_output={**result.structured_output,
+            "next_task": "combat_support" if stage == 1 else "action"})
+
+    agent_runtime.complete = continue_work
+    response = client.post("/api/campaigns/campaign-1/room/messages",
+        headers={"Idempotency-Key": "continue-confirmed"},
+        json={"content": "Prepare, resolve, then continue", "mode": "action"})
+    if fault:
+        assert response.status_code == (409 if fault == "concurrent" else 500), response.text
+        assert response.json()["detail"]["code"] == (
+            "stale_revision" if fault == "concurrent" else "task_handoff_denied"
+        )
+        assert len(agent_runtime.calls) == 1
+        return
+    assert response.status_code == 200, response.text
+    assert response.json()["job"]["status"] == "succeeded", response.text
+    assert len(agent_runtime.calls) == 3
+    assert writes == (["combat_ready"] if query_first else ["combat_common_action", "combat_ready"])
+    with client.app.state.session_factory() as session:
+        job = session.scalar(select(RoomTurnJob))
+        assert job.authority_context["handoff_count"] == 2
+        assert len(job.authority_context["continuation_receipts"]) == len(writes)
+        reservation = session.get(QuotaReservation, job.reservation_id)
+        assert reservation.settled_quantity == 450
 
 
 def test_unknown_operation_reconciles_from_domain_without_model_replay(client, agent_runtime,

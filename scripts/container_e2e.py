@@ -759,8 +759,14 @@ def run(base_url: str, *, dnd_only: bool = False) -> None:
                       if item.get("actor_id") == combat_arguments["actor_id"]), None)
         if actor is None or actor.get("turn_budget", {}).get("main_action") != 0:
             raise RuntimeError(f"Search did not spend the actor action: {combat_state}")
+        turn_index = encounter.get("turn_index")
+        combatants = encounter.get("combatants", [])
+        if (not isinstance(turn_index, int) or not 0 <= turn_index < len(combatants)
+                or combatants[turn_index].get("actor_id") == combat_arguments["actor_id"]):
+            raise RuntimeError(f"Second hosted write did not end the turn: {combat_state}")
         combat_acceptance = {"status": "ok", "actor_id": combat_arguments["actor_id"],
-                             "operation": "combat_check", "action": "search",
+                             "operations": ["combat_check", "combat_end_turn"],
+                             "action": "search_then_end_turn",
                              "job_id": combat_turn["job"]["id"]}
         runtime = expect(owner.get(f"/api/campaigns/{campaign_id}/runtime"), 200)
     expect(

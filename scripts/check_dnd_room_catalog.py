@@ -45,6 +45,15 @@ def check_catalog(rows: list[dict]) -> dict:
     assert "combat_reaction_defense" not in combat
     roll = select_room_turn_tools(system_id="dnd5e", phase="combat", role="dm", task="roll")
     assert {"combat_check", "dnd_check", "dnd_dice_roll"} <= set(roll)
+    support = select_room_turn_tools(
+        system_id="dnd5e", phase="combat", role="dm", task="combat_support",
+    )
+    assert {"combat_ready", "combat_resolve_hide", "combat_hp_change",
+            "combat_concentration_check", "combat_use_official_item"} <= set(support)
+    player_support = select_room_turn_tools(
+        system_id="dnd5e", phase="combat", role="player", task="combat_support",
+    )
+    assert "combat_resolve_hide" not in player_support
     return {"status": "ok", "runtime_operations": len(catalog), "room_selections": count,
             "combat_action_tools": len(combat)}
 

@@ -335,6 +335,15 @@ class Handler(BaseHTTPRequestHandler):
         native_call_completed = any(
             str(message.get("name", "")).endswith(f"_{target_tool_id}") for message in tool_messages
         )
+        if combat_fixture and native_call_completed:
+            end_name = next((name for name in selected_tools
+                             if name.endswith("_combat_end_turn")), "")
+            ended = any(str(message.get("name", "")).endswith("_combat_end_turn")
+                        for message in tool_messages)
+            if end_name and not ended:
+                fixture = json.loads(combat_fixture.group(1))
+                self._tool_call(end_name, {"actor_id": fixture["actor_id"]}, "combat-end-turn")
+                return
         submit_name = next((name for name in tool_names if name == "submit_room_turn"), "")
         submit_definition = next(
             (

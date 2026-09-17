@@ -6,7 +6,7 @@
   "components": [
     {
       "repository": "SagaSmith-agent",
-      "revision": "1a864a4674e1c538345647681e879180074d3389",
+      "revision": "092e79a05d4356092d3dd224d679e2bd5a9274d3",
       "remote": "https://github.com/SagaSmithAI/SagaSmith-agent.git"
     },
     {
@@ -16,7 +16,7 @@
     },
     {
       "repository": "sagasmith-dnd",
-      "revision": "09d967827ae0625a6f776b6e1f238d49bdd568e5",
+      "revision": "984409a2b3cf05a00693b9e8d5aef20b859c1cab",
       "remote": "https://github.com/SagaSmithAI/sagasmith-dnd.git"
     },
     {
@@ -54,7 +54,7 @@
   },
   "skills": {
     "owner": "sagasmith-dnd",
-    "revision": "09d967827ae0625a6f776b6e1f238d49bdd568e5",
+    "revision": "984409a2b3cf05a00693b9e8d5aef20b859c1cab",
     "paths": [
       "skills/hosted",
       "skills/dnd-module-generator"
