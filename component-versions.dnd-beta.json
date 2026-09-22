@@ -1,0 +1,64 @@
+{
+  "schema": "sagasmith.release-lock/v3",
+  "lock": "2026.09.17-dnd-beta-candidate",
+  "release_status": "local-validated-live-acceptance-pending",
+  "product_scope": "hosted-dnd-only",
+  "components": [
+    {
+      "repository": "SagaSmith-agent",
+      "revision": "092e79a05d4356092d3dd224d679e2bd5a9274d3",
+      "remote": "https://github.com/SagaSmithAI/SagaSmith-agent.git"
+    },
+    {
+      "repository": "sagasmith-core",
+      "revision": "9b6b9ed6205f3c5bcb0f10ba74209da71528d766",
+      "remote": "https://github.com/SagaSmithAI/sagasmith-core.git"
+    },
+    {
+      "repository": "sagasmith-dnd",
+      "revision": "984409a2b3cf05a00693b9e8d5aef20b859c1cab",
+      "remote": "https://github.com/SagaSmithAI/sagasmith-dnd.git"
+    },
+    {
+      "repository": "SagaSmith-Web",
+      "revision": "self",
+      "remote": "https://github.com/SagaSmithAI/SagaSmith-Web.git"
+    }
+  ],
+  "compatibility": {
+    "mcp_protocol": "2026-07-28",
+    "legacy_protocol": "fallback-only",
+    "auth_context": "sagasmith.auth-context/v2",
+    "authority": "sagasmith.authoritative-mcp/v2"
+  },
+  "runtime_locks": {
+    "service_api": "uv.lock",
+    "agent_supervisor": "infrastructure/agent-dnd-requirements.txt",
+    "uv_version": "0.11.25",
+    "dependency_cutoff": "2026-09-15T00:00:00Z",
+    "container_images": {
+      "python_3_12_slim": "sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a",
+      "python_3_12_alpine": "sha256:d09d15e60962ca365d1cd544a48773bac9d33f2fb1b00f2aa0deec78ade7dc31",
+      "postgres_17_alpine": "sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73",
+      "redis_7_4_alpine": "sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2",
+      "caddy_2_10_alpine": "sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d",
+      "minio_2025_04_22": "sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e"
+    }
+  },
+  "file_hash_method": "sha256 with CRLF normalized to LF",
+  "file_hashes": {
+    "uv.lock": "acc40d1e0f06cbd1eee4a4b95383b728d35cd520fbef3ce2baea1aa5a684eae4",
+    "infrastructure/agent-dnd-requirements.txt": "4185903a05019bd6ec4ad1cf35c6be5feb539b1aeed26338a6860c21f1f0bd7a",
+    "config/agent-config.dnd-flash.json": "adb335abab116f9defebbe03ba699198a4301d321b0a62fe0888069efa5202dd",
+    "tests/e2e/agent-config.dnd.json": "ffebe76bac41186f31c3debde9adba6ca48d3bceb344ece76a7f3b095c65c04f"
+  },
+  "skills": {
+    "owner": "sagasmith-dnd",
+    "revision": "984409a2b3cf05a00693b9e8d5aef20b859c1cab",
+    "paths": [
+      "skills/hosted",
+      "skills/dnd-module-generator"
+    ],
+    "host_protocol": "SagaSmith-Web/agent-skills"
+  }
+}

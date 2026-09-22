@@ -4,10 +4,13 @@ import argparse
 import hashlib
 import io
 import json
+import os
+import subprocess
 import time
 import uuid
 import zipfile
 from decimal import Decimal
+from pathlib import Path
 
 import httpx
 
@@ -287,7 +290,7 @@ def publish_artifact(
     return artifact, published
 
 
-def run(base_url: str) -> None:
+def run(base_url: str, *, dnd_only: bool = False) -> None:
     run_id = uuid.uuid4().hex[:12]
     origin = base_url.rstrip("/")
     owner = httpx.Client(base_url=origin, headers={"Origin": origin}, timeout=240)
@@ -392,69 +395,71 @@ def run(base_url: str) -> None:
     if not ledger or Decimal(ledger[0]["quantity"]) != actual_tokens or actual_tokens <= 0:
         raise RuntimeError(f"Agent usage was not settled: {ledger}")
 
-    coc_campaign = expect(
-        owner.post(
-            "/api/campaigns",
-            headers={"Idempotency-Key": f"coc-campaign-{run_id}"},
-            json={
-                "name": f"CoC Container E2E {run_id}",
-                "system_id": "coc7e",
-                "edition": "7e",
-            },
-        ),
-        201,
-    )
-    coc_campaign_id = coc_campaign["id"]
-    coc_conversation = expect(
-        owner.post(
-            f"/api/campaigns/{coc_campaign_id}/agent/conversations",
-            json={"title": "CoC container acceptance"},
-        ),
-        201,
-    )
-    coc_run = expect(
-        owner.post(
-            f"/api/campaigns/{coc_campaign_id}/agent/conversations/"
-            f"{coc_conversation['id']}/messages",
-            headers={"Idempotency-Key": f"coc-agent-{run_id}"},
-            json={"content": "Query the investigator list through the CoC runtime."},
-        ),
-        200,
-    )
-    if "dynamic MCP call completed" not in (coc_run["assistant_content"] or ""):
-        raise RuntimeError("hosted Agent did not complete a native CoC MCP call")
+    coc_campaign_id = narrative_campaign_id = None
+    if not dnd_only:
+        coc_campaign = expect(
+            owner.post(
+                "/api/campaigns",
+                headers={"Idempotency-Key": f"coc-campaign-{run_id}"},
+                json={
+                    "name": f"CoC Container E2E {run_id}",
+                    "system_id": "coc7e",
+                    "edition": "7e",
+                },
+            ),
+            201,
+        )
+        coc_campaign_id = coc_campaign["id"]
+        coc_conversation = expect(
+            owner.post(
+                f"/api/campaigns/{coc_campaign_id}/agent/conversations",
+                json={"title": "CoC container acceptance"},
+            ),
+            201,
+        )
+        coc_run = expect(
+            owner.post(
+                f"/api/campaigns/{coc_campaign_id}/agent/conversations/"
+                f"{coc_conversation['id']}/messages",
+                headers={"Idempotency-Key": f"coc-agent-{run_id}"},
+                json={"content": "Query the investigator list through the CoC runtime."},
+            ),
+            200,
+        )
+        if "dynamic MCP call completed" not in (coc_run["assistant_content"] or ""):
+            raise RuntimeError("hosted Agent did not complete a native CoC MCP call")
 
-    narrative_campaign = expect(
-        owner.post(
-            "/api/campaigns",
-            headers={"Idempotency-Key": f"narrative-campaign-{run_id}"},
-            json={
-                "name": f"Narrative Container E2E {run_id}",
-                "system_id": "narrative",
-                "edition": "system-neutral",
-            },
-        ),
-        201,
-    )
-    narrative_campaign_id = narrative_campaign["id"]
-    narrative_conversation = expect(
-        owner.post(
-            f"/api/campaigns/{narrative_campaign_id}/agent/conversations",
-            json={"title": "Narrative container acceptance"},
-        ),
-        201,
-    )
-    narrative_run = expect(
-        owner.post(
-            f"/api/campaigns/{narrative_campaign_id}/agent/conversations/"
-            f"{narrative_conversation['id']}/messages",
-            headers={"Idempotency-Key": f"narrative-agent-{run_id}"},
-            json={"content": "Query the Narrative actor list through its native runtime."},
-        ),
-        200,
-    )
-    if "dynamic MCP call completed" not in (narrative_run["assistant_content"] or ""):
-        raise RuntimeError("hosted Agent did not complete a native Narrative MCP call")
+        narrative_campaign = expect(
+            owner.post(
+                "/api/campaigns",
+                headers={"Idempotency-Key": f"narrative-campaign-{run_id}"},
+                json={
+                    "name": f"Narrative Container E2E {run_id}",
+                    "system_id": "narrative",
+                    "edition": "system-neutral",
+                },
+            ),
+            201,
+        )
+        narrative_campaign_id = narrative_campaign["id"]
+        narrative_conversation = expect(
+            owner.post(
+                f"/api/campaigns/{narrative_campaign_id}/agent/conversations",
+                json={"title": "Narrative container acceptance"},
+            ),
+            201,
+        )
+        narrative_run = expect(
+            owner.post(
+                f"/api/campaigns/{narrative_campaign_id}/agent/conversations/"
+                f"{narrative_conversation['id']}/messages",
+                headers={"Idempotency-Key": f"narrative-agent-{run_id}"},
+                json={"content": "Query the Narrative actor list through its native runtime."},
+            ),
+            200,
+        )
+        if "dynamic MCP call completed" not in (narrative_run["assistant_content"] or ""):
+            raise RuntimeError("hosted Agent did not complete a native Narrative MCP call")
 
     module_project = expect(
         owner.post(
@@ -717,6 +722,53 @@ def run(base_url: str) -> None:
     )
     if (room_turn.get("job") or {}).get("status") != "succeeded":
         raise RuntimeError(f"hosted Identity room turn did not settle: {room_turn}")
+    combat_acceptance = None
+    if dnd_only:
+        fixture_script = Path(__file__).with_name("prepare_dnd_combat.py").read_text()
+
+        def combat_fixture(mode: str) -> dict:
+            project = os.environ.get("COMPOSE_PROJECT_NAME", "sagasmith-dnd-recovery-source")
+            container = os.environ.get("SAGASMITH_E2E_DND_CONTAINER", f"{project}-dnd-mcp-1")
+            command = ["docker", "exec", "-i", container, "python", "-",
+                       campaign_id, f"user:{owner_user['id']}", mode, f"combat-{run_id}"]
+            result = subprocess.run(command, input=fixture_script, text=True,
+                                    encoding="utf-8", capture_output=True, timeout=120)
+            if result.returncode:
+                raise RuntimeError(f"combat fixture {mode} failed: {result.stderr}")
+            return json.loads(result.stdout)
+
+        combat_arguments = combat_fixture("prepare")
+        # Hosted DM identity does not elevate the requesting player's authority.
+        # Search adjudication is issued by the campaign owner/DM.
+        combat_turn = expect(owner.post(
+            f"/api/campaigns/{campaign_id}/room/messages",
+            headers={"Idempotency-Key": f"combat-room-{run_id}"},
+            json={"content": "DND_COMBAT_ACCEPTANCE=" + json.dumps(combat_arguments),
+                  "mode": "action"},
+        ), 200)
+        if (combat_turn.get("job") or {}).get("status") != "succeeded":
+            raise RuntimeError(f"combat room turn failed: {combat_turn}")
+        combat_state = combat_fixture("read")
+        state = combat_state.get("result", combat_state)
+        # A successful narration is insufficient: Search must have been committed.
+        serialized = json.dumps(state)
+        if '"search"' not in serialized:
+            raise RuntimeError(f"combat Search did not reach the rules engine: {combat_state}")
+        encounter = state.get("combat", state)
+        actor = next((item for item in encounter.get("combatants", [])
+                      if item.get("actor_id") == combat_arguments["actor_id"]), None)
+        if actor is None or actor.get("turn_budget", {}).get("main_action") != 0:
+            raise RuntimeError(f"Search did not spend the actor action: {combat_state}")
+        turn_index = encounter.get("turn_index")
+        combatants = encounter.get("combatants", [])
+        if (not isinstance(turn_index, int) or not 0 <= turn_index < len(combatants)
+                or combatants[turn_index].get("actor_id") == combat_arguments["actor_id"]):
+            raise RuntimeError(f"Second hosted write did not end the turn: {combat_state}")
+        combat_acceptance = {"status": "ok", "actor_id": combat_arguments["actor_id"],
+                             "operations": ["combat_check", "combat_end_turn"],
+                             "action": "search_then_end_turn",
+                             "job_id": combat_turn["job"]["id"]}
+        runtime = expect(owner.get(f"/api/campaigns/{campaign_id}/runtime"), 200)
     expect(
         owner.put(
             f"/api/campaigns/{campaign_id}/room/host",
@@ -764,39 +816,43 @@ def run(base_url: str) -> None:
         raise RuntimeError(f"missing audit actions: {sorted(missing)}")
     if not any(item["request_id"] for item in audit):
         raise RuntimeError("audit events have no request correlation")
-    narrative_audit = next(
-        (
-            item
-            for item in audit
-            if item["action"] == "agent.complete"
-            and item["details"].get("campaign_id") == narrative_campaign_id
-        ),
-        None,
-    )
-    if narrative_audit is None:
-        raise RuntimeError("Narrative Agent completion was not audited")
-    narrative_receipts = narrative_audit["details"].get("auth_context_receipts") or []
-    if not any(
-        receipt.get("schema") == "sagasmith.auth-context/v2"
-        and receipt.get("target_service") == "sagasmith-narrative-mcp"
-        and receipt.get("requester_principal") == f"user:{owner_user['id']}"
-        and receipt.get("acting_host_principal") == f"user:{owner_user['id']}"
-        and receipt.get("authorized_audience") == "sagasmith-narrative-mcp"
-        and receipt.get("allowed_operations")
-        == ["actor_query", "campaign_query", "narrative_query", "skill_query"]
-        and receipt.get("campaign_id") == narrative_campaign_id
-        and narrative_conversation["id"] in receipt.get("conversation_principal", "")
-        and str(receipt.get("tool", "")).endswith("actor_query")
-        and receipt.get("base_revision") == 1
-        for receipt in narrative_receipts
-    ):
-        raise RuntimeError(f"Narrative auth-context receipt was not retained: {narrative_receipts}")
+    if not dnd_only:
+        narrative_audit = next(
+            (
+                item
+                for item in audit
+                if item["action"] == "agent.complete"
+                and item["details"].get("campaign_id") == narrative_campaign_id
+            ),
+            None,
+        )
+        if narrative_audit is None:
+            raise RuntimeError("Narrative Agent completion was not audited")
+        narrative_receipts = narrative_audit["details"].get("auth_context_receipts") or []
+        if not any(
+            receipt.get("schema") == "sagasmith.auth-context/v2"
+            and receipt.get("target_service") == "sagasmith-narrative-mcp"
+            and receipt.get("requester_principal") == f"user:{owner_user['id']}"
+            and receipt.get("acting_host_principal") == f"user:{owner_user['id']}"
+            and receipt.get("authorized_audience") == "sagasmith-narrative-mcp"
+            and receipt.get("allowed_operations")
+            == ["actor_query", "campaign_query", "narrative_query", "skill_query"]
+            and receipt.get("campaign_id") == narrative_campaign_id
+            and narrative_conversation["id"] in receipt.get("conversation_principal", "")
+            and str(receipt.get("tool", "")).endswith("actor_query")
+            and receipt.get("base_revision") == 1
+            for receipt in narrative_receipts
+        ):
+            raise RuntimeError(
+                f"Narrative auth-context receipt was not retained: {narrative_receipts}"
+            )
     room_audit = next(
         (
             item
             for item in audit
             if item["action"] == "campaign.room.agent.complete"
             and item["details"].get("campaign_id") == campaign_id
+            and item["details"].get("job_id") == (room_turn.get("job") or {}).get("id")
         ),
         None,
     )
@@ -852,6 +908,7 @@ def run(base_url: str) -> None:
                 "identity_id": identity["id"],
                 "mcp_protocol": "2026-07-28",
                 "authority_contract": "sagasmith.authoritative-mcp/v2",
+                "combat_acceptance": combat_acceptance,
                 "revocation": "enforced",
                 "audit_actions": len(actions),
             },
@@ -863,8 +920,9 @@ def run(base_url: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="http://127.0.0.1:18088")
+    parser.add_argument("--dnd-only", action="store_true")
     args = parser.parse_args()
-    run(args.base_url)
+    run(args.base_url, dnd_only=args.dnd_only)
 
 
 if __name__ == "__main__":

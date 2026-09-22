@@ -98,12 +98,15 @@ def test_projection_and_access_outbox_share_the_authoritative_transaction(tmp_pa
         membership.role = "dm"
         session.commit()
         assert membership.authorization_epoch == 2
-        access_event = session.scalar(
+        access_events = session.scalars(
             select(OutboxEvent)
             .where(OutboxEvent.event_type == "access.changed")
-            .order_by(OutboxEvent.created_at.desc())
-        )
-        assert access_event is not None
+        ).all()
+        # Consecutive commits can share the same Windows wall-clock timestamp.
+        # Verify both authoritative epochs rather than an arbitrary timestamp tie.
+        assert sorted(event.payload["authorization_epoch"] for event in access_events) == [1, 2]
+        access_event = next(event for event in access_events
+                            if event.payload["authorization_epoch"] == 2)
         assert access_event.payload["authorization_epoch"] == 2
         assert access_event.payload["topics"] == [
             "campaign:campaign-1",

@@ -18,8 +18,13 @@ def _lock_policy() -> tuple[str, str]:
     return runtime_locks["uv_version"], runtime_locks["dependency_cutoff"]
 
 
-def _compile_command(agent_project: Path) -> list[str]:
+def _compile_command(agent_project: Path, *, profile: str = "default") -> list[str]:
     uv_version, dependency_cutoff = _lock_policy()
+    output = OUTPUT
+    if profile == "dnd":
+        policy = json.loads((ROOT / "component-versions.dnd-beta.json").read_text(encoding="utf-8"))
+        dependency_cutoff = policy["runtime_locks"]["dependency_cutoff"]
+        output = ROOT / "infrastructure" / "agent-dnd-requirements.txt"
     return [
         "uvx",
         "--from",
@@ -48,18 +53,19 @@ def _compile_command(agent_project: Path) -> list[str]:
         "--custom-compile-command",
         "uv run python scripts/lock_agent_supervisor.py",
         "--output-file",
-        str(OUTPUT),
+        str(output),
     ]
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--agent-root", type=Path, default=ROOT.parent / "SagaSmith-agent")
+    parser.add_argument("--profile", choices=["default", "dnd"], default="default")
     args = parser.parse_args()
     agent_project = args.agent_root.resolve() / "pyproject.toml"
     if not agent_project.is_file():
         raise SystemExit(f"Agent pyproject is unavailable: {agent_project}")
-    subprocess.run(_compile_command(agent_project), cwd=ROOT, check=True)
+    subprocess.run(_compile_command(agent_project, profile=args.profile), cwd=ROOT, check=True)
 
 
 if __name__ == "__main__":

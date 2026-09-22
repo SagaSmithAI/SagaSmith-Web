@@ -1,0 +1,40 @@
+{
+  "providers": {
+    "deepseek": {"apiKey": "${DEEPSEEK_API_KEY}", "apiBase": "https://api.deepseek.com"}
+  },
+  "modelPresets": {
+    "hosted": {
+      "provider": "deepseek", "model": "deepseek-flash",
+      "reasoningEffort": "high", "maxTokens": 8192, "contextWindowTokens": 65536
+    },
+    "module": {
+      "provider": "deepseek", "model": "deepseek-flash",
+      "reasoningEffort": "high", "maxTokens": 8192, "contextWindowTokens": 65536
+    }
+  },
+  "agents": {
+    "defaults": {
+      "modelPreset": "hosted", "maxToolIterations": 12,
+      "externalSkillsDirs": [
+        "/opt/sagasmith/skills/hosted",
+        "/opt/sagasmith/skills/dnd/hosted",
+        "/opt/sagasmith/skills/dnd-module-generator"
+      ]
+    }
+  },
+  "api": {"apiKey": "${SAGASMITH_AGENT_INTERNAL_KEY}"},
+  "tools": {
+    "distribution": "hosted",
+    "mcpServers": {
+      "sagasmith-dnd-mcp": {
+        "type": "streamableHttp", "url": "http://dnd-mcp:8767/mcp",
+        "injectPrincipal": true,
+        "delegationSecret": "${SAGASMITH_AUTH_CONTEXT_SECRET}",
+        "targetService": "sagasmith-dnd-mcp", "authorizationAudience": "sagasmith-dnd-mcp",
+        "systemIds": ["dnd5e"], "protocolMode": "2026-07-28",
+        "toolTimeout": 900, "taskTimeout": 900,
+        "exposeResourcesAndPrompts": true, "enabledTools": ["*"]
+      }
+    }
+  }
+}

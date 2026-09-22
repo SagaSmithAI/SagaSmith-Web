@@ -445,6 +445,17 @@ class AgentRun(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class RoomOperation(Base):
+    __tablename__ = "room_operations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("room_turn_jobs.id"), index=True)
+    tool: Mapped[str] = mapped_column(String(160))
+    state: Mapped[str] = mapped_column(String(24))
+    result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
 class RoomTurnJob(Base):
     """Durable Web-host work item for one player action.
 

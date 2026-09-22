@@ -55,6 +55,17 @@ key. An ephemeral speaker with a null or missing `presentation_key` is invalid.
 
 ## Audience and recovery
 
+When the required operation is absent from the current catalog, submit
+`next_task` to request its reviewed subset: `roll` for general checks/dice,
+`combat_support` for Ready, Hide adjudication, HP, concentration, and official
+items, or `action` to resume ordinary actions. Use the fields actually offered
+by the submission schema. The Host keeps the same requester and audience.
+Confirmed operations may precede this continuation. Read `completed_operations`
+and never repeat those writes or pay their action/resource costs again.
+An unknown dispatched outcome must be reconciled using its original key before
+continuing. Do not request another subset or invent a fresh key to retry it.
+Continuation is bounded; finish with a player prompt when more input is needed.
+
 - `public` is visible to all active campaign members.
 - `dm` is visible only to owner/DM roles.
 - `actors` names actor refs; the Host resolves their current private viewers.

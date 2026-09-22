@@ -10,6 +10,12 @@ from sqlalchemy import text
 router = APIRouter(tags=["operations"])
 
 
+@router.get("/api/product")
+def product_configuration(request: Request, response: Response) -> dict[str, object]:
+    response.headers["Cache-Control"] = "no-store"
+    return {"enabled_systems": sorted(request.app.state.settings.enabled_systems)}
+
+
 @router.get("/api/ready")
 async def readiness(request: Request, response: Response) -> dict[str, object]:
     state = request.app.state
@@ -43,9 +49,11 @@ async def _probe_readiness(request: Request) -> dict[str, object]:
         components["database"] = "ready"
 
     probes = {
-        "dnd_mcp": request.app.state.dnd_runtime.probe(),
-        "coc_mcp": request.app.state.coc_runtime.probe(),
-        "narrative_mcp": request.app.state.narrative_runtime.probe(),
+        **{
+            {"dnd5e": "dnd_mcp", "coc7e": "coc_mcp", "narrative": "narrative_mcp"}[name]:
+                runtime.probe()
+            for name, runtime in request.app.state.game_runtimes.items()
+        },
         "agent": request.app.state.agent_runtime.probe(),
         "rate_limiter": request.app.state.rate_limiter.probe(),
     }

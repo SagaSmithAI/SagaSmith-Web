@@ -1,0 +1,32 @@
+# Layer after compose.yaml (and after compose.production.yaml for production).
+services:
+  api:
+    environment:
+      SAGASMITH_ENABLED_SYSTEMS: '["dnd5e"]'
+    depends_on: !override
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      dnd-mcp: {condition: service_healthy}
+      agent: {condition: service_healthy}
+  module-worker:
+    environment:
+      SAGASMITH_ENABLED_SYSTEMS: '["dnd5e"]'
+  coc-mcp: !reset null
+  agent:
+    build:
+      dockerfile: infrastructure/Dockerfile.agent-dnd
+      additional_contexts: !override
+        agent_source: ${SAGASMITH_AGENT_CONTEXT:-https://github.com/SagaSmithAI/SagaSmith-agent.git#092e79a05d4356092d3dd224d679e2bd5a9274d3}
+        dnd_domain: ${SAGASMITH_DND_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-dnd.git#984409a2b3cf05a00693b9e8d5aef20b859c1cab}
+    depends_on: !override
+      dnd-mcp: {condition: service_healthy}
+    environment:
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      SAGASMITH_ENABLED_SYSTEMS: '["dnd5e"]'
+      SAGASMITH_AGENT_TRUSTED_MCP_HOSTS: dnd-mcp
+  dnd-mcp:
+    build:
+      dockerfile: infrastructure/Dockerfile.dnd-beta
+      additional_contexts: !override
+        core: ${SAGASMITH_CORE_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-core.git#9b6b9ed6205f3c5bcb0f10ba74209da71528d766}
+        dnd_domain: ${SAGASMITH_DND_CONTEXT:-https://github.com/SagaSmithAI/sagasmith-dnd.git#984409a2b3cf05a00693b9e8d5aef20b859c1cab}

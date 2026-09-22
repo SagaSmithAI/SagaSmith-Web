@@ -92,7 +92,7 @@ services:
 
   coc-mcp:
     build: !reset null
-    image: ${SAGASMITH_COC_IMAGE:?set SAGASMITH_COC_IMAGE to an image@sha256 digest}
+    image: ${SAGASMITH_COC_IMAGE:-sagasmith-coc-unconfigured:blocked}
     mem_limit: 1g
     cpus: 1.0
     pids_limit: 256

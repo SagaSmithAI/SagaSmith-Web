@@ -79,6 +79,19 @@ def main() -> None:
         pack_import = require(
             client.post(f"/api/packs/{packs[0]['id']}/campaigns/{import_campaign['id']}/import")
         )
+        continued_campaign = dnd_campaigns[0]["id"]
+        before = require(client.get(f"/api/campaigns/{continued_campaign}/room/snapshot"))
+        continuation = require(client.post(
+            f"/api/campaigns/{continued_campaign}/room/messages",
+            headers={"Idempotency-Key": f"restore-continue-{uuid.uuid4().hex}"},
+            json={"content": "Continue after restore: inspect the current characters.",
+                  "mode": "action"},
+        ))
+        if continuation.get("job", {}).get("status") != "succeeded":
+            raise RuntimeError("restored campaign did not complete a fresh room action")
+        after = require(client.get(f"/api/campaigns/{continued_campaign}/room/snapshot"))
+        if after["event_cursor"] <= before["event_cursor"]:
+            raise RuntimeError("restored room did not append new durable events")
     print(
         json.dumps(
             {
@@ -91,6 +104,8 @@ def main() -> None:
                 "audit_events": len(audit),
                 "runtime_phase": runtime.get("result", runtime).get("effective_game_phase"),
                 "pack_import_status": pack_import.get("status"),
+                "continued_room_job": continuation["job"]["id"],
+                "continued_room_status": continuation["job"]["status"],
             }
         )
     )

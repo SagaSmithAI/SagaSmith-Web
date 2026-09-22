@@ -1,5 +1,6 @@
 param([Parameter(Mandatory = $true)][string]$BackupDirectory)
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "backup-hash.ps1")
 $root = [System.IO.Path]::GetFullPath($BackupDirectory)
 $manifestPath = Join-Path $root "manifest.json"
 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw "manifest.json is missing" }
@@ -21,7 +22,7 @@ foreach ($entry in $manifest.files) {
     }
     $file = Get-Item -LiteralPath $candidate -ErrorAction Stop
     if ($file.Length -ne $entry.size_bytes) { throw "Backup size mismatch: $($entry.name)" }
-    $digest = (Get-FileHash -Algorithm SHA256 -LiteralPath $candidate).Hash.ToLower()
+    $digest = Get-BackupSha256 -LiteralPath $candidate
     if ($digest -ne $entry.sha256) { throw "Backup checksum mismatch: $($entry.name)" }
 }
 Write-Host "Backup verified: $root"

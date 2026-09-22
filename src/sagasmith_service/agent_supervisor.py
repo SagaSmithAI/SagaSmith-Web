@@ -136,6 +136,14 @@ class WorkspaceSnapshot:
     unknown_bytes: int
 
 
+class WorkerResponseError(RuntimeError):
+    def __init__(self, status_code: int, detail: dict[str, Any]) -> None:
+        super().__init__(f"Agent worker returned HTTP {status_code}")
+        self.status_code = status_code
+        fields = ("code", "retryable", "message", "usage", "model")
+        self.detail = {key: detail[key] for key in fields if key in detail}
+
+
 class WorkerCapacityError(RuntimeError):
     """Raised when bounded worker capacity has no safe LRU eviction candidate."""
 
@@ -1000,7 +1008,12 @@ class WorkerManager:
                 json={**payload, "session_id": key, "stream": False},
             )
             if response.status_code >= 400:
-                raise RuntimeError(f"Agent worker returned HTTP {response.status_code}")
+                try:
+                    detail = response.json().get("detail")
+                except (ValueError, AttributeError):
+                    detail = None
+                raise WorkerResponseError(response.status_code,
+                                          detail if isinstance(detail, dict) else {})
             value = response.json()
             if not isinstance(value, dict):
                 raise RuntimeError("Agent worker returned invalid JSON")
@@ -1189,6 +1202,8 @@ def create_supervisor_app(manager: WorkerManager, internal_key: str) -> FastAPI:
             )
         except WorkerCapacityError as exc:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+        except WorkerResponseError as exc:
+            raise HTTPException(exc.status_code, exc.detail) from exc
         except RuntimeError as exc:
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
 
@@ -1205,6 +1220,13 @@ def main() -> None:
         raise RuntimeError("SAGASMITH_WORKER_SERVICE_TOKEN must contain at least 32 bytes")
     child_token = worker_service_token if boundary_mode == "modern" else internal_key
     config_path = os.environ.get("SAGASMITH_AGENT_CONFIG", "/config/agent-config.json")
+    enabled_systems = json.loads(os.environ.get(
+        "SAGASMITH_ENABLED_SYSTEMS", '["dnd5e","coc7e","narrative"]'
+    ))
+    if not isinstance(enabled_systems, list) or not enabled_systems or any(
+        item not in ("dnd5e", "coc7e", "narrative") for item in enabled_systems
+    ):
+        raise RuntimeError("invalid SAGASMITH_ENABLED_SYSTEMS")
     manager = WorkerManager(
         config_path=config_path,
         workspace_root=os.environ.get("SAGASMITH_AGENT_WORKSPACES", "/workspaces"),
@@ -1223,7 +1245,8 @@ def main() -> None:
         workspace_max_bytes=int(
             os.environ.get("SAGASMITH_AGENT_WORKSPACE_MAX_BYTES", "21474836480")
         ),
-        narrative_control=NarrativeControlClient.from_agent_config(config_path),
+        narrative_control=(NarrativeControlClient.from_agent_config(config_path)
+                           if "narrative" in enabled_systems else None),
     )
     uvicorn.run(
         create_supervisor_app(manager, internal_key),

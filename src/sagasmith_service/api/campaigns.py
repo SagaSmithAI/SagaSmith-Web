@@ -83,6 +83,7 @@ async def create_campaign(
     session: DbSession,
     idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=8, max_length=160)],
 ) -> CampaignView:
+    runtime = _runtime(request, session, system_id=payload.system_id)
     existing = session.scalar(
         select(CampaignProjection).where(
             CampaignProjection.owner_user_id == user.id,
@@ -93,7 +94,7 @@ async def create_campaign(
     if existing is not None:
         return CampaignView.model_validate(existing)
     try:
-        receipt = await _runtime(request, session, system_id=payload.system_id).create_campaign(
+        receipt = await runtime.create_campaign(
             name=payload.name,
             description=payload.description,
             edition=payload.edition,

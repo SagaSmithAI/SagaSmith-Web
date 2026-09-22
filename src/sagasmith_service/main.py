@@ -194,10 +194,14 @@ def create_app(
             timeout=httpx.Timeout(settings.agent_completion_timeout_seconds, connect=10),
         ),
     )
-    app.state.game_runtimes = {
+    all_runtimes = {
         "dnd5e": app.state.dnd_runtime,
         "coc7e": app.state.coc_runtime,
         "narrative": app.state.narrative_runtime,
+    }
+    app.state.game_runtimes = {
+        name: runtime for name, runtime in all_runtimes.items()
+        if name in settings.enabled_systems
     }
     app.state.agent_runtime = agent_runtime or HttpAgentRuntime(
         settings.agent_api_url,

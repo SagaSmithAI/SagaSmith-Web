@@ -1,0 +1,16 @@
+FROM python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libmagic1 poppler-utils tesseract-ocr && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+COPY --from=core . ./sagasmith-core
+COPY --from=dnd_domain . ./sagasmith-dnd
+RUN pip install --no-cache-dir uv==0.11.25 && \
+    cd /build/sagasmith-dnd && uv sync --frozen --all-packages --no-dev --no-editable && uv pip check
+RUN useradd -m -u 10001 sagasmith && mkdir -p /state /srv/sagasmith/exchange && \
+    chown -R sagasmith:sagasmith /state /srv/sagasmith
+USER sagasmith
+ENV PATH="/build/sagasmith-dnd/.venv/bin:$PATH"
+EXPOSE 8767
+CMD ["sagasmith-dnd-mcp"]

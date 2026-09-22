@@ -230,12 +230,23 @@ class Handler(BaseHTTPRequestHandler):
         else:
             system_id = "dnd5e"
         target_tool_id = "actor_query" if system_id == "narrative" else "character_query"
+        combat_fixture = re.search(r"DND_COMBAT_ACCEPTANCE=(\{[^\n]+\})", task_context)
+        combat_arguments = json.loads(combat_fixture.group(1)) if combat_fixture else None
+        if combat_arguments:
+            target_tool_id = "combat_check"
         marker = {"coc7e": "coc", "narrative": "narrative"}.get(system_id, "dnd")
         selected_tools = {name for name in tool_names if marker in name.casefold()}
         exposure_name = next((name for name in selected_tools if name.endswith("_exposure")), "")
         query_name = next(
             (name for name in selected_tools if name.endswith(f"_{target_tool_id}")), ""
         )
+        if combat_arguments and query_name:
+            definition = next((tool.get("function") or tool for tool in tool_definitions
+                               if (tool.get("function") or tool).get("name") == query_name), {})
+            properties = (definition.get("parameters") or {}).get("properties") or {}
+            # Hosted authority fields are injected by Agent, never authored by the model.
+            combat_arguments = {key: value for key, value in combat_arguments.items()
+                                if key in properties}
         if (
             authenticated
             and campaign_match
@@ -267,7 +278,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._tool_call(
                     query_name,
                     (
-                        trusted_arguments
+                        combat_arguments
+                        if combat_arguments
+                        else trusted_arguments
                         if system_id == "narrative"
                         else {
                             "action": "list",
@@ -322,6 +335,15 @@ class Handler(BaseHTTPRequestHandler):
         native_call_completed = any(
             str(message.get("name", "")).endswith(f"_{target_tool_id}") for message in tool_messages
         )
+        if combat_fixture and native_call_completed:
+            end_name = next((name for name in selected_tools
+                             if name.endswith("_combat_end_turn")), "")
+            ended = any(str(message.get("name", "")).endswith("_combat_end_turn")
+                        for message in tool_messages)
+            if end_name and not ended:
+                fixture = json.loads(combat_fixture.group(1))
+                self._tool_call(end_name, {"actor_id": fixture["actor_id"]}, "combat-end-turn")
+                return
         submit_name = next((name for name in tool_names if name == "submit_room_turn"), "")
         submit_definition = next(
             (

@@ -67,6 +67,17 @@ def test_production_preflight_accepts_digest_pinned_s3_beta() -> None:
     assert validate(_valid_values()) == []
 
 
+def test_dnd_flash_preflight_needs_only_selected_provider_and_domain() -> None:
+    values = _valid_values()
+    values.update(SAGASMITH_ENABLED_SYSTEMS='["dnd5e"]',
+                  SAGASMITH_MODEL_PROFILE="dnd-flash", DEEPSEEK_API_KEY="test-provider-key")
+    del values["OPENAI_API_KEY"]
+    del values["SAGASMITH_COC_IMAGE"]
+    assert validate(values) == []
+    values["DEEPSEEK_API_KEY"] = ""
+    assert "DEEPSEEK_API_KEY must be supplied" in validate(values)
+
+
 def test_production_preflight_rejects_tags_and_bucket_creation() -> None:
     values = _valid_values()
     values["SAGASMITH_WEB_IMAGE"] = "ghcr.io/example/web:latest"

@@ -34,6 +34,15 @@ jobs:
           prune-cache: true
       - run: uv sync --frozen --all-extras
       - run: mkdir -p secrets && cp tests/e2e/agent-config.json secrets/agent-config.json
+      - name: Start source fixture dependencies
+        run: >-
+          docker compose -p sagasmith-recovery-source
+          -f compose.yaml -f compose.e2e.yaml
+          up -d --build --wait --wait-timeout 300 postgres minio
+      - name: Migrate and provision the private recovery fixture
+        run: |
+          docker compose -p sagasmith-recovery-source -f compose.yaml -f compose.e2e.yaml run --build --no-deps --rm --entrypoint alembic api upgrade head
+          docker compose -p sagasmith-recovery-source -f compose.yaml -f compose.e2e.yaml run --no-deps --rm --entrypoint python api /tmp/container_e2e_fixture.py
       - name: Start source stack
         run: >-
           docker compose -p sagasmith-recovery-source

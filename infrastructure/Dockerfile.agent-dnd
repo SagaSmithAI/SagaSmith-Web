@@ -1,0 +1,22 @@
+FROM python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a
+LABEL org.sagasmith.distribution="hosted-worker-dnd"
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 NANOBOT_SKIP_WEBUI_BUILD=1
+WORKDIR /build
+COPY --from=agent_source . ./SagaSmith-agent
+COPY --from=dnd_domain ./skills/hosted /opt/sagasmith/skills/dnd/hosted
+COPY --from=dnd_domain ./skills/dnd-module-generator /opt/sagasmith/skills/dnd-module-generator
+COPY agent-skills /opt/sagasmith/skills/hosted
+RUN mkdir ./SagaSmith-service
+COPY pyproject.toml uv.lock README.md LICENSE ./SagaSmith-service/
+COPY infrastructure/agent-dnd-requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir uv==0.11.25 && \
+    uv pip install --system --require-hashes -r /tmp/requirements.txt
+COPY src ./SagaSmith-service/src
+RUN uv pip install --system --no-deps /build/SagaSmith-agent /build/SagaSmith-service && \
+    uv pip check --system
+RUN cd / && python -m nanobot.apps.hosted_audit --prune && rm -rf /build/SagaSmith-agent
+RUN useradd -m -u 10002 supervisor && mkdir -p /workspaces /config && \
+    chown -R supervisor:supervisor /workspaces /config /opt/sagasmith/skills
+USER supervisor
+EXPOSE 8910
+CMD ["sagasmith-agent-supervisor"]

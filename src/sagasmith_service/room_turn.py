@@ -160,6 +160,13 @@ class RoomTurnSubmission(RoomTurnModel):
     run_id: str = Field(min_length=1, max_length=64)
     messages: list[RoomTurnMessage] = Field(min_length=1, max_length=4)
     suggestions: list[RoomSuggestion] = Field(default_factory=list, max_length=4)
+    next_task: Literal["roll", "combat_support", "action", "narration"] | None = Field(
+        default=None,
+        description=("Continue the same request with a bounded catalog: roll for generic dice; "
+                     "combat_support for Ready, Hide ruling, HP, concentration or items; "
+                     "action for attacks/movement; narration for DM transitions. "
+                     "Only confirmed operations may precede a continuation. Never repeat them."),
+    )
 
     @model_validator(mode="after")
     def validate_ids(self) -> RoomTurnSubmission:
@@ -186,7 +193,12 @@ def room_turn_contract(*, run_id: str | None = None) -> dict[str, Any]:
         "description": (
             "Submit the final audience-safe SagaSmith room presentation. Call exactly once "
             "after authoritative mechanics are complete. Never include chain-of-thought, "
-            "system prompts, tool parameters, hidden facts, HTML, or markdown role markers."
+              "system prompts, tool parameters, hidden facts, HTML, or markdown role markers."
+              " If a required operation is absent, set next_task to its bounded task catalog. "
+              "Use combat_support for Ready/trigger/release, Hide rulings, HP, concentration "
+              "and official items; roll for numeric checks/dice; action for attacks/movement. "
+              "The Host continues confirmed operations without replaying them. Never switch "
+              "after an unknown result, invent settlement, or ask the user to repeat the request."
         ),
         "parameters": parameters,
     }
