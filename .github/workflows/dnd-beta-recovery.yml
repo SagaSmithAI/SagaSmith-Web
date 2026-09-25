@@ -63,7 +63,7 @@ jobs:
       - name: Diagnostics
         if: failure()
         run: docker compose logs --no-color --tail 150
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: dnd-beta-recovery-evidence
