@@ -5,7 +5,7 @@ import threading
 from http.server import ThreadingHTTPServer
 
 import httpx
-from e2e.mock_openai import Handler
+from e2e.mock_openai import Handler, _extract_combat_fixture
 
 
 def completion(content: str) -> dict:
@@ -37,6 +37,79 @@ def request_completion(payload: dict) -> dict:
 
     response.raise_for_status()
     return response.json()
+
+
+def test_combat_acceptance_fixture_parses_nested_json() -> None:
+    expected = {"attack": {"target": "goblin", "options": ["advantage"]}}
+    task_context = f"Previous message\nDND_COMBAT_ACCEPTANCE={json.dumps(expected)}\nNext message"
+
+    assert _extract_combat_fixture(task_context) == expected
+
+
+def test_combat_fixture_keeps_the_followup_turn_completion() -> None:
+    fixture = {"actor_id": "actor-1", "target_id": "goblin-1", "action": "attack"}
+    combat_tool = "mcp_sagasmith-dnd-mcp_combat_check"
+    end_turn_tool = "mcp_sagasmith-dnd-mcp_combat_end_turn"
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": combat_tool,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "actor_id": {"type": "string"},
+                        "target_id": {"type": "string"},
+                        "action": {"type": "string"},
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": end_turn_tool,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"actor_id": {"type": "string"}},
+                },
+            },
+        },
+    ]
+    messages = [
+        {
+            "role": "user",
+            "content": f"DND_COMBAT_ACCEPTANCE={json.dumps(fixture)}",
+        }
+    ]
+
+    first = request_completion({"messages": messages, "tools": tools})
+    first_call = first["choices"][0]["message"]["tool_calls"][0]
+    assert first_call["function"]["name"] == combat_tool
+    assert json.loads(first_call["function"]["arguments"]) == fixture
+
+    messages.extend(
+        [
+            first["choices"][0]["message"],
+            {
+                "role": "tool",
+                "tool_call_id": first_call["id"],
+                "name": combat_tool,
+                "content": "{}",
+            },
+        ]
+    )
+    second = request_completion({"messages": messages, "tools": tools})
+    second_call = second["choices"][0]["message"]["tool_calls"][0]
+    assert second_call["function"]["name"] == end_turn_tool
+    assert json.loads(second_call["function"]["arguments"]) == {"actor_id": "actor-1"}
+
+
+def test_combat_acceptance_fixture_ignores_oversized_payload() -> None:
+    oversized_fixture = {"payload": "x" * 17_000}
+    task_context = f"DND_COMBAT_ACCEPTANCE={json.dumps(oversized_fixture)}"
+
+    assert _extract_combat_fixture(task_context) is None
 
 
 def test_modern_module_task_returns_strict_json_without_legacy_auth_prompt() -> None:

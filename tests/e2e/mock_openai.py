@@ -5,6 +5,35 @@ import re
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+_COMBAT_FIXTURE_MARKER = "DND_COMBAT_ACCEPTANCE="
+_MAX_COMBAT_FIXTURE_LENGTH = 16_384
+
+
+def _extract_combat_fixture(task_context: str) -> dict | None:
+    line_start = 0
+    while line_start <= len(task_context):
+        line_end = task_context.find("\n", line_start)
+        if line_end < 0:
+            line_end = len(task_context)
+
+        marker_index = task_context.find(_COMBAT_FIXTURE_MARKER, line_start, line_end)
+        while marker_index >= 0:
+            json_start = marker_index + len(_COMBAT_FIXTURE_MARKER)
+            if json_start < line_end and task_context[json_start] == "{":
+                json_end = task_context.rfind("}", json_start, line_end)
+                if json_end < 0:
+                    break
+                if json_end - json_start + 1 > _MAX_COMBAT_FIXTURE_LENGTH:
+                    return None
+                return json.loads(task_context[json_start : json_end + 1])
+            marker_index = task_context.find(_COMBAT_FIXTURE_MARKER, json_start, line_end)
+
+        if line_end == len(task_context):
+            break
+        line_start = line_end + 1
+
+    return None
+
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -230,8 +259,8 @@ class Handler(BaseHTTPRequestHandler):
         else:
             system_id = "dnd5e"
         target_tool_id = "actor_query" if system_id == "narrative" else "character_query"
-        combat_fixture = re.search(r"DND_COMBAT_ACCEPTANCE=(\{[^\n]+\})", task_context)
-        combat_arguments = json.loads(combat_fixture.group(1)) if combat_fixture else None
+        combat_fixture = _extract_combat_fixture(task_context)
+        combat_arguments = combat_fixture
         if combat_arguments:
             target_tool_id = "combat_check"
         marker = {"coc7e": "coc", "narrative": "narrative"}.get(system_id, "dnd")
@@ -341,8 +370,11 @@ class Handler(BaseHTTPRequestHandler):
             ended = any(str(message.get("name", "")).endswith("_combat_end_turn")
                         for message in tool_messages)
             if end_name and not ended:
-                fixture = json.loads(combat_fixture.group(1))
-                self._tool_call(end_name, {"actor_id": fixture["actor_id"]}, "combat-end-turn")
+                self._tool_call(
+                    end_name,
+                    {"actor_id": combat_fixture["actor_id"]},
+                    "combat-end-turn",
+                )
                 return
         submit_name = next((name for name in tool_names if name == "submit_room_turn"), "")
         submit_definition = next(
